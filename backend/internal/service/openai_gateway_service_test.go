@@ -2504,6 +2504,78 @@ func TestOpenAIStreamingPassthroughResponseFailedAfterOutputReturnsPartialMetada
 	require.Equal(t, 2, result.usage.OutputTokens)
 }
 
+func TestOpenAIStreamingSynthesizesIncompleteTerminalAfterSemanticEOF(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(strings.NewReader(strings.Join([]string{
+			`data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_synth","status":"in_progress"}}`,
+			`data: {"type":"response.output_text.delta","sequence_number":1,"response_id":"resp_synth","delta":"partial"}`,
+		}, "\n"))),
+		Header: http.Header{},
+	}
+	result, err := svc.handleStreamingResponse(c.Request.Context(), resp, c, &Account{ID: 1, Platform: PlatformOpenAI, Name: "acc"}, time.Now(), "gpt-6-astra", "gpt-6-astra")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, "premature_eof", result.responsesProtocolStatus)
+	require.Equal(t, "stream_terminated", result.responsesIncompleteReason)
+	require.True(t, IsResponseCommitted(c))
+	body := rec.Body.String()
+	require.Equal(t, 1, strings.Count(body, "event: response.incomplete"))
+	require.NotContains(t, body, "event: response.failed")
+	terminal := strings.TrimSpace(body[strings.LastIndex(body, "data: ")+len("data: "):])
+	require.Equal(t, int64(2), gjson.Get(terminal, "sequence_number").Int(), "terminal=%s body=%s", terminal, body)
+}
+
+func TestOpenAIStreamingPassthroughSynthesizesIncompleteTerminalAfterSemanticEOF(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(strings.NewReader(strings.Join([]string{
+			`data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_passthrough","status":"in_progress"}}`,
+			`data: {"type":"response.output_text.delta","sequence_number":1,"response_id":"resp_passthrough","delta":"partial"}`,
+		}, "\n"))),
+		Header: http.Header{},
+	}
+	result, err := svc.handleStreamingResponsePassthrough(c.Request.Context(), resp, c, &Account{ID: 1, Platform: PlatformOpenAI, Name: "acc"}, time.Now(), "gpt-6-astra", "gpt-6-astra")
+	require.Error(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, "premature_eof", result.protocolStatus)
+	require.Equal(t, "stream_terminated", result.incompleteReason)
+	require.True(t, IsResponseCommitted(c))
+	body := rec.Body.String()
+	require.Equal(t, 1, strings.Count(body, "event: response.incomplete"))
+	require.NotContains(t, body, "event: response.failed")
+	terminal := strings.TrimSpace(body[strings.LastIndex(body, "data: ")+len("data: "):])
+	require.Equal(t, int64(2), gjson.Get(terminal, "sequence_number").Int(), "terminal=%s body=%s", terminal, body)
+}
+
+func TestOpenAICodexMetadataEOFRemainsEligibleForPreOutputFailover(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(strings.NewReader(`data: {"type":"codex.response.metadata","sequence_number":2}
+`)),
+		Header: http.Header{},
+	}
+	_, err := svc.handleStreamingResponse(c.Request.Context(), resp, c, &Account{ID: 1, Platform: PlatformOpenAI, Name: "acc"}, time.Now(), "gpt-6-astra", "gpt-6-astra")
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.NotContains(t, rec.Body.String(), "response.incomplete")
+}
+
 func TestOpenAIStreamingPassthroughPostOutputDisconnectQuarantinesSharedProxy(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	proxyID := int64(4698)

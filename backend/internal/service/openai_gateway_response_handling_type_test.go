@@ -70,6 +70,11 @@ func TestClassifyOpenAIResponsesOutcome(t *testing.T) {
 	}
 }
 
+func TestOpenAICodexResponseMetadataIsPreamble(t *testing.T) {
+	require.True(t, openAIStreamEventIsPreamble("codex.response.metadata"))
+	require.False(t, openAIStreamDataStartsClientOutput(`{"type":"codex.response.metadata","sequence_number":2}`, "codex.response.metadata"))
+}
+
 var (
 	benchmarkOpenAIResponseSSEEventTypeSink string
 	benchmarkOpenAIResponseSSETerminalSink  bool

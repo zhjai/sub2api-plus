@@ -1220,6 +1220,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		imageCount := 0
 		searchCount := 0
 		var imageOutputSizes []string
+		var streamOutcome *openaiStreamingResult
 		if reqStream {
 			streamResult, err := s.handleStreamingResponseWithReasoning(ctx, resp, c, account, startTime, originalModel, upstreamModel, reasoningEffortValue)
 			if err != nil {
@@ -1262,6 +1263,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				return nil, err
 			}
 			usage = streamResult.usage
+			streamOutcome = streamResult
 			firstTokenMs = streamResult.firstTokenMs
 			responseID = strings.TrimSpace(streamResult.responseID)
 			imageCount = streamResult.imageCount
@@ -1324,6 +1326,15 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			OpenAIWSMode:                  false,
 			Duration:                      time.Since(startTime),
 			FirstTokenMs:                  firstTokenMs,
+		}
+		if streamOutcome != nil {
+			forwardResult.ResponsesOutcomeObserved = streamOutcome.responsesOutcomeObserved
+			forwardResult.ResponsesProtocolStatus = streamOutcome.responsesProtocolStatus
+			forwardResult.ResponsesStatus = streamOutcome.responsesStatus
+			forwardResult.ResponsesIncompleteReason = streamOutcome.responsesIncompleteReason
+			forwardResult.ResponsesMeaningfulOutput = streamOutcome.responsesMeaningfulOutput
+			forwardResult.ResponsesToolCallForwarded = streamOutcome.responsesToolCallForwarded
+			forwardResult.UpstreamTerminalEvent = streamOutcome.responsesTerminalEvent
 		}
 		if imageCount > 0 {
 			forwardResult.ImageCount = imageCount

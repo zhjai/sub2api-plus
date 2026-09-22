@@ -1158,7 +1158,7 @@ func openAIStreamClientOutputStarted(c *gin.Context, localStarted bool) bool {
 
 func openAIStreamEventIsPreamble(eventType string) bool {
 	switch strings.TrimSpace(eventType) {
-	case "response.created", "response.in_progress":
+	case "response.created", "response.in_progress", "codex.response.metadata":
 		return true
 	default:
 		return false
@@ -1954,6 +1954,8 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	incompleteReason := ""
 	semanticOutputSeen := false
 	toolCallForwarded := false
+	lastSequenceNumber := int64(0)
+	sawSequenceNumber := false
 	capacityFailoverSuppressedLogged := false
 	failedMessage := ""
 	clientOutputStarted := false
@@ -2046,6 +2048,37 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		flushPending = true
 		flushPendingOutput()
 	}
+	ensureResponsesStreamTerminatedTerminal := func() bool {
+		if account == nil || account.Platform != PlatformOpenAI || (!semanticOutputSeen && !toolCallForwarded) ||
+			clientDisconnected || sawTerminalEvent || sawDone || sawFailedEvent || failureDelivered || strings.TrimSpace(responseID) == "" {
+			return false
+		}
+		if !writePendingLines() {
+			return false
+		}
+		sequenceNumber := int64(0)
+		if sawSequenceNumber {
+			sequenceNumber = lastSequenceNumber + 1
+		}
+		payload := buildOpenAIResponseIncompleteSSE(responseID, originalModel, sequenceNumber)
+		if payload == "" {
+			return false
+		}
+		if _, err := fmt.Fprint(w, payload); err != nil {
+			clientDisconnected = true
+			return false
+		}
+		clientOutputStarted = true
+		failureDelivered = true
+		flushPending = true
+		flushPendingOutput()
+		protocolStatus = "premature_eof"
+		responseStatus = "incomplete"
+		incompleteReason = openAIResponsesStreamTerminatedReason
+		terminalEventType = "response.incomplete"
+		MarkResponseCommitted(c)
+		return true
+	}
 
 	scanner := bufio.NewScanner(resp.Body)
 	maxLineSize := defaultMaxLineSize
@@ -2088,6 +2121,12 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			dataBytes := []byte(data)
 			trimmedData := strings.TrimSpace(data)
 			rawEventType := effectiveOpenAISSEEventType(dataBytes, pendingSSEEventType)
+			if sequence := gjson.GetBytes(dataBytes, "sequence_number"); sequence.Exists() {
+				sawSequenceNumber = true
+				if value := sequence.Int(); value > lastSequenceNumber {
+					lastSequenceNumber = value
+				}
+			}
 			observer.ObserveOpenAI(dataBytes, rawEventType)
 			if needModelReplace {
 				line = s.replaceModelInSSELine(line, mappedModel, originalModel)
@@ -2342,6 +2381,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		protocolStatus = "premature_eof"
 		terminalEventType = "premature_eof"
 		s.recordOpenAIProxyStreamDisconnect(account, err, upstreamRequestID)
+		if ensureResponsesStreamTerminatedTerminal() {
+			return resultWithUsage(), fmt.Errorf("stream read error: %w", err)
+		}
 		logger.LegacyPrintf("service.openai_gateway",
 			"[OpenAI passthrough] 流读取异常中断: account=%d request_id=%s err=%v",
 			account.ID,
@@ -2370,6 +2412,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		protocolStatus = "premature_eof"
 		terminalEventType = "premature_eof"
 		s.recordOpenAIProxyStreamDisconnect(account, errors.New("stream ended before terminal event"), upstreamRequestID)
+		if ensureResponsesStreamTerminatedTerminal() {
+			return resultWithUsage(), errors.New("stream usage incomplete: missing terminal event")
+		}
 		return resultWithUsage(), errors.New("stream usage incomplete: missing terminal event")
 	}
 	if (sawDone || sawTerminalEvent) && !sawFailedEvent {

@@ -27,12 +27,19 @@ import (
 
 // openaiStreamingResult streaming response result
 type openaiStreamingResult struct {
-	usage            *OpenAIUsage
-	firstTokenMs     *int
-	responseID       string
-	imageCount       int
-	imageOutputSizes []string
-	searchCount      int
+	usage                      *OpenAIUsage
+	firstTokenMs               *int
+	responseID                 string
+	imageCount                 int
+	imageOutputSizes           []string
+	searchCount                int
+	responsesOutcomeObserved   bool
+	responsesTerminalEvent     string
+	responsesProtocolStatus    string
+	responsesStatus            string
+	responsesIncompleteReason  string
+	responsesMeaningfulOutput  bool
+	responsesToolCallForwarded bool
 }
 
 type openaiNonStreamingResult struct {
@@ -250,6 +257,12 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	sawResponseFailed := false
 	terminalEventType := ""
 	responsesSemanticOutputSeen := false
+	responsesToolCallForwarded := false
+	responsesProtocolStatus := ""
+	responsesStatus := ""
+	responsesIncompleteReason := ""
+	lastSequenceNumber := int64(0)
+	sawSequenceNumber := false
 	capacityFailoverSuppressedLogged := false
 	failedMessage := ""
 	clientOutputStarted := false
@@ -347,12 +360,19 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	streamSearchSeen := make(map[string]struct{})
 	resultWithUsage := func() *openaiStreamingResult {
 		return &openaiStreamingResult{
-			usage:            usage,
-			firstTokenMs:     firstTokenMs,
-			responseID:       responseID,
-			imageCount:       imageCounter.Count(),
-			imageOutputSizes: imageCounter.Sizes(),
-			searchCount:      searchCounter,
+			usage:                      usage,
+			firstTokenMs:               firstTokenMs,
+			responseID:                 responseID,
+			imageCount:                 imageCounter.Count(),
+			imageOutputSizes:           imageCounter.Sizes(),
+			searchCount:                searchCounter,
+			responsesOutcomeObserved:   responsesProtocolStatus != "",
+			responsesTerminalEvent:     terminalEventType,
+			responsesProtocolStatus:    responsesProtocolStatus,
+			responsesStatus:            responsesStatus,
+			responsesIncompleteReason:  responsesIncompleteReason,
+			responsesMeaningfulOutput:  responsesSemanticOutputSeen,
+			responsesToolCallForwarded: responsesToolCallForwarded,
 		}
 	}
 	flushPending := func(disconnectMessage string) {
@@ -366,6 +386,41 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		}
 		clientOutputStarted = true
 		lastDownstreamWriteAt = time.Now()
+	}
+	synthesizeResponsesStreamTerminatedTerminal := func() bool {
+		if account == nil || account.Platform != PlatformOpenAI || !responsesSemanticOutputSeen ||
+			clientDisconnected || sawTerminalEvent || failureDelivered || strings.TrimSpace(responseID) == "" {
+			return false
+		}
+		if stageFirstOutput && eventInProgress {
+			completeGuardedEvent(true)
+		}
+		flushPending("Client disconnected before synthetic Responses terminal")
+		sequenceNumber := int64(0)
+		if sawSequenceNumber {
+			sequenceNumber = lastSequenceNumber + 1
+		}
+		payload := buildOpenAIResponseIncompleteSSE(responseID, originalModel, sequenceNumber)
+		if payload == "" {
+			return false
+		}
+		applyAttemptResponseHeaders()
+		if _, err := writePendingString(payload); err != nil {
+			clientDisconnected = true
+			return false
+		}
+		if err := flushBuffered(); err != nil {
+			clientDisconnected = true
+			return false
+		}
+		clientOutputStarted = true
+		lastDownstreamWriteAt = time.Now()
+		responsesProtocolStatus = "premature_eof"
+		responsesStatus = "incomplete"
+		responsesIncompleteReason = openAIResponsesStreamTerminatedReason
+		terminalEventType = "response.incomplete"
+		MarkResponseCommitted(c)
+		return true
 	}
 	finalizeStream := func() (*openaiStreamingResult, error) {
 		if stageFirstOutput && eventInProgress {
@@ -384,7 +439,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				failureDelivered = true
 			}
 		}
-		if sawTerminalEvent && !sawFailedEvent {
+		if sawTerminalEvent && !sawFailedEvent &&
+			(responsesProtocolStatus == "completed" ||
+				(responsesProtocolStatus == "incomplete" && strings.EqualFold(responsesIncompleteReason, "max_output_tokens"))) {
 			s.clearOpenAIProxyStreamDisconnect(account)
 		}
 		if !sawTerminalEvent && !openAIStreamClientOutputStarted(c, clientOutputStarted) && !eventShouldFlush {
@@ -397,13 +454,17 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				"OpenAI stream ended before a terminal event",
 			)
 		}
-		flushPending("Client disconnected during final flush, returning collected usage")
 		if !sawTerminalEvent {
 			if openAIStreamClientOutputStarted(c, clientOutputStarted) && !clientDisconnected {
 				s.recordOpenAIProxyStreamDisconnect(account, errors.New("stream ended before terminal event"), upstreamRequestID)
 			}
+			if synthesizeResponsesStreamTerminatedTerminal() {
+				return resultWithUsage(), nil
+			}
+			flushPending("Client disconnected during final flush, returning collected usage")
 			return resultWithUsage(), fmt.Errorf("stream usage incomplete: missing terminal event")
 		}
+		flushPending("Client disconnected during final flush, returning collected usage")
 		if sawFailedEvent {
 			return resultWithUsage(), fmt.Errorf("upstream response failed: %s", failedMessage)
 		}
@@ -465,6 +526,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			return resultWithUsage(), fmt.Errorf("stream usage incomplete after disconnect: %w", scanErr), true
 		}
 		s.recordOpenAIProxyStreamDisconnect(account, scanErr, upstreamRequestID)
+		if synthesizeResponsesStreamTerminatedTerminal() {
+			return resultWithUsage(), nil, true
+		}
 		sendErrorEvent("stream_read_error")
 		return resultWithUsage(), fmt.Errorf("stream read error: %w", scanErr), true
 	}
@@ -481,6 +545,12 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		if data, ok := extractOpenAISSEDataLine(line); ok {
 			dataBytes := []byte(data)
 			eventType := effectiveOpenAISSEEventType(dataBytes, pendingSSEEventType)
+			if sequence := gjson.GetBytes(dataBytes, "sequence_number"); sequence.Exists() {
+				sawSequenceNumber = true
+				if value := sequence.Int(); value > lastSequenceNumber {
+					lastSequenceNumber = value
+				}
+			}
 			if codexFailureTerminal && sawBareError && !sawResponseFailed &&
 				(eventType == "response.completed" || eventType == "response.done") {
 				// A later successful terminal is authoritative over a pending bare
@@ -501,6 +571,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			if openAIStreamEventIsTerminalWithType(data, eventType) {
 				sawTerminalEvent = true
 				terminalEventType = eventType
+				responsesProtocolStatus, responsesStatus, responsesIncompleteReason = classifyOpenAIResponsesOutcome(eventType, dataBytes)
 				if strings.TrimSpace(data) == "[DONE]" {
 					terminalEventType = "[DONE]"
 				}
@@ -624,6 +695,11 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				streamImageOutputs = append(streamImageOutputs, imageOutput)
 			}
 			streamDoneItems.Observe(dataBytes)
+			itemType := strings.TrimSpace(gjson.GetBytes(dataBytes, "item.type").String())
+			if strings.Contains(eventType, "tool_call") || strings.Contains(eventType, "function_call") ||
+				itemType == "function_call" || itemType == "custom_tool_call" || itemType == "tool_search_call" {
+				responsesToolCallForwarded = true
+			}
 			if responsesStreamEventMayContributeToOutput(eventType) {
 				var streamEvent apicompat.ResponsesStreamEvent
 				if err := json.Unmarshal(dataBytes, &streamEvent); err == nil {
@@ -1802,6 +1878,37 @@ func extractOpenAISSEErrorMessage(payload []byte) string {
 		}
 	}
 	return sanitizeUpstreamErrorMessage(strings.TrimSpace(extractUpstreamErrorMessage(payload)))
+}
+
+const openAIResponsesStreamTerminatedReason = "stream_terminated"
+
+func buildOpenAIResponseIncompleteSSE(responseID, model string, sequenceNumber int64) string {
+	responseID = strings.TrimSpace(responseID)
+	if responseID == "" {
+		return ""
+	}
+	response := gin.H{
+		"id":                 responseID,
+		"object":             "response",
+		"created_at":         time.Now().Unix(),
+		"status":             "incomplete",
+		"incomplete_details": gin.H{"reason": openAIResponsesStreamTerminatedReason},
+	}
+	if model = strings.TrimSpace(model); model != "" {
+		response["model"] = model
+	}
+	event := gin.H{
+		"type":            "response.incomplete",
+		"sequence_number": sequenceNumber,
+		"response":        response,
+	}
+	// Responses clients in this deployment require the field even when the
+	// upstream omitted sequence numbers; zero is the explicit unknown value.
+	payload, err := marshalOpenAIUpstreamJSON(event)
+	if err != nil {
+		payload = []byte(`{"type":"response.incomplete","sequence_number":0,"response":{"id":"` + responseID + `","object":"response","created_at":0,"status":"incomplete","incomplete_details":{"reason":"stream_terminated"}}}`)
+	}
+	return "event: response.incomplete\ndata: " + string(payload) + "\n\n"
 }
 
 func buildOpenAIResponseFailedSSE(responseID, model string, source []byte, fallbackMessage string) string {
