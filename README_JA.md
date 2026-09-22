@@ -27,6 +27,14 @@
 - **📖 免責事項**：本プロジェクトは技術的な学習および研究の目的でのみ提供されます。本プロジェクトの使用により生じたアカウントの停止、サービスの中断、データの損失、その他一切の直接的または間接的な損害について、作者は一切の責任を負いません。
 - **🚫 商用利用の非許諾**：本プロジェクトの開発者は、いかなる個人または組織に対しても、本プロジェクトを利用したいかなる形態の商業運営も一切許諾していません。本プロジェクトの名義で、または本プロジェクトに基づいて行われる商業行為はすべて本プロジェクトおよびその開発者とは無関係であり、それにより生じる一切の紛争、損失、法的責任は行為者自身が負うものとします。
 
+## Fork について
+
+`zhjai/sub2api-plus` は、上流の [Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api) を基にしたコミュニティ fork です。上流プロジェクトが原典であり、このリポジトリは上流の公式リリースではありません。
+
+この fork では、OpenAI Responses/SSE の終端状態、部分ストリームの使用量記録、ツール呼び出し後の透明な再実行防止を改善しています。以下のインストール手順はこの fork を参照します。
+
+この fork の Release は [zhjai/sub2api-plus/releases](https://github.com/zhjai/sub2api-plus/releases) で公開します。以下のコマンドは、この fork のインストーラー、ソース、コンテナイメージを使用します。
+
 ## ❤️ スポンサー
 
 > [こちらに掲載しませんか？](mailto:support@sub2api.org)
@@ -236,7 +244,7 @@ GitHub Releases からビルド済みバイナリをダウンロードするワ�
 #### インストール手順
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/zhjai/sub2api-plus/main/deploy/install.sh | sudo bash
 ```
 
 スクリプトは以下を実行します:
@@ -286,7 +294,7 @@ sudo journalctl -u sub2api -f
 sudo systemctl restart sub2api
 
 # アンインストール
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | sudo bash -s -- uninstall -y
+curl -sSL https://raw.githubusercontent.com/zhjai/sub2api-plus/main/deploy/install.sh | sudo bash -s -- uninstall -y
 ```
 
 ---
@@ -309,7 +317,7 @@ PostgreSQL と Redis のコンテナを含む Docker Compose でデプロイし�
 mkdir -p sub2api-deploy && cd sub2api-deploy
 
 # デプロイ準備スクリプトをダウンロードして実行
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/docker-deploy.sh | bash
+curl -sSL https://raw.githubusercontent.com/zhjai/sub2api-plus/main/deploy/docker-deploy.sh | bash
 
 # サービスを起動
 docker compose up -d
@@ -331,8 +339,8 @@ docker compose logs -f sub2api
 
 ```bash
 # 1. リポジトリをクローン
-git clone https://github.com/Wei-Shaw/sub2api.git
-cd sub2api/deploy
+git clone https://github.com/zhjai/sub2api-plus.git
+cd sub2api-plus/deploy
 
 # 2. 環境設定ファイルをコピー
 cp .env.example .env
@@ -461,8 +469,8 @@ rm -rf data/ postgres_data/ redis_data/
 Apple シリコン搭載 Mac と macOS 26 では、Apple `container` 1.1.0 以降を使用して Sub2API、PostgreSQL、Redis の完全なスタックを実行できます:
 
 ```bash
-git clone https://github.com/Wei-Shaw/sub2api.git
-cd sub2api/deploy
+git clone https://github.com/zhjai/sub2api-plus.git
+cd sub2api-plus/deploy
 ./apple-container.sh init
 ./apple-container.sh up
 ./apple-container.sh status
@@ -487,8 +495,8 @@ cd sub2api/deploy
 
 ```bash
 # 1. リポジトリをクローン
-git clone https://github.com/Wei-Shaw/sub2api.git
-cd sub2api
+git clone https://github.com/zhjai/sub2api-plus.git
+cd sub2api-plus
 
 # 2. pnpm をインストール（未インストールの場合）
 npm install -g pnpm

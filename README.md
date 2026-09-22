@@ -27,6 +27,21 @@ Please read the following carefully before using this project:
 - **📖 Disclaimer**: This project is provided for technical learning and research purposes only. The authors assume no liability for account bans, service interruptions, data loss, or any other direct or indirect damages resulting from the use of this project.
 - **🚫 No Commercial Authorization**: The developers of this project have never authorized any individual or organization to conduct any form of commercial operation based on this project. Any commercial activity conducted in the name of or based on this project is unrelated to this project and its developers, and all resulting disputes, losses, and legal liabilities shall be borne solely by the party conducting such activity.
 
+## This Fork
+
+`zhjai/sub2api-plus` is a community-maintained fork of the upstream [Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api) project. The upstream project remains the original project; this repository is not an official upstream release.
+
+Fork-specific changes in the current release line include native OpenAI Responses/SSE handling improvements:
+
+- classify `response.completed`, `response.incomplete`, `response.failed`, and cancellation terminal events separately;
+- preserve partial usage and protocol metadata after a stream ends after meaningful output;
+- prevent transparent replay after text or tool-call output has reached the client;
+- keep tool-call, incomplete-reason, and client-disconnect state visible to scheduling and usage recording.
+
+Install commands below point to this fork. For upstream issues and releases, use the [upstream repository](https://github.com/Wei-Shaw/sub2api).
+
+Fork releases are published at [zhjai/sub2api-plus/releases](https://github.com/zhjai/sub2api-plus/releases). The commands below use this fork's installer, source tree, and container images.
+
 ## ❤️ Sponsors
 
 > [Want to appear here?](mailto:support@sub2api.org)
@@ -235,7 +250,7 @@ One-click installation script that downloads pre-built binaries from GitHub Rele
 #### Installation Steps
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/zhjai/sub2api-plus/main/deploy/install.sh | sudo bash
 ```
 
 The script will:
@@ -285,7 +300,7 @@ sudo journalctl -u sub2api -f
 sudo systemctl restart sub2api
 
 # Uninstall
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | sudo bash -s -- uninstall -y
+curl -sSL https://raw.githubusercontent.com/zhjai/sub2api-plus/main/deploy/install.sh | sudo bash -s -- uninstall -y
 ```
 
 ---
@@ -308,7 +323,7 @@ Use the automated deployment script for easy setup:
 mkdir -p sub2api-deploy && cd sub2api-deploy
 
 # Download and run deployment preparation script
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/docker-deploy.sh | bash
+curl -sSL https://raw.githubusercontent.com/zhjai/sub2api-plus/main/deploy/docker-deploy.sh | bash
 
 # Start services
 docker compose up -d
@@ -330,8 +345,8 @@ If you prefer manual setup:
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/Wei-Shaw/sub2api.git
-cd sub2api/deploy
+git clone https://github.com/zhjai/sub2api-plus.git
+cd sub2api-plus/deploy
 
 # 2. Copy environment configuration
 cp .env.example .env
@@ -460,8 +475,8 @@ rm -rf data/ postgres_data/ redis_data/
 Apple-silicon Macs running macOS 26 can run the full Sub2API, PostgreSQL, and Redis stack with Apple `container` 1.1.0 or newer:
 
 ```bash
-git clone https://github.com/Wei-Shaw/sub2api.git
-cd sub2api/deploy
+git clone https://github.com/zhjai/sub2api-plus.git
+cd sub2api-plus/deploy
 ./apple-container.sh init
 ./apple-container.sh up
 ./apple-container.sh status
@@ -486,8 +501,8 @@ Build and run from source code for development or customization.
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/Wei-Shaw/sub2api.git
-cd sub2api
+git clone https://github.com/zhjai/sub2api-plus.git
+cd sub2api-plus
 
 # 2. Install pnpm (if not already installed)
 npm install -g pnpm

@@ -272,19 +272,30 @@ type OpenAIForwardResult struct {
 	// UpstreamTerminalEvent is the normalized terminal event observed on an
 	// upstream Responses WebSocket turn. Empty preserves legacy/non-WS success.
 	UpstreamTerminalEvent string
-	ResponseHeaders       http.Header
-	Duration              time.Duration
-	FirstTokenMs          *int
-	ClientDisconnect      bool
-	ImageCount            int
-	ImageSize             string
-	ImageInputSize        string
-	ImageOutputSize       string
-	ImageOutputSizes      []string
-	ImageSizeSource       string
-	ImageSizeBreakdown    map[string]int
-	VideoCount            int
-	VideoResolution       string
+	// ResponsesOutcomeObserved distinguishes native Responses passthrough results
+	// from legacy forwarding paths whose result predates protocol outcome tracking.
+	// When set, scheduling must use the protocol outcome rather than HTTP status.
+	ResponsesOutcomeObserved bool
+	// ResponsesProtocolStatus is the gateway-level outcome of a native Responses
+	// request: completed, incomplete, failed, cancelled, or premature_eof.
+	ResponsesProtocolStatus    string
+	ResponsesStatus            string
+	ResponsesIncompleteReason  string
+	ResponsesMeaningfulOutput  bool
+	ResponsesToolCallForwarded bool
+	ResponseHeaders            http.Header
+	Duration                   time.Duration
+	FirstTokenMs               *int
+	ClientDisconnect           bool
+	ImageCount                 int
+	ImageSize                  string
+	ImageInputSize             string
+	ImageOutputSize            string
+	ImageOutputSizes           []string
+	ImageSizeSource            string
+	ImageSizeBreakdown         map[string]int
+	VideoCount                 int
+	VideoResolution            string
 	// VideoDurationSeconds 是提交时请求的生成时长（xAI 按输出秒数计费），已归一化到 1-15 秒。
 	VideoDurationSeconds int
 	// WebSearchCalls 是 Codex alpha/search 网页搜索调用次数（每次成功请求为 1）。
@@ -304,7 +315,36 @@ type OpenAIForwardResult struct {
 // that may clear model-scoped transient state. The zero value remains a success
 // for existing non-WS callers.
 func (r *OpenAIForwardResult) SucceededForScheduling() bool {
-	if r == nil || !r.OpenAIWSMode || r.UpstreamTerminalEvent == "" {
+	if r == nil {
+		return true
+	}
+	if r.ResponsesOutcomeObserved {
+		switch r.ResponsesProtocolStatus {
+		case "completed":
+			// [DONE] is a legacy framing marker, not proof that a native
+			// Responses turn produced a usable result. Keep explicit
+			// response.completed/response.done compatibility, but do not heal
+			// scheduling state for a marker-only stream.
+			if r.UpstreamTerminalEvent == "[DONE]" && !r.ResponsesMeaningfulOutput {
+				return false
+			}
+			return true
+		case "client_disconnected":
+			return true
+		case "cancelled":
+			return r.ClientDisconnect
+		case "incomplete":
+			// A provider-reported output-limit truncation is a billable,
+			// client-visible terminal outcome, not evidence that the channel
+			// failed. Transport/degradation reasons (for example
+			// stream_terminated) remain non-success so they cannot heal account
+			// health or be mistaken for a completed turn.
+			return strings.EqualFold(strings.TrimSpace(r.ResponsesIncompleteReason), "max_output_tokens")
+		default:
+			return false
+		}
+	}
+	if !r.OpenAIWSMode || r.UpstreamTerminalEvent == "" {
 		return true
 	}
 	switch r.UpstreamTerminalEvent {

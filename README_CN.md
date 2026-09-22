@@ -28,6 +28,21 @@
 - **📖 免责声明**：本项目仅供技术学习与研究使用，作者不对因使用本项目导致的账户封禁、服务中断、数据丢失或其他任何直接或间接损失承担责任。
 - **🚫 无商业授权**：本项目从未授权任何个人或组织基于本项目开展任何形式的商业化运营。任何以本项目名义或基于本项目从事的商业行为均与本项目及其开发者无关，由此产生的一切纠纷、损失和法律责任由行为主体自行承担。
 
+## Fork 说明
+
+`zhjai/sub2api-plus` 是基于上游 [Wei-Shaw/sub2api](https://github.com/Wei-Shaw/sub2api) 创建的社区维护 fork。上游项目仍是原始项目；本仓库不是上游官方发布版本。
+
+当前 fork 版本针对 OpenAI Responses/SSE 增加了以下修复：
+
+- 分别识别 `response.completed`、`response.incomplete`、`response.failed` 和取消类终止事件；
+- 上游在已经输出有效内容后断流时，保留部分用量和协议状态；
+- 内容或工具调用已经发送给客户端后，禁止透明重放整轮请求；
+- 保留工具调用、不完整原因和客户端断开状态，供调度与用量记录使用。
+
+下方安装命令均指向本 fork。上游问题和上游版本请查看[原始仓库](https://github.com/Wei-Shaw/sub2api)。
+
+本 fork 的 Release 发布在 [zhjai/sub2api-plus/releases](https://github.com/zhjai/sub2api-plus/releases)，下方命令使用本 fork 的安装脚本、源码和容器镜像。
+
 ## ❤️ 赞助商
 
 > [想出现在这里？](mailto:support@sub2api.org)
@@ -261,7 +276,7 @@ fast_mode = true
 #### 安装步骤
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/zhjai/sub2api-plus/main/deploy/install.sh | sudo bash
 ```
 
 脚本会自动：
@@ -311,7 +326,7 @@ sudo journalctl -u sub2api -f
 sudo systemctl restart sub2api
 
 # 卸载
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | sudo bash -s -- uninstall -y
+curl -sSL https://raw.githubusercontent.com/zhjai/sub2api-plus/main/deploy/install.sh | sudo bash -s -- uninstall -y
 ```
 
 ---
@@ -334,7 +349,7 @@ curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install
 mkdir -p sub2api-deploy && cd sub2api-deploy
 
 # 下载并运行部署准备脚本
-curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/docker-deploy.sh | bash
+curl -sSL https://raw.githubusercontent.com/zhjai/sub2api-plus/main/deploy/docker-deploy.sh | bash
 
 # 启动服务
 docker compose up -d
@@ -356,8 +371,8 @@ docker compose logs -f sub2api
 
 ```bash
 # 1. 克隆仓库
-git clone https://github.com/Wei-Shaw/sub2api.git
-cd sub2api/deploy
+git clone https://github.com/zhjai/sub2api-plus.git
+cd sub2api-plus/deploy
 
 # 2. 复制环境配置文件
 cp .env.example .env
@@ -498,8 +513,8 @@ rm -rf data/ postgres_data/ redis_data/
 Apple 芯片 Mac 在 macOS 26 上可使用 Apple `container` 1.1.0 或更高版本运行完整的 Sub2API、PostgreSQL 和 Redis：
 
 ```bash
-git clone https://github.com/Wei-Shaw/sub2api.git
-cd sub2api/deploy
+git clone https://github.com/zhjai/sub2api-plus.git
+cd sub2api-plus/deploy
 ./apple-container.sh init
 ./apple-container.sh up
 ./apple-container.sh status
@@ -524,8 +539,8 @@ cd sub2api/deploy
 
 ```bash
 # 1. 克隆仓库
-git clone https://github.com/Wei-Shaw/sub2api.git
-cd sub2api
+git clone https://github.com/zhjai/sub2api-plus.git
+cd sub2api-plus
 
 # 2. 安装 pnpm（如果还没有安装）
 npm install -g pnpm

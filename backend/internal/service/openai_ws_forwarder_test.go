@@ -125,6 +125,16 @@ func TestOpenAIForwardResultSucceededForScheduling_TerminalEvents(t *testing.T) 
 		{name: "failed", result: &OpenAIForwardResult{OpenAIWSMode: true, UpstreamTerminalEvent: "response.failed"}, expected: false},
 		{name: "incomplete", result: &OpenAIForwardResult{OpenAIWSMode: true, UpstreamTerminalEvent: "response.incomplete"}, expected: false},
 		{name: "cancelled", result: &OpenAIForwardResult{OpenAIWSMode: true, UpstreamTerminalEvent: "response.cancelled"}, expected: false},
+		{name: "responses incomplete", result: &OpenAIForwardResult{ResponsesOutcomeObserved: true, ResponsesProtocolStatus: "incomplete"}, expected: false},
+		{name: "responses max output truncation", result: &OpenAIForwardResult{ResponsesOutcomeObserved: true, ResponsesProtocolStatus: "incomplete", ResponsesIncompleteReason: "max_output_tokens"}, expected: true},
+		{name: "responses failed", result: &OpenAIForwardResult{ResponsesOutcomeObserved: true, ResponsesProtocolStatus: "failed"}, expected: false},
+		{name: "responses cancelled", result: &OpenAIForwardResult{ResponsesOutcomeObserved: true, ResponsesProtocolStatus: "cancelled"}, expected: false},
+		{name: "responses cancelled after client disconnect", result: &OpenAIForwardResult{ResponsesOutcomeObserved: true, ResponsesProtocolStatus: "cancelled", ClientDisconnect: true}, expected: true},
+		{name: "responses premature eof", result: &OpenAIForwardResult{ResponsesOutcomeObserved: true, ResponsesProtocolStatus: "premature_eof"}, expected: false},
+		{name: "responses completed", result: &OpenAIForwardResult{ResponsesOutcomeObserved: true, ResponsesProtocolStatus: "completed"}, expected: true},
+		{name: "responses bare done without output", result: &OpenAIForwardResult{ResponsesOutcomeObserved: true, ResponsesProtocolStatus: "completed", UpstreamTerminalEvent: "[DONE]"}, expected: false},
+		{name: "responses bare done with output", result: &OpenAIForwardResult{ResponsesOutcomeObserved: true, ResponsesProtocolStatus: "completed", UpstreamTerminalEvent: "[DONE]", ResponsesMeaningfulOutput: true}, expected: true},
+		{name: "responses client disconnect", result: &OpenAIForwardResult{ResponsesOutcomeObserved: true, ResponsesProtocolStatus: "client_disconnected"}, expected: true},
 	}
 
 	for _, tt := range tests {

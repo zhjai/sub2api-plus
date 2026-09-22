@@ -201,6 +201,58 @@ func openAIStreamEventTypeIsTerminal(eventType string) bool {
 	}
 }
 
+// classifyOpenAIResponsesOutcome maps a Responses payload to the protocol
+// outcome used for scheduling and usage health. HTTP 200 only means that the
+// transport started; the terminal event/status is authoritative.
+func classifyOpenAIResponsesOutcome(eventType string, payload []byte) (protocolStatus, responseStatus, incompleteReason string) {
+	eventType = strings.TrimSpace(eventType)
+	responseStatus = strings.TrimSpace(gjson.GetBytes(payload, "response.status").String())
+	if responseStatus == "" {
+		responseStatus = strings.TrimSpace(gjson.GetBytes(payload, "status").String())
+	}
+	incompleteReason = strings.TrimSpace(gjson.GetBytes(payload, "response.incomplete_details.reason").String())
+	if incompleteReason == "" {
+		incompleteReason = strings.TrimSpace(gjson.GetBytes(payload, "incomplete_details.reason").String())
+	}
+
+	switch eventType {
+	case "response.completed":
+		return "completed", responseStatus, incompleteReason
+	case "response.failed", "error":
+		return "failed", responseStatus, incompleteReason
+	case "response.incomplete":
+		return "incomplete", responseStatus, incompleteReason
+	case "response.cancelled", "response.canceled":
+		return "cancelled", responseStatus, incompleteReason
+	case "response.done":
+		switch responseStatus {
+		case "incomplete":
+			return "incomplete", responseStatus, incompleteReason
+		case "failed":
+			return "failed", responseStatus, incompleteReason
+		case "cancelled", "canceled":
+			return "cancelled", responseStatus, incompleteReason
+		default:
+			return "completed", responseStatus, incompleteReason
+		}
+	case "[DONE]":
+		return "completed", responseStatus, incompleteReason
+	default:
+		switch responseStatus {
+		case "completed":
+			return "completed", responseStatus, incompleteReason
+		case "incomplete":
+			return "incomplete", responseStatus, incompleteReason
+		case "failed":
+			return "failed", responseStatus, incompleteReason
+		case "cancelled", "canceled":
+			return "cancelled", responseStatus, incompleteReason
+		default:
+			return "", responseStatus, incompleteReason
+		}
+	}
+}
+
 func anthropicStreamEventIsTerminal(eventName, data string) bool {
 	if strings.EqualFold(strings.TrimSpace(eventName), "message_stop") {
 		return true

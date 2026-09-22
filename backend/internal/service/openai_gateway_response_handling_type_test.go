@@ -42,6 +42,34 @@ func TestOpenAIStreamEventIsTerminalWithTypeMatchesExistingSemantics(t *testing.
 	}
 }
 
+func TestClassifyOpenAIResponsesOutcome(t *testing.T) {
+	tests := []struct {
+		name           string
+		eventType      string
+		payload        string
+		protocolStatus string
+		responseStatus string
+		reason         string
+	}{
+		{name: "completed", eventType: "response.completed", payload: `{"type":"response.completed","response":{"status":"completed"}}`, protocolStatus: "completed", responseStatus: "completed"},
+		{name: "done incomplete", eventType: "response.done", payload: `{"type":"response.done","response":{"status":"incomplete","incomplete_details":{"reason":"stream_terminated"}}}`, protocolStatus: "incomplete", responseStatus: "incomplete", reason: "stream_terminated"},
+		{name: "done failed", eventType: "response.done", payload: `{"type":"response.done","status":"failed"}`, protocolStatus: "failed", responseStatus: "failed"},
+		{name: "cancelled", eventType: "response.canceled", payload: `{"type":"response.canceled","response":{"status":"canceled"}}`, protocolStatus: "cancelled", responseStatus: "canceled"},
+		{name: "explicit incomplete", eventType: "response.incomplete", payload: `{"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}`, protocolStatus: "incomplete", reason: "max_output_tokens"},
+		{name: "done marker", eventType: "[DONE]", payload: "[DONE]", protocolStatus: "completed"},
+		{name: "status fallback", payload: `{"status":"incomplete","incomplete_details":{"reason":"stream_terminated"}}`, protocolStatus: "incomplete", responseStatus: "incomplete", reason: "stream_terminated"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status, responseStatus, reason := classifyOpenAIResponsesOutcome(tt.eventType, []byte(tt.payload))
+			require.Equal(t, tt.protocolStatus, status)
+			require.Equal(t, tt.responseStatus, responseStatus)
+			require.Equal(t, tt.reason, reason)
+		})
+	}
+}
+
 var (
 	benchmarkOpenAIResponseSSEEventTypeSink string
 	benchmarkOpenAIResponseSSETerminalSink  bool

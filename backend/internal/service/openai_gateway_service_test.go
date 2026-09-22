@@ -2467,11 +2467,41 @@ func TestOpenAIStreamingPassthroughMissingTerminalEventReturnsIncompleteError(t 
 		_, _ = pw.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\",\"output_index\":0}\n\n"))
 	}()
 
-	_, err := svc.handleStreamingResponsePassthrough(c.Request.Context(), resp, c, &Account{ID: 1}, time.Now(), "", "")
+	result, err := svc.handleStreamingResponsePassthrough(c.Request.Context(), resp, c, &Account{ID: 1}, time.Now(), "", "")
 	_ = pr.Close()
 	if err == nil || !strings.Contains(err.Error(), "missing terminal event") {
 		t.Fatalf("expected missing terminal event error, got %v", err)
 	}
+	require.NotNil(t, result)
+	require.Equal(t, "premature_eof", result.protocolStatus)
+	require.True(t, result.meaningfulOutput)
+}
+
+func TestOpenAIStreamingPassthroughResponseFailedAfterOutputReturnsPartialMetadata(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{MaxLineSize: defaultMaxLineSize}}}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(strings.NewReader(strings.Join([]string{
+			`data: {"type":"response.output_text.delta","delta":"partial"}`,
+			`data: {"type":"response.failed","response":{"id":"resp_partial","status":"failed","error":{"message":"upstream failed"},"usage":{"input_tokens":4,"output_tokens":2}}}`,
+			"",
+		}, "\n"))),
+		Header: http.Header{"X-Request-Id": []string{"rid-partial-failed"}},
+	}
+
+	result, err := svc.handleStreamingResponsePassthrough(c.Request.Context(), resp, c, &Account{ID: 1, Platform: PlatformOpenAI, Name: "acc"}, time.Now(), "", "")
+	require.Error(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.meaningfulOutput)
+	require.Equal(t, "failed", result.protocolStatus)
+	require.Equal(t, "failed", result.responseStatus)
+	require.Equal(t, "resp_partial", result.responseID)
+	require.Equal(t, 4, result.usage.InputTokens)
+	require.Equal(t, 2, result.usage.OutputTokens)
 }
 
 func TestOpenAIStreamingPassthroughPostOutputDisconnectQuarantinesSharedProxy(t *testing.T) {
@@ -2751,6 +2781,9 @@ func TestOpenAIStreamingPassthroughResponseIncompleteWithoutDoneMarkerStillSucce
 	require.Equal(t, 2, result.usage.InputTokens)
 	require.Equal(t, 3, result.usage.OutputTokens)
 	require.Equal(t, 1, result.usage.CacheReadInputTokens)
+	require.Equal(t, "incomplete", result.protocolStatus)
+	require.Empty(t, result.responseStatus)
+	require.False(t, result.meaningfulOutput)
 }
 
 func TestOpenAIStreamingTooLong(t *testing.T) {
