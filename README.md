@@ -40,7 +40,7 @@ Install commands below point to this fork. For upstream issues and releases, use
 
 Fork releases are published at [zhjai/sub2api-plus/releases](https://github.com/zhjai/sub2api-plus/releases). The commands below use this fork's installer, source tree, and container images.
 
-Versioning follows the upstream baseline without impersonating upstream releases. The current fork line is `0.2.7-zhjai.3`: `0.2.7` identifies the upstream baseline and `-zhjai.3` identifies the third fork revision. The updater only considers releases with this derived suffix; legacy unqualified fork tags are not treated as current releases.
+Versioning follows the upstream baseline without impersonating upstream releases. The current fork line is `0.2.7-zhjai.4`: `0.2.7` identifies the upstream baseline and `-zhjai.4` identifies the fourth fork revision. The updater only considers releases with this derived suffix; legacy unqualified fork tags are not treated as current releases.
 
 ## Sponsorship
 
@@ -153,7 +153,7 @@ curl -sSL https://raw.githubusercontent.com/zhjai/sub2api-plus/main/deploy/insta
 To install or roll back to a specific fork release:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/zhjai/sub2api-plus/main/deploy/install.sh | sudo bash -s -- upgrade -v v0.2.7-zhjai.3
+curl -sSL https://raw.githubusercontent.com/zhjai/sub2api-plus/main/deploy/install.sh | sudo bash -s -- upgrade -v v0.2.7-zhjai.4
 ```
 
 The upgrade command replaces the binary and restarts the service. It does not remove `/etc/sub2api`, PostgreSQL data, or Redis data; make a database/config backup before upgrading and keep the previous release available for rollback.

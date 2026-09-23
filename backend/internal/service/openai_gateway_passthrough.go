@@ -507,6 +507,11 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		if reqStream {
 			result, handleErr := s.handleStreamingResponsePassthrough(ctx, resp, c, account, startTime, reqModel, upstreamPassthroughModel)
 			if handleErr != nil {
+				// Preserve response affinity even when the upstream stream terminates
+				// after semantic output. The caller may retry with previous_response_id.
+				if result != nil && (result.meaningfulOutput || result.toolCallForwarded) {
+					s.bindHTTPResponseAccount(ctx, c, account, result.responseID)
+				}
 				// A stream that already forwarded semantic output must not be replayed.
 				// Preserve its partial usage/protocol metadata for the outer handler; only
 				// pre-output errors are eligible for the existing internal retry paths.
@@ -2073,6 +2078,14 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		}
 		if !writePendingLines() {
 			return false
+		}
+		if flushPending {
+			if _, err := fmt.Fprintln(w); err != nil {
+				clientDisconnected = true
+				return false
+			}
+			flushPending = false
+			flusher.Flush()
 		}
 		sequenceNumber := int64(0)
 		if sawSequenceNumber {

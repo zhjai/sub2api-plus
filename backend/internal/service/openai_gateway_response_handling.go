@@ -263,6 +263,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	responsesIncompleteReason := ""
 	lastSequenceNumber := int64(0)
 	sawSequenceNumber := false
+	lastEventType := ""
 	capacityFailoverSuppressedLogged := false
 	failedMessage := ""
 	clientOutputStarted := false
@@ -393,6 +394,16 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			return false
 		}
 		if stageFirstOutput && eventInProgress {
+			if _, err := writePendingString("\n"); err != nil {
+				clientDisconnected = true
+				return false
+			}
+			completeGuardedEvent(true)
+		} else if eventInProgress {
+			if _, err := writePendingString("\n"); err != nil {
+				clientDisconnected = true
+				return false
+			}
 			completeGuardedEvent(true)
 		}
 		flushPending("Client disconnected before synthetic Responses terminal")
@@ -545,6 +556,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		if data, ok := extractOpenAISSEDataLine(line); ok {
 			dataBytes := []byte(data)
 			eventType := effectiveOpenAISSEEventType(dataBytes, pendingSSEEventType)
+			if strings.TrimSpace(eventType) != "" {
+				lastEventType = strings.TrimSpace(eventType)
+			}
 			if sequence := gjson.GetBytes(dataBytes, "sequence_number"); sequence.Exists() {
 				sawSequenceNumber = true
 				if value := sequence.Int(); value > lastSequenceNumber {
@@ -974,7 +988,17 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			if clientDisconnected {
 				return resultWithUsage(), fmt.Errorf("stream usage incomplete after timeout")
 			}
-			logger.LegacyPrintf("service.openai_gateway", "Stream data interval timeout: account=%d model=%s interval=%s", account.ID, originalModel, streamInterval)
+			logger.LegacyPrintf(
+				"service.openai_gateway",
+				"Stream data interval timeout: account=%d model=%s interval=%s last_event=%s last_sequence=%d sequence_seen=%t semantic_output=%t close_source=sub2api_idle_timeout",
+				account.ID,
+				originalModel,
+				streamInterval,
+				lastEventType,
+				lastSequenceNumber,
+				sawSequenceNumber,
+				responsesSemanticOutputSeen,
+			)
 			// 处理流超时，可能标记账户为临时不可调度或错误状态
 			if s.rateLimitService != nil {
 				s.rateLimitService.HandleStreamTimeout(ctx, account, originalModel)
@@ -988,6 +1012,34 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 					_ = resp.Body.Close()
 					return resultWithUsage(), grokStreamIdleFailoverError(account, streamInterval)
 				}
+			}
+			// A Responses stream that already emitted semantic output must end with
+			// a protocol terminal. Do not append a generic `error` event: strict
+			// clients classify that as a malformed/incomplete Responses stream.
+			if account != nil && account.Platform == PlatformOpenAI && responsesSemanticOutputSeen {
+				if synthesizeResponsesStreamTerminatedTerminal() {
+					_ = resp.Body.Close()
+					return resultWithUsage(), nil
+				}
+			}
+			// The watchdog remains enabled as a bounded failure detector. Before any
+			// semantic output is committed, the handler may safely replay the request
+			// on another account, even when metadata/preamble bytes were flushed.
+			// Never send a generic error event here: that would make a clean account
+			// switch impossible for strict Responses clients.
+			if !responsesSemanticOutputSeen && !openAIStreamClientOutputStarted(c, clientOutputStarted) && !eventShouldFlush {
+				_ = resp.Body.Close()
+				failoverErr := s.newOpenAIStreamFailoverError(
+					c,
+					account,
+					false,
+					upstreamRequestID,
+					nil,
+					"OpenAI stream data interval timeout before semantic output",
+				)
+				failoverErr.SafeToFailoverAfterWrite = true
+				failoverErr.SessionAccountEscape = true
+				return resultWithUsage(), failoverErr
 			}
 			sendErrorEvent("stream_timeout")
 			return resultWithUsage(), fmt.Errorf("stream data interval timeout")

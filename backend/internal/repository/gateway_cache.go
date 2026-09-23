@@ -15,6 +15,7 @@ import (
 )
 
 const stickySessionPrefix = "sticky_session:"
+const openAISessionEscapePrefix = "openai_session_escape:"
 const openAIResponsesSessionWindowPrefix = "openai_responses_session_window:"
 const liveCallPrefix = "live:call:"
 
@@ -68,6 +69,43 @@ func (c *gatewayCache) RefreshSessionTTL(ctx context.Context, groupID int64, ses
 func (c *gatewayCache) DeleteSessionAccountID(ctx context.Context, groupID int64, sessionHash string) error {
 	key := buildSessionKey(groupID, sessionHash)
 	return c.rdb.Del(ctx, key).Err()
+}
+
+func buildOpenAISessionEscapeKey(groupID int64, sessionHash string) string {
+	return fmt.Sprintf("%s%d:%s", openAISessionEscapePrefix, groupID, sessionHash)
+}
+
+// AddOpenAISessionEscapedAccount records a short-lived per-session account
+// exclusion. It is intentionally separate from sticky_session so deleting a
+// sticky owner cannot accidentally erase migration state.
+func (c *gatewayCache) AddOpenAISessionEscapedAccount(ctx context.Context, groupID int64, sessionHash string, accountID int64, ttl time.Duration) error {
+	if c == nil || c.rdb == nil || strings.TrimSpace(sessionHash) == "" || accountID <= 0 || ttl <= 0 {
+		return nil
+	}
+	key := buildOpenAISessionEscapeKey(groupID, sessionHash)
+	pipe := c.rdb.TxPipeline()
+	pipe.SAdd(ctx, key, strconv.FormatInt(accountID, 10))
+	pipe.Expire(ctx, key, ttl)
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
+func (c *gatewayCache) GetOpenAISessionEscapedAccountIDs(ctx context.Context, groupID int64, sessionHash string) ([]int64, error) {
+	if c == nil || c.rdb == nil || strings.TrimSpace(sessionHash) == "" {
+		return nil, nil
+	}
+	values, err := c.rdb.SMembers(ctx, buildOpenAISessionEscapeKey(groupID, sessionHash)).Result()
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]int64, 0, len(values))
+	for _, value := range values {
+		id, parseErr := strconv.ParseInt(value, 10, 64)
+		if parseErr == nil && id > 0 {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
 }
 
 var claimOpenAIResponsesSessionWindowScript = redis.NewScript(`

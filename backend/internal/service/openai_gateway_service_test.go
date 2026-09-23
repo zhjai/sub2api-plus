@@ -741,6 +741,39 @@ type stubGatewayCache struct {
 	deletedSessions map[string]int
 }
 
+func TestOpenAIGatewayService_EscapeOpenAISessionAccount(t *testing.T) {
+	sessionHash := "escape-session"
+	cache := &stubGatewayCache{sessionBindings: map[string]int64{"openai:" + sessionHash: 7}}
+	svc := &OpenAIGatewayService{cache: cache}
+
+	require.NoError(t, svc.EscapeOpenAISessionAccount(context.Background(), nil, sessionHash, 7))
+	require.Equal(t, 1, cache.deletedSessions["openai:"+sessionHash])
+	escaped := svc.OpenAISessionEscapedAccountIDs(nil, sessionHash)
+	require.Contains(t, escaped, int64(7))
+
+	// A stale failure must not clear or overwrite a newer sticky binding.
+	cache.sessionBindings["openai:"+sessionHash] = 8
+	require.NoError(t, svc.EscapeOpenAISessionAccount(context.Background(), nil, sessionHash, 7))
+	require.Equal(t, int64(8), cache.sessionBindings["openai:"+sessionHash])
+	require.Contains(t, svc.OpenAISessionEscapedAccountIDs(nil, sessionHash), int64(7))
+}
+
+func TestOpenAIForwardResult_RequiresSessionAccountEscape(t *testing.T) {
+	tests := []struct {
+		name   string
+		result *OpenAIForwardResult
+		want   bool
+	}{
+		{"premature eof terminal", &OpenAIForwardResult{ResponsesOutcomeObserved: true, ResponsesProtocolStatus: "premature_eof", ResponsesIncompleteReason: "stream_terminated", ResponsesMeaningfulOutput: true}, true},
+		{"incomplete terminal", &OpenAIForwardResult{ResponsesOutcomeObserved: true, ResponsesProtocolStatus: "incomplete", ResponsesIncompleteReason: "stream_terminated", ResponsesToolCallForwarded: true}, true},
+		{"max output is not escape", &OpenAIForwardResult{ResponsesOutcomeObserved: true, ResponsesProtocolStatus: "incomplete", ResponsesIncompleteReason: "max_output_tokens", ResponsesMeaningfulOutput: true}, false},
+		{"completed is not escape", &OpenAIForwardResult{ResponsesOutcomeObserved: true, ResponsesProtocolStatus: "completed", ResponsesMeaningfulOutput: true}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) { require.Equal(t, tt.want, tt.result.RequiresSessionAccountEscape()) })
+	}
+}
+
 type responseBindContextProbeCache struct {
 	stubGatewayCache
 	setContextErrors []error
@@ -1600,16 +1633,89 @@ func TestOpenAIStreamingTimeout(t *testing.T) {
 	}
 
 	start := time.Now()
-	_, err := svc.handleStreamingResponse(c.Request.Context(), resp, c, &Account{ID: 1}, start, "model", "model")
+	_, err := svc.handleStreamingResponse(c.Request.Context(), resp, c, &Account{ID: 1, Platform: PlatformOpenAI}, start, "model", "model")
 	_ = pw.Close()
 	_ = pr.Close()
 
-	if err == nil || !strings.Contains(err.Error(), "stream data interval timeout") {
-		t.Fatalf("expected stream timeout error, got %v", err)
+	var failoverErr *UpstreamFailoverError
+	if !errors.As(err, &failoverErr) {
+		t.Fatalf("expected typed stream timeout failover, got %v", err)
 	}
-	if !strings.Contains(rec.Body.String(), "\"type\":\"error\"") || !strings.Contains(rec.Body.String(), "stream_timeout") {
-		t.Fatalf("expected OpenAI-compatible error SSE event, got %q", rec.Body.String())
+	require.True(t, failoverErr.SafeToFailoverAfterWrite)
+	require.True(t, failoverErr.SessionAccountEscape)
+	require.NotContains(t, rec.Body.String(), "stream_timeout")
+	require.NotContains(t, rec.Body.String(), "\"type\":\"error\"")
+}
+
+func TestOpenAIResponsesStreamingTimeoutSynthesizesIncompleteTerminal(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := &OpenAIGatewayService{cfg: &config.Config{
+		Gateway: config.GatewayConfig{
+			StreamDataIntervalTimeout: 1,
+			StreamKeepaliveInterval:   0,
+			MaxLineSize:               defaultMaxLineSize,
+		},
+	}}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	pr, pw := io.Pipe()
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       pr,
+		Header:     http.Header{},
 	}
+
+	writeDone := make(chan struct{})
+	stopWriter := func() {
+		select {
+		case <-writeDone:
+		default:
+			close(writeDone)
+		}
+	}
+	defer func() {
+		stopWriter()
+		_ = pr.Close()
+	}()
+	go func() {
+		_, _ = pw.Write([]byte("data: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_timeout\",\"status\":\"in_progress\"}}\n\n"))
+		// Leave the final SSE event open. The timeout path must close its frame
+		// before appending the synthetic Responses terminal.
+		_, _ = pw.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"response_id\":\"resp_timeout\",\"delta\":\"partial\"}\n"))
+		<-writeDone
+		_ = pw.Close()
+	}()
+
+	type streamOutcome struct {
+		result *openaiStreamingResult
+		err    error
+	}
+	outcome := make(chan streamOutcome, 1)
+	go func() {
+		result, err := svc.handleStreamingResponse(c.Request.Context(), resp, c, &Account{ID: 1, Platform: PlatformOpenAI, Name: "acc"}, time.Now(), "gpt-6-astra", "gpt-6-astra")
+		outcome <- streamOutcome{result: result, err: err}
+	}()
+	var result *openaiStreamingResult
+	var err error
+	select {
+	case completed := <-outcome:
+		result, err = completed.result, completed.err
+	case <-time.After(3 * time.Second):
+		t.Fatal("stream timeout handler did not terminate within test deadline")
+	}
+	stopWriter()
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, "premature_eof", result.responsesProtocolStatus)
+	require.Equal(t, "stream_terminated", result.responsesIncompleteReason)
+	body := rec.Body.String()
+	require.Contains(t, body, "event: response.incomplete")
+	require.Contains(t, body, "partial\"}\n\nevent: response.incomplete")
+	require.NotContains(t, body, "event: error")
+	require.NotContains(t, body, "stream_timeout")
 }
 
 func TestOpenAIStreamingContextCanceledReturnsIncompleteErrorWithoutInjectingErrorEvent(t *testing.T) {

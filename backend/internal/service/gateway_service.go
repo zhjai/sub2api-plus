@@ -555,6 +555,14 @@ type GatewayCache interface {
 	GetReasoningContent(ctx context.Context, itemID string) (string, error)
 }
 
+// OpenAISessionEscapeCache is an optional distributed negative-affinity store.
+// Implementations can persist account exclusions between HTTP sampling requests
+// and across gateway instances without changing the broad GatewayCache contract.
+type OpenAISessionEscapeCache interface {
+	AddOpenAISessionEscapedAccount(ctx context.Context, groupID int64, sessionHash string, accountID int64, ttl time.Duration) error
+	GetOpenAISessionEscapedAccountIDs(ctx context.Context, groupID int64, sessionHash string) ([]int64, error)
+}
+
 // derefGroupID safely dereferences *int64 to int64, returning 0 if nil
 func derefGroupID(groupID *int64) int64 {
 	if groupID == nil {
@@ -677,10 +685,18 @@ type ForwardResult struct {
 	// (Anthropic usage.speed: "fast" / "standard"); "" when not declared.
 	UpstreamResponseServiceTier string
 	Stream                      bool
-	Duration                    time.Duration
-	FirstTokenMs                *int // 首字时间（流式请求）
-	ClientDisconnect            bool // 客户端是否在流式传输过程中断开
-	ReasoningEffort             *string
+	// Native Responses outcome metadata is carried by this generic result for
+	// the /v1/responses compatibility handler.
+	ResponsesOutcomeObserved   bool
+	ResponsesProtocolStatus    string
+	ResponsesStatus            string
+	ResponsesIncompleteReason  string
+	ResponsesMeaningfulOutput  bool
+	ResponsesToolCallForwarded bool
+	Duration                   time.Duration
+	FirstTokenMs               *int // 首字时间（流式请求）
+	ClientDisconnect           bool // 客户端是否在流式传输过程中断开
+	ReasoningEffort            *string
 	// RequestedReasoningEffort is the client-requested effort before mapping.
 	RequestedReasoningEffort *string
 	// ServiceTier records the tier requested by the client. OpenAI uses
@@ -699,6 +715,21 @@ type ForwardResult struct {
 	ImageSizeBreakdown map[string]int
 	SearchCount        int
 	AudioUsage         *AudioUsage
+}
+
+// RequiresSessionAccountEscape reports a semantic Responses stream termination
+// caused by the upstream watchdog/transport. The next sampling should avoid
+// this account; normal model truncation is not an escape trigger.
+func (r *ForwardResult) RequiresSessionAccountEscape() bool {
+	if r == nil || !r.ResponsesOutcomeObserved {
+		return false
+	}
+	if !r.ResponsesMeaningfulOutput && !r.ResponsesToolCallForwarded {
+		return false
+	}
+	status := strings.TrimSpace(r.ResponsesProtocolStatus)
+	return (strings.EqualFold(status, "incomplete") || strings.EqualFold(status, "premature_eof")) &&
+		strings.EqualFold(strings.TrimSpace(r.ResponsesIncompleteReason), "stream_terminated")
 }
 
 // GatewayFailureStage identifies which request stage failed. The zero value is
@@ -746,12 +777,16 @@ type UpstreamFailoverError struct {
 	SameAccountRetryMax      int           // 可选的错误级同账号重试上限，低于 handler 默认预算时优先采用
 	RequestScopedTransient   bool          // 故障因素与账号无关（如上游按客户端身份/模型容量降载）：可同账号重试，但不得据此对账号做临时封禁
 	SafeToFailoverAfterWrite bool          // 仅写出 SSE 注释等非语义字节时，仍可在同一客户端流中切换账号
-	Stage                    GatewayFailureStage
-	Scope                    GatewayFailureScope
-	Reason                   GatewayFailureReason
-	NextAccountAction        NextAccountAction
-	ClientStatusCode         int
-	ClientMessage            string
+	// SessionAccountEscape asks the handler to exclude this account for the
+	// next sampling of the same session. It is set for hard stream failures
+	// such as a watchdog timeout before semantic output.
+	SessionAccountEscape bool
+	Stage                GatewayFailureStage
+	Scope                GatewayFailureScope
+	Reason               GatewayFailureReason
+	NextAccountAction    NextAccountAction
+	ClientStatusCode     int
+	ClientMessage        string
 }
 
 func (e *UpstreamFailoverError) Error() string {

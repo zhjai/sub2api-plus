@@ -494,7 +494,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	}
 	reqLog = reqLog.With(zap.String("model", reqModel), zap.Bool("stream", reqStream))
 	previousResponseID := strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String())
+	previousResponseCanMove := true
 	if previousResponseID != "" {
+		coverage := service.AnalyzeToolCallOutputContextCoverageBytes(body)
+		previousResponseCanMove = !coverage.HasFunctionCallOutput || coverage.ContextCoversAllCallIDs
 		previousResponseIDKind := service.ClassifyOpenAIPreviousResponseIDKind(previousResponseID)
 		reqLog = reqLog.With(
 			zap.Bool("has_previous_response_id", true),
@@ -621,6 +624,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	firstOutputTimeoutSwitchCount := 0
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
+	for escapedID := range h.gatewayService.OpenAISessionEscapedAccountIDs(apiKey.GroupID, sessionHash) {
+		failedAccountIDs[escapedID] = struct{}{}
+	}
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
@@ -660,7 +666,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			service.OpenAIUpstreamTransportAny,
 			requiredCapability,
 			requireCompact,
-			false,
+			previousResponseCanMove,
 			!imageIntent,
 			requestPlatform,
 		)
@@ -861,6 +867,11 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			} else {
 				var failoverErr *service.UpstreamFailoverError
 				if errors.As(err, &failoverErr) {
+					if failoverErr.SessionAccountEscape {
+						if escapeErr := h.gatewayService.EscapeOpenAISessionAccount(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID); escapeErr != nil {
+							reqLog.Warn("openai.session_account_escape_failed", zap.Int64("account_id", account.ID), zap.Error(escapeErr))
+						}
+					}
 					if failoverClientGone(c) {
 						reqLog.Info("openai.failover_aborted_client_disconnected",
 							zap.Int64("account_id", account.ID),
@@ -953,6 +964,13 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					zap.Bool("upstream_error_response_already_written", upstreamErrorAlreadyCommunicated),
 					zap.Error(err),
 				}
+				if result != nil && result.RequiresSessionAccountEscape() {
+					if escapeErr := h.gatewayService.EscapeOpenAISessionAccount(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID); escapeErr != nil {
+						reqLog.Warn("openai.session_account_escape_failed", zap.Int64("account_id", account.ID), zap.Error(escapeErr))
+					} else {
+						reqLog.Warn("openai.session_account_escaped", zap.Int64("account_id", account.ID), zap.String("reason", result.ResponsesIncompleteReason))
+					}
+				}
 				submitResponsesUsage(result)
 				if shouldLogOpenAIForwardFailureAsWarn(c, wroteFallback) {
 					reqLog.Warn("openai.forward_failed", fields...)
@@ -963,6 +981,16 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			}
 		}
 		if result != nil {
+			if result.RequiresSessionAccountEscape() {
+				if escapeErr := h.gatewayService.EscapeOpenAISessionAccount(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID); escapeErr != nil {
+					reqLog.Warn("openai.session_account_escape_failed",
+						zap.Int64("account_id", account.ID), zap.Error(escapeErr))
+				} else {
+					reqLog.Warn("openai.session_account_escaped",
+						zap.Int64("account_id", account.ID),
+						zap.String("reason", result.ResponsesIncompleteReason))
+				}
+			}
 			// 排除 spark 影子:其 codex_* 仅由 QueryUsage(/wham/usage bengalfox)更新(外审第7轮 P1)。
 			if account.Type == service.AccountTypeOAuth && !account.IsShadow() {
 				h.gatewayService.UpdateCodexUsageSnapshotFromHeaders(c.Request.Context(), account.ID, result.ResponseHeaders)

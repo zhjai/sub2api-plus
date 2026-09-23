@@ -65,6 +65,7 @@ type AccountHandler struct {
 	grokImportProber        grokImportProber
 	upstreamBillingProbe    *service.UpstreamBillingProbeService
 	ollamaCloudUsage        *service.OllamaCloudUsageService
+	openAIGatewayService    *service.OpenAIGatewayService
 	cfg                     *config.Config
 }
 
@@ -75,6 +76,35 @@ func (h *AccountHandler) SetUpstreamBillingProbeService(probe *service.UpstreamB
 
 func (h *AccountHandler) SetOllamaCloudUsageService(usage *service.OllamaCloudUsageService) {
 	h.ollamaCloudUsage = usage
+}
+
+// SetOpenAIGatewayService attaches the optional scheduler trace reader without
+// changing the long-standing constructor used by focused admin tests.
+func (h *AccountHandler) SetOpenAIGatewayService(gateway *service.OpenAIGatewayService) {
+	h.openAIGatewayService = gateway
+}
+
+// GetSchedulerDecisions returns bounded, redacted request-level scheduler
+// traces. It never accepts or returns session hashes, response IDs, bodies, or
+// credentials.
+func (h *AccountHandler) GetSchedulerDecisions(c *gin.Context) {
+	limit := 50
+	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil {
+			limit = parsed
+		}
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 256 {
+		limit = 256
+	}
+	var traces []service.OpenAIAccountScheduleTrace
+	if h.openAIGatewayService != nil {
+		traces = h.openAIGatewayService.RecentOpenAIAccountScheduleTraces(limit)
+	}
+	c.JSON(http.StatusOK, gin.H{"items": traces, "limit": limit})
 }
 
 // NewAccountHandler creates a new admin account handler

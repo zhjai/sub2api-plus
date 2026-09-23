@@ -8,6 +8,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestOpenAIAccountScheduleTraceStoreIsBoundedAndNewestFirst(t *testing.T) {
+	store := &openAIAccountScheduleTraceStore{}
+	for i := 0; i < openAIAccountScheduleTraceCapacity+3; i++ {
+		store.append(OpenAIAccountScheduleTrace{SelectedAccountID: int64(i)})
+	}
+
+	traces := store.recent(2)
+	require.Len(t, traces, 2)
+	require.Equal(t, int64(openAIAccountScheduleTraceCapacity+2), traces[0].SelectedAccountID)
+	require.Equal(t, int64(openAIAccountScheduleTraceCapacity+1), traces[1].SelectedAccountID)
+
+	all := store.recent(0)
+	require.Len(t, all, openAIAccountScheduleTraceCapacity)
+	require.Equal(t, int64(openAIAccountScheduleTraceCapacity+2), all[0].SelectedAccountID)
+	require.Equal(t, int64(3), all[len(all)-1].SelectedAccountID)
+}
+
 type schedulerLatencyAccountRepo struct{ schedulerTestOpenAIAccountRepo }
 
 func (r schedulerLatencyAccountRepo) ListSchedulableByPlatform(ctx context.Context, platform string) ([]Account, error) {

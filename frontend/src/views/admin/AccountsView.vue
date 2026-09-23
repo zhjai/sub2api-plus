@@ -173,6 +173,28 @@
             {{ t('admin.accounts.listPendingSyncAction') }}
           </button>
         </div>
+        <div class="mt-3 rounded-lg border border-gray-200 bg-white px-3 py-2 dark:border-dark-700 dark:bg-dark-800">
+          <div class="flex items-center justify-between gap-3">
+            <span class="text-sm font-medium text-gray-800 dark:text-gray-100">{{ t('admin.accounts.schedulerTrace.title') }}</span>
+            <button class="btn btn-secondary px-2 py-1 text-xs" :disabled="schedulerTraceLoading" @click="loadSchedulerTraces">
+              <Icon name="refresh" size="xs" :class="schedulerTraceLoading ? 'animate-spin' : ''" />
+              {{ t('admin.accounts.schedulerTrace.refresh') }}
+            </button>
+          </div>
+          <div v-if="schedulerTraces.length" class="mt-2 space-y-1.5 text-xs">
+            <div v-for="trace in schedulerTraces.slice(0, 5)" :key="`${trace.at}-${trace.selected_account_id}`" class="grid gap-1 border-t border-gray-100 pt-1.5 dark:border-dark-700 md:grid-cols-[auto_1fr_auto] md:items-center">
+              <span class="font-mono text-gray-500 dark:text-dark-400">{{ formatRelativeTime(trace.at) }}</span>
+              <span class="truncate text-gray-700 dark:text-gray-200" :title="trace.reason_text">
+                {{ t('admin.accounts.schedulerTrace.reason') }}: {{ trace.reason_code }}<span v-if="trace.reason_text"> · {{ trace.reason_text }}</span>
+              </span>
+              <span class="font-mono text-gray-600 dark:text-dark-300">
+                {{ t('admin.accounts.schedulerTrace.selected') }} #{{ trace.selected_account_id || '-' }}
+                <span v-if="trace.excluded_account_ids?.length" class="text-amber-700 dark:text-amber-300"> · {{ t('admin.accounts.schedulerTrace.excluded') }} #{{ trace.excluded_account_ids.join(', #') }}</span>
+              </span>
+            </div>
+          </div>
+          <div v-else class="mt-2 text-xs text-gray-500 dark:text-dark-400">{{ t('admin.accounts.schedulerTrace.empty') }}</div>
+        </div>
       </template>
       <template #table>
         <AccountBulkActionsBar
@@ -526,6 +548,7 @@ import ErrorPassthroughRulesModal from '@/components/admin/ErrorPassthroughRules
 import TLSFingerprintProfilesModal from '@/components/admin/TLSFingerprintProfilesModal.vue'
 import { fetchAllAccountIds } from '@/utils/accountSelection'
 import { buildGrokUsageRefreshKey, buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
+import { listSchedulerDecisions, type SchedulerDecisionTrace } from '@/api/admin/accounts'
 import { formatDateTime, formatRelativeTime } from '@/utils/format'
 import { proxyExpiryBadgeClass, proxyExpiryLabelKey } from '@/utils/proxyExpiry'
 import { extractApiErrorMessage } from '@/utils/apiError'
@@ -621,6 +644,19 @@ const upstreamBillingProbeGloballyEnabled = ref<boolean | undefined>(undefined)
 const upstreamBillingNow = ref(Date.now())
 const upstreamBillingRateETag = ref<string | null>(null)
 const upstreamBillingRateRefreshing = ref(false)
+const schedulerTraces = ref<SchedulerDecisionTrace[]>([])
+const schedulerTraceLoading = ref(false)
+const loadSchedulerTraces = async () => {
+  schedulerTraceLoading.value = true
+  try {
+    const response = await listSchedulerDecisions(50)
+    schedulerTraces.value = response.items ?? []
+  } catch (error) {
+    console.warn('Failed to load scheduler decision traces', error)
+  } finally {
+    schedulerTraceLoading.value = false
+  }
+}
 let upstreamBillingRateAbortController: AbortController | null = null
 useIntervalFn(() => { upstreamBillingNow.value = Date.now() }, 60_000)
 
@@ -2519,6 +2555,7 @@ const handleClickOutside = (event: MouseEvent) => {
 }
 
 onMounted(async () => {
+  loadSchedulerTraces().catch(() => undefined)
   if (typeof window !== 'undefined') {
     desktopViewportMediaQuery = window.matchMedia(desktopViewportQuery)
     isDesktopViewport.value = desktopViewportMediaQuery.matches

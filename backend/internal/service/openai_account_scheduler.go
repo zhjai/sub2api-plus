@@ -95,7 +95,12 @@ type OpenAIAccountScheduleRequest struct {
 }
 
 type OpenAIAccountScheduleDecision struct {
-	Layer               string
+	Layer string
+	// ReasonCode and ReasonText explain the decision for observability. They
+	// are additive fields; callers that only need the historical scheduling
+	// fields remain source-compatible.
+	ReasonCode          string
+	ReasonText          string
 	StickyPreviousHit   bool
 	StickySessionHit    bool
 	CandidateCount      int
@@ -104,6 +109,77 @@ type OpenAIAccountScheduleDecision struct {
 	LoadSkew            float64
 	SelectedAccountID   int64
 	SelectedAccountType string
+}
+
+// OpenAIAccountScheduleTrace is a bounded, in-memory record of a scheduling
+// attempt. It intentionally stores no raw session or previous_response_id.
+// The trace is for admin diagnostics and is not part of the routing contract.
+type OpenAIAccountScheduleTrace struct {
+	At                    time.Time `json:"at"`
+	Layer                 string    `json:"layer"`
+	ReasonCode            string    `json:"reason_code"`
+	ReasonText            string    `json:"reason_text"`
+	StickyPreviousHit     bool      `json:"sticky_previous_hit"`
+	StickySessionHit      bool      `json:"sticky_session_hit"`
+	CandidateCount        int       `json:"candidate_count"`
+	TopK                  int       `json:"top_k"`
+	LatencyMs             int64     `json:"latency_ms"`
+	LoadSkew              float64   `json:"load_skew"`
+	SelectedAccountID     int64     `json:"selected_account_id"`
+	SelectedAccountType   string    `json:"selected_account_type"`
+	ExcludedAccountCount  int       `json:"excluded_account_count"`
+	ExcludedAccountIDs    []int64   `json:"excluded_account_ids,omitempty"`
+	PreviousResponseGiven bool      `json:"previous_response_given"`
+	SessionGiven          bool      `json:"session_given"`
+	Error                 string    `json:"error,omitempty"`
+}
+
+// OpenAIAccountScheduleTraceReader is implemented by the built-in scheduler.
+// It is deliberately a separate optional interface so existing scheduler
+// test doubles and integrations do not need to implement a new method.
+type OpenAIAccountScheduleTraceReader interface {
+	RecentScheduleTraces(limit int) []OpenAIAccountScheduleTrace
+}
+
+const openAIAccountScheduleTraceCapacity = 256
+
+type openAIAccountScheduleTraceStore struct {
+	mu    sync.RWMutex
+	items []OpenAIAccountScheduleTrace
+}
+
+func (s *openAIAccountScheduleTraceStore) append(trace OpenAIAccountScheduleTrace) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.items) >= openAIAccountScheduleTraceCapacity {
+		copy(s.items, s.items[1:])
+		s.items = s.items[:openAIAccountScheduleTraceCapacity-1]
+	}
+	s.items = append(s.items, trace)
+}
+
+func (s *openAIAccountScheduleTraceStore) recent(limit int) []OpenAIAccountScheduleTrace {
+	if s == nil {
+		return nil
+	}
+	if limit <= 0 || limit > openAIAccountScheduleTraceCapacity {
+		limit = openAIAccountScheduleTraceCapacity
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if limit > len(s.items) {
+		limit = len(s.items)
+	}
+	result := make([]OpenAIAccountScheduleTrace, limit)
+	copy(result, s.items[len(s.items)-limit:])
+	// Most recent first is more useful to the admin view.
+	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
+		result[i], result[j] = result[j], result[i]
+	}
+	return result
 }
 
 type OpenAIAccountSchedulerMetricsSnapshot struct {
@@ -299,6 +375,7 @@ type defaultOpenAIAccountScheduler struct {
 	service                *OpenAIGatewayService
 	metrics                openAIAccountSchedulerMetrics
 	stats                  *openAIAccountRuntimeStats
+	traces                 *openAIAccountScheduleTraceStore
 	grokFreeQuotaGateCache sync.Map // key: int64(accountID), value: grokFreeQuotaGateCacheEntry
 }
 
@@ -376,7 +453,15 @@ func newDefaultOpenAIAccountScheduler(service *OpenAIGatewayService, stats *open
 	return &defaultOpenAIAccountScheduler{
 		service: service,
 		stats:   stats,
+		traces:  &openAIAccountScheduleTraceStore{},
 	}
+}
+
+func (s *defaultOpenAIAccountScheduler) RecentScheduleTraces(limit int) []OpenAIAccountScheduleTrace {
+	if s == nil {
+		return nil
+	}
+	return s.traces.recent(limit)
 }
 
 func (s *defaultOpenAIAccountScheduler) Select(
@@ -390,7 +475,60 @@ func (s *defaultOpenAIAccountScheduler) Select(
 	// 命名返回值保证 defer 写入的耗时同时返回给调用方。
 	defer func() {
 		decision.LatencyMs = time.Since(start).Milliseconds()
+		if decision.ReasonCode == "" {
+			switch {
+			case err != nil:
+				decision.ReasonCode = "selection_error"
+				decision.ReasonText = err.Error()
+			case decision.Layer == openAIAccountScheduleLayerPreviousResponse:
+				decision.ReasonCode = "previous_response_sticky"
+				decision.ReasonText = "previous_response_id owner"
+			case decision.Layer == openAIAccountScheduleLayerGuardianParent:
+				decision.ReasonCode = "guardian_parent_sticky"
+				decision.ReasonText = "guardian parent affinity"
+			case decision.Layer == openAIAccountScheduleLayerSessionSticky:
+				decision.ReasonCode = "session_sticky"
+				decision.ReasonText = "session affinity"
+			case decision.SelectedAccountID > 0:
+				decision.ReasonCode = "load_balance_selection"
+				decision.ReasonText = "load balance / weighted selection"
+			default:
+				decision.ReasonCode = "no_selection"
+				decision.ReasonText = "no eligible account"
+			}
+		}
 		s.metrics.recordSelect(decision)
+		if s.traces != nil {
+			excludedIDs := make([]int64, 0, len(req.ExcludedIDs))
+			for accountID := range req.ExcludedIDs {
+				excludedIDs = append(excludedIDs, accountID)
+			}
+			sort.Slice(excludedIDs, func(i, j int) bool { return excludedIDs[i] < excludedIDs[j] })
+			s.traces.append(OpenAIAccountScheduleTrace{
+				At:                    time.Now().UTC(),
+				Layer:                 decision.Layer,
+				ReasonCode:            decision.ReasonCode,
+				ReasonText:            decision.ReasonText,
+				StickyPreviousHit:     decision.StickyPreviousHit,
+				StickySessionHit:      decision.StickySessionHit,
+				CandidateCount:        decision.CandidateCount,
+				TopK:                  decision.TopK,
+				LatencyMs:             decision.LatencyMs,
+				LoadSkew:              decision.LoadSkew,
+				SelectedAccountID:     decision.SelectedAccountID,
+				SelectedAccountType:   decision.SelectedAccountType,
+				ExcludedAccountCount:  len(req.ExcludedIDs),
+				ExcludedAccountIDs:    excludedIDs,
+				PreviousResponseGiven: strings.TrimSpace(req.PreviousResponseID) != "",
+				SessionGiven:          strings.TrimSpace(req.SessionHash) != "",
+				Error: func() string {
+					if err != nil {
+						return err.Error()
+					}
+					return ""
+				}(),
+			})
+		}
 	}()
 
 	previousResponseID := strings.TrimSpace(req.PreviousResponseID)
@@ -466,6 +604,8 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		}
 		if escapedSticky {
 			req.PreserveStickyBinding = true
+			decision.ReasonCode = "sticky_escape"
+			decision.ReasonText = "sticky account unavailable or excluded"
 		}
 	}
 
@@ -2489,6 +2629,22 @@ func (s *OpenAIGatewayService) SnapshotOpenAIAccountSchedulerMetrics() OpenAIAcc
 		return OpenAIAccountSchedulerMetricsSnapshot{}
 	}
 	return scheduler.SnapshotMetrics()
+}
+
+// RecentOpenAIAccountScheduleTraces returns recent request-level scheduling
+// explanations when the built-in scheduler is active. It is intentionally
+// optional and bounded; callers must treat an empty result as "not available"
+// rather than as evidence that no scheduling occurred.
+func (s *OpenAIGatewayService) RecentOpenAIAccountScheduleTraces(limit int) []OpenAIAccountScheduleTrace {
+	if s == nil {
+		return nil
+	}
+	scheduler := s.getOpenAIAccountScheduler(context.Background())
+	reader, ok := scheduler.(OpenAIAccountScheduleTraceReader)
+	if !ok {
+		return nil
+	}
+	return reader.RecentScheduleTraces(limit)
 }
 
 func (s *OpenAIGatewayService) openAIWSSessionStickyTTL() time.Duration {

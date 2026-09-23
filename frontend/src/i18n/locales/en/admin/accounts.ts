@@ -249,6 +249,15 @@ export default {
         ungrouped: 'Ungrouped',
         hint: 'Displayed as "group / base score / sticky bonus". The base score is computed within the current filtered candidate set and includes priority, load, queue depth, error rate, first-token latency, reset window, quota headroom, billing rate, and related factors. The sticky bonus applies only when sticky weighting is enabled for previous_response_id or session_hash. Higher scores are preferred.'
       },
+      schedulerTrace: {
+        title: 'Recent scheduling explanations',
+        refresh: 'Refresh explanations',
+        empty: 'No request-level scheduling records yet',
+        selected: 'Selected account',
+        excluded: 'Excluded this request',
+        reason: 'Reason',
+        error: 'Error'
+      },
       usageWindowsHint: '"5h / 7d" are the upstream account\'s official rolling usage windows (e.g. OpenAI ChatGPT, Claude). They are imposed by the upstream provider on the account itself — not configured by sub2api, and unrelated to the models you map. Usage resets automatically once each window rolls over, and the limit cannot be lifted from within sub2api.',
       ollamaCloud: {
         title: 'Ollama Cloud usage',

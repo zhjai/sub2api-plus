@@ -311,6 +311,21 @@ type OpenAIForwardResult struct {
 	wsAccountFailoverReplayInput []json.RawMessage
 }
 
+// RequiresSessionAccountEscape reports a terminal stream failure for which the
+// next sampling should not reuse this request's sticky upstream account.
+// Normal model truncation (for example max_output_tokens) remains sticky.
+func (r *OpenAIForwardResult) RequiresSessionAccountEscape() bool {
+	if r == nil || !r.ResponsesOutcomeObserved {
+		return false
+	}
+	if !r.ResponsesMeaningfulOutput && !r.ResponsesToolCallForwarded {
+		return false
+	}
+	status := strings.TrimSpace(r.ResponsesProtocolStatus)
+	return (strings.EqualFold(status, "incomplete") || strings.EqualFold(status, "premature_eof")) &&
+		strings.EqualFold(strings.TrimSpace(r.ResponsesIncompleteReason), "stream_terminated")
+}
+
 // SucceededForScheduling reports whether this result is an upstream success
 // that may clear model-scoped transient state. The zero value remains a success
 // for existing non-WS callers.
@@ -548,6 +563,13 @@ type OpenAIGatewayService struct {
 	openAIModelsCache                   openAIModelsCache
 	openaiCompatSessionResponses        sync.Map
 	openaiCompatAnthropicDigestSessions sync.Map
+	// openaiSessionEscapes is a short-lived process-local guard used between a
+	// terminal stream failure and the next client sampling request. The normal
+	// sticky binding is removed as well; this map also prevents a movable
+	// previous_response_id preference from immediately selecting the failed
+	// account again.
+	openaiSessionEscapeMu sync.Mutex
+	openaiSessionEscapes  map[string]map[int64]time.Time
 	// openaiCodexTurnStateOrigins: 下游会话 seed → openAICodexTurnStateOrigin，
 	// 记录最近一次向该会话下发 x-codex-turn-state 的铸造账号，供出站守卫
 	// 剥离跨账号回带（openai_codex_turn_state.go）。

@@ -32,6 +32,34 @@ import type {
   GrokMediaEligibilityState
 } from '@/types'
 
+export interface SchedulerDecisionTrace {
+  at: string
+  layer: string
+  reason_code: string
+  reason_text: string
+  sticky_previous_hit: boolean
+  sticky_session_hit: boolean
+  candidate_count: number
+  top_k: number
+  latency_ms: number
+  load_skew: number
+  selected_account_id: number
+  selected_account_type: string
+  excluded_account_count: number
+  excluded_account_ids?: number[]
+  previous_response_given: boolean
+  session_given: boolean
+  error?: string
+}
+
+export async function listSchedulerDecisions(limit = 50): Promise<{ items: SchedulerDecisionTrace[]; limit: number }> {
+  const { data } = await apiClient.get<{ items: SchedulerDecisionTrace[]; limit: number }>(
+    '/admin/accounts/scheduler-decisions',
+    { params: { limit } }
+  )
+  return data
+}
+
 /**
  * List all accounts with pagination
  * @param page - Page number (default: 1)

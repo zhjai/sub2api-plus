@@ -168,6 +168,9 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 
 	// 3. Account selection + failover loop
 	fs := NewFailoverState(h.maxAccountSwitches, false)
+	for escapedID := range h.openAIGatewayService.OpenAISessionEscapedAccountIDs(apiKey.GroupID, sessionHash) {
+		fs.FailedAccountIDs[escapedID] = struct{}{}
+	}
 
 	for {
 		if requestCtx.Err() != nil {
@@ -284,8 +287,14 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 		if err != nil {
 			var failoverErr *service.UpstreamFailoverError
 			if errors.As(err, &failoverErr) {
+				if failoverErr.SessionAccountEscape {
+					_ = h.openAIGatewayService.EscapeOpenAISessionAccount(requestCtx, apiKey.GroupID, sessionHash, account.ID)
+				}
 				// Can't failover if streaming content already sent
 				if c.Writer.Size() != writerSizeBeforeForward {
+					if result != nil && result.RequiresSessionAccountEscape() {
+						_ = h.openAIGatewayService.EscapeOpenAISessionAccount(requestCtx, apiKey.GroupID, sessionHash, account.ID)
+					}
 					h.handleResponsesFailoverExhausted(c, failoverErr, true)
 					return
 				}
@@ -301,6 +310,9 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 					return
 				}
 			}
+			if result != nil && result.RequiresSessionAccountEscape() {
+				_ = h.openAIGatewayService.EscapeOpenAISessionAccount(requestCtx, apiKey.GroupID, sessionHash, account.ID)
+			}
 			upstreamErrorAlreadyCommunicated := gatewayForwardErrorAlreadyCommunicated(c, writerSizeBeforeForward, err)
 			wroteFallback := false
 			if !upstreamErrorAlreadyCommunicated {
@@ -313,6 +325,13 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 				zap.Error(err),
 			)
 			return
+		}
+		if result != nil && result.RequiresSessionAccountEscape() {
+			if escapeErr := h.openAIGatewayService.EscapeOpenAISessionAccount(requestCtx, apiKey.GroupID, sessionHash, account.ID); escapeErr != nil {
+				reqLog.Warn("gateway.responses.session_account_escape_failed", zap.Int64("account_id", account.ID), zap.Error(escapeErr))
+			} else {
+				reqLog.Warn("gateway.responses.session_account_escaped", zap.Int64("account_id", account.ID), zap.String("reason", result.ResponsesIncompleteReason))
+			}
 		}
 
 		// 6. Record usage

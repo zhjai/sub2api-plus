@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -22,6 +23,8 @@ var (
 	openAIStickyLegacyReadFallbackHit   atomic.Int64
 	openAIStickyLegacyDualWriteTotal    atomic.Int64
 )
+
+const openAISessionEscapeTTL = 30 * time.Minute
 
 func openAIStickyCompatStats() (legacyReadFallbackTotal, legacyReadFallbackHit, legacyDualWriteTotal int64) {
 	return openAIStickyLegacyReadFallbackTotal.Load(),
@@ -218,4 +221,77 @@ func (s *OpenAIGatewayService) deleteStickySessionAccountID(ctx context.Context,
 		_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), legacyKey)
 	}
 	return err
+}
+
+// EscapeOpenAISessionAccount removes the sticky binding for a session only when
+// it still points at failedAccountID.  A stream watchdog/transport failure is
+// terminal for the current sampling, but the next sampling can safely migrate
+// to another account.  The compare-before-delete guard prevents an older
+// in-flight request from clearing a newer healthy binding.
+func (s *OpenAIGatewayService) EscapeOpenAISessionAccount(ctx context.Context, groupID *int64, sessionHash string, failedAccountID int64) error {
+	if s == nil || s.cache == nil || strings.TrimSpace(sessionHash) == "" || failedAccountID <= 0 {
+		return nil
+	}
+	lookupCtx := context.WithoutCancel(ctx)
+	bound, err := s.getStickySessionAccountID(lookupCtx, groupID, sessionHash)
+	lookupErr := err
+	if err != nil || bound != failedAccountID {
+		// A missing sticky binding can occur when a scheduler path deliberately
+		// avoids eager binding. Still record the escape so a movable
+		// previous_response_id cannot immediately route back to this account.
+	} else if deleteErr := s.deleteStickySessionAccountID(lookupCtx, groupID, sessionHash); deleteErr != nil {
+		lookupErr = deleteErr
+	}
+
+	key := fmt.Sprintf("%d:%s", derefGroupID(groupID), strings.TrimSpace(sessionHash))
+	if escapeCache, ok := s.cache.(OpenAISessionEscapeCache); ok {
+		if err := escapeCache.AddOpenAISessionEscapedAccount(lookupCtx, derefGroupID(groupID), strings.TrimSpace(sessionHash), failedAccountID, openAISessionEscapeTTL); err != nil {
+			lookupErr = errors.Join(lookupErr, err)
+		}
+	}
+	s.openaiSessionEscapeMu.Lock()
+	if s.openaiSessionEscapes == nil {
+		s.openaiSessionEscapes = make(map[string]map[int64]time.Time)
+	}
+	if s.openaiSessionEscapes[key] == nil {
+		s.openaiSessionEscapes[key] = make(map[int64]time.Time)
+	}
+	s.openaiSessionEscapes[key][failedAccountID] = time.Now().Add(openAISessionEscapeTTL)
+	s.openaiSessionEscapeMu.Unlock()
+	return lookupErr
+}
+
+// OpenAISessionEscapedAccountIDs returns hard-excluded accounts for the next
+// sampling of a session. It intentionally returns a fresh map so callers may
+// merge it into their request-local failover exclusions.
+func (s *OpenAIGatewayService) OpenAISessionEscapedAccountIDs(groupID *int64, sessionHash string) map[int64]struct{} {
+	if s == nil || strings.TrimSpace(sessionHash) == "" {
+		return nil
+	}
+	key := fmt.Sprintf("%d:%s", derefGroupID(groupID), strings.TrimSpace(sessionHash))
+	now := time.Now()
+	s.openaiSessionEscapeMu.Lock()
+	entries := s.openaiSessionEscapes[key]
+	result := make(map[int64]struct{}, len(entries))
+	for accountID, until := range entries {
+		if !until.After(now) {
+			delete(entries, accountID)
+			continue
+		}
+		result[accountID] = struct{}{}
+	}
+	if len(entries) == 0 {
+		delete(s.openaiSessionEscapes, key)
+	}
+	s.openaiSessionEscapeMu.Unlock()
+	if escapeCache, ok := s.cache.(OpenAISessionEscapeCache); ok {
+		if ids, err := escapeCache.GetOpenAISessionEscapedAccountIDs(context.Background(), derefGroupID(groupID), strings.TrimSpace(sessionHash)); err == nil {
+			for _, accountID := range ids {
+				if accountID > 0 {
+					result[accountID] = struct{}{}
+				}
+			}
+		}
+	}
+	return result
 }

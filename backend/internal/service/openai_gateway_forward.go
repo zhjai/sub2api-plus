@@ -1224,6 +1224,12 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		if reqStream {
 			streamResult, err := s.handleStreamingResponseWithReasoning(ctx, resp, c, account, startTime, originalModel, upstreamModel, reasoningEffortValue)
 			if err != nil {
+				// A semantic Responses stream can fail after it has already emitted a
+				// response id. Persist the owner before returning the partial result so
+				// a Codex continuation can keep the same upstream affinity.
+				if streamResult != nil && (streamResult.responsesMeaningfulOutput || streamResult.responsesToolCallForwarded) {
+					s.bindHTTPResponseAccount(ctx, c, account, streamResult.responseID)
+				}
 				if signal, ok := asOpenAICompactFallbackSignal(err); ok {
 					if retryBody, fallbackModel, retry := s.prepareOpenAICompactFallbackRetry(
 						c, account, requestedModel, body, http.StatusBadRequest, signal.message, signal.payload, compactModelFallbackRetried,
