@@ -16,6 +16,56 @@ type ResponsesClientToolMapping struct {
 	NamespaceTools map[string]ResponsesNamespaceName
 }
 
+// PromoteResponsesAdditionalTools moves client-executable tools carried by
+// Responses Lite's input[].additional_tools item into the top-level tools
+// declaration used by compatibility upstreams. The carrier is removed because
+// function-only upstreams reject the private Responses Lite item type.
+//
+// This helper is intentionally opt-in. Native Responses Lite forwarding must
+// preserve additional_tools and therefore must not call it.
+func PromoteResponsesAdditionalTools(req map[string]any) (bool, error) {
+	if req == nil {
+		return false, nil
+	}
+	input, ok := req["input"].([]any)
+	if !ok {
+		return false, nil
+	}
+
+	_, toolsPresent := req["tools"]
+	tools, _ := req["tools"].([]any)
+	kept := make([]any, 0, len(input))
+	changed := false
+	for _, raw := range input {
+		item, ok := raw.(map[string]any)
+		if !ok || strings.TrimSpace(stringValue(item["type"])) != "additional_tools" {
+			kept = append(kept, raw)
+			continue
+		}
+		additional, exists := item["tools"]
+		if !exists || additional == nil {
+			changed = true
+			continue
+		}
+		additionalTools, ok := additional.([]any)
+		if !ok {
+			return false, fmt.Errorf("additional_tools.tools must be an array")
+		}
+		tools = append(tools, additionalTools...)
+		changed = true
+	}
+	if !changed {
+		return false, nil
+	}
+	req["input"] = kept
+	if len(tools) == 0 && !toolsPresent {
+		delete(req, "tools")
+	} else {
+		req["tools"] = tools
+	}
+	return true, nil
+}
+
 // AdaptResponsesClientTools lowers Codex client-only tools in req to
 // ordinary function tools. It mutates req and returns the mapping required to
 // restore the upstream response.
@@ -187,6 +237,13 @@ func AdaptResponsesClientToolsWithInheritedMapping(
 		req["tools"] = restoreInheritedResponsesClientToolDeclarations(inheritedLoweredTools[0], inherited)
 		return AdaptResponsesClientTools(req)
 	}
+	// A continuation may omit the session-level declaration and only carry
+	// previously emitted custom_tool_call items. Recreate generic function
+	// declarations so a function-only upstream can still validate the request.
+	if lowered := inferredLoweredResponsesClientToolDeclarations(inherited); len(lowered) > 0 {
+		req["tools"] = lowered
+		return AdaptResponsesClientTools(req)
+	}
 
 	changed, err := rewriteClientToolHistory(req["input"], &inherited)
 	if err != nil {
@@ -206,6 +263,58 @@ func AdaptResponsesClientToolsWithInheritedMapping(
 		changed = true
 	}
 	return inherited, changed, nil
+}
+
+// InferResponsesClientToolMapping discovers only tool identities that are
+// unambiguous from continuation history. Outputs alone do not contain a tool
+// name and are therefore intentionally ignored; callers must not guess a
+// mapping from an orphaned custom_tool_call_output.
+func InferResponsesClientToolMapping(req map[string]any) (ResponsesClientToolMapping, bool) {
+	if req == nil {
+		return ResponsesClientToolMapping{}, false
+	}
+	mapping := ResponsesClientToolMapping{CustomTools: make(map[string]bool)}
+	var visit func(any)
+	visit = func(value any) {
+		switch typed := value.(type) {
+		case []any:
+			for _, item := range typed {
+				visit(item)
+			}
+		case map[string]any:
+			switch strings.TrimSpace(stringValue(typed["type"])) {
+			case "custom_tool_call":
+				if name := strings.TrimSpace(stringValue(typed["name"])); name != "" {
+					mapping.CustomTools[name] = true
+				}
+			case "tool_search_call":
+				mapping.ToolSearch = true
+			}
+			for _, child := range typed {
+				visit(child)
+			}
+		}
+	}
+	visit(req["input"])
+	if len(mapping.CustomTools) == 0 {
+		mapping.CustomTools = nil
+	}
+	return mapping, len(mapping.CustomTools) > 0 || mapping.ToolSearch
+}
+
+func inferredLoweredResponsesClientToolDeclarations(mapping ResponsesClientToolMapping) []any {
+	tools := make([]any, 0, len(mapping.CustomTools)+1)
+	for name := range mapping.CustomTools {
+		tools = append(tools, map[string]any{
+			"type": "custom", "name": name,
+		})
+	}
+	if mapping.ToolSearch {
+		tools = append(tools, map[string]any{
+			"type": "tool_search",
+		})
+	}
+	return tools
 }
 
 func copyClientTool(tool map[string]any) map[string]any {

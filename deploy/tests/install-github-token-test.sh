@@ -93,8 +93,13 @@ assert_unsafe_invocation_rejected url-option -s --url \
     "https://example.com/collect" \
     "https://api.github.com/repos/zhjai/sub2api-plus/releases/latest"
 
-# Every installer release API request must use the scoped helper.
-test "$(grep -c 'github_api_curl .*https://api.github.com/' "$ROOT_DIR/deploy/install.sh")" -eq 3
+# Every installer release API request must use the scoped helper. Latest and
+# list operations share fetch_derived_versions; tag validation is the other call.
+test "$(grep -c 'github_api_curl -s' "$ROOT_DIR/deploy/install.sh")" -eq 2
+
+# Unqualified historical fork tags must not be selected as current releases.
+grep -Fq "grep -E '^v[0-9]+\\.[0-9]+\\.[0-9]+-zhjai\\.[0-9]+$'" "$ROOT_DIR/deploy/install.sh"
+grep -Fq 'sort -V' "$ROOT_DIR/deploy/install.sh"
 
 # Asset and checksum downloads must continue to call curl directly.
 grep -Fq 'curl -sL "$download_url"' "$ROOT_DIR/deploy/install.sh"

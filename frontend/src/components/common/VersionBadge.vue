@@ -89,7 +89,7 @@
                   <span v-else class="text-2xl font-bold text-gray-400 dark:text-dark-500">--</span>
                   <!-- Show check mark when up to date -->
                   <span
-                    v-if="!hasUpdate"
+                    v-if="!hasUpdate && !versionWarning"
                     class="flex h-5 w-5 items-center justify-center rounded-full bg-green-100 dark:bg-green-900/30"
                   >
                     <svg
@@ -109,7 +109,7 @@
                   {{
                     hasUpdate
                       ? t('version.latestVersion') + ': v' + latestVersion
-                      : t('version.upToDate')
+                      : versionWarning || t('version.upToDate')
                   }}
                 </p>
               </div>
@@ -651,9 +651,9 @@ import {
 import { useClipboard } from '@/composables/useClipboard'
 import Icon from '@/components/icons/Icon.vue'
 
-const GITHUB_REPO = 'Wei-Shaw/sub2api'
-// Docker Hub image published by CI (tags carry no "v" prefix, e.g. weishaw/sub2api:0.1.146)
-const DOCKER_IMAGE = 'weishaw/sub2api'
+const GITHUB_REPO = 'zhjai/sub2api-plus'
+// Fork image published by CI (tags carry no "v" prefix, e.g. ghcr.io/zhjai/sub2api:0.2.7-zhjai.3)
+const DOCKER_IMAGE = 'ghcr.io/zhjai/sub2api'
 
 const { t } = useI18n()
 
@@ -676,6 +676,7 @@ const latestVersion = computed(() => appStore.latestVersion)
 const hasUpdate = computed(() => appStore.hasUpdate)
 const releaseInfo = computed(() => appStore.releaseInfo)
 const buildType = computed(() => appStore.buildType)
+const versionWarning = computed(() => appStore.versionWarning)
 
 // Update process states (local to this component)
 const updating = ref(false)

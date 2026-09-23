@@ -318,6 +318,12 @@ func (r *OpenAIForwardResult) SucceededForScheduling() bool {
 	if r == nil {
 		return true
 	}
+	// A syntactically successful response from a different model is a channel
+	// integrity failure. Do not clear transient account state or mark the
+	// credential healthy when the upstream has served the wrong model.
+	if r.HasUpstreamModelMismatch() {
+		return false
+	}
 	if r.ResponsesOutcomeObserved {
 		switch r.ResponsesProtocolStatus {
 		case "completed":

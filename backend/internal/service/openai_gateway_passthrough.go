@@ -42,6 +42,10 @@ func adaptOpenAIResponsesClientTools(body []byte) ([]byte, apicompat.ResponsesCl
 	if err := decoder.Decode(&requestBody); err != nil {
 		return body, apicompat.ResponsesClientToolMapping{}, fmt.Errorf("decode OpenAI Responses client tools: %w", err)
 	}
+	additionalToolsChanged, err := apicompat.PromoteResponsesAdditionalTools(requestBody)
+	if err != nil {
+		return body, apicompat.ResponsesClientToolMapping{}, fmt.Errorf("promote OpenAI Responses additional tools: %w", err)
+	}
 	var trailingValue any
 	if err := decoder.Decode(&trailingValue); !errors.Is(err, io.EOF) {
 		if err == nil {
@@ -49,9 +53,23 @@ func adaptOpenAIResponsesClientTools(body []byte) ([]byte, apicompat.ResponsesCl
 		}
 		return body, apicompat.ResponsesClientToolMapping{}, fmt.Errorf("decode OpenAI Responses client tools trailing data: %w", err)
 	}
-	mapping, changed, err := apicompat.AdaptResponsesClientTools(requestBody)
-	if err != nil || !changed {
+	var mapping apicompat.ResponsesClientToolMapping
+	var adapted bool
+	if _, toolsPresent := requestBody["tools"]; !toolsPresent {
+		inferred, inferredOK := apicompat.InferResponsesClientToolMapping(requestBody)
+		if inferredOK {
+			mapping, adapted, err = apicompat.AdaptResponsesClientToolsWithInheritedMapping(requestBody, inferred)
+		} else {
+			mapping, adapted, err = apicompat.AdaptResponsesClientTools(requestBody)
+		}
+	} else {
+		mapping, adapted, err = apicompat.AdaptResponsesClientTools(requestBody)
+	}
+	if err != nil {
 		return body, mapping, err
+	}
+	if !additionalToolsChanged && !adapted {
+		return body, mapping, nil
 	}
 	rebuilt, err := marshalOpenAIUpstreamJSON(requestBody)
 	if err != nil {
@@ -67,7 +85,7 @@ func needsOpenAIResponsesClientToolAdaptation(body []byte) bool {
 		if value.IsObject() {
 			switch strings.TrimSpace(value.Get("type").String()) {
 			case "custom", "custom_tool_call", "custom_tool_call_output",
-				"tool_search", "tool_search_call", "tool_search_output":
+				"tool_search", "tool_search_call", "tool_search_output", "additional_tools":
 				needsAdaptation = true
 				return false
 			}

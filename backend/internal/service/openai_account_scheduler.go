@@ -2455,10 +2455,24 @@ func (s *OpenAIGatewayService) ReportOpenAIAccountScheduleResult(account *Accoun
 // ObserveOpenAIAccountHealthFailure records failures that cannot reach the
 // scheduler-result path, for example after semantic response bytes were sent.
 func (s *OpenAIGatewayService) ObserveOpenAIAccountHealthFailure(ctx context.Context, account *Account, observedErr error) bool {
-	if s == nil || s.rateLimitService == nil || account == nil || observedErr == nil {
+	if s == nil || account == nil || observedErr == nil {
 		return false
 	}
-	return s.rateLimitService.ObserveOpenAIAPIKeyHealthFailure(ctx, account, observedErr)
+
+	healthTripped := false
+	if s.rateLimitService != nil {
+		healthTripped = s.rateLimitService.ObserveOpenAIAPIKeyHealthFailure(ctx, account, observedErr)
+	}
+
+	// This path is used after semantic response bytes have already been sent,
+	// so it cannot use the ordinary scheduler-result path. Still feed the
+	// failure into the scheduler EWMA so sticky escape and account ranking see
+	// partial-stream failures as real failures.
+	if scheduler := s.getOpenAIAccountScheduler(context.Background()); scheduler != nil {
+		scheduler.ReportResult(account.ID, false, nil)
+	}
+
+	return healthTripped
 }
 
 func (s *OpenAIGatewayService) RecordOpenAIAccountSwitch() {

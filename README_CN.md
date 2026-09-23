@@ -41,6 +41,8 @@
 
 本 fork 的 Release 发布在 [zhjai/sub2api-plus/releases](https://github.com/zhjai/sub2api-plus/releases)，下方命令使用本 fork 的安装脚本、源码和容器镜像。
 
+版本号遵循上游基线，但不会冒充上游发行版。当前 fork 版本线为 `0.2.7-zhjai.3`：`0.2.7` 表示上游基线，`-zhjai.3` 表示本 fork 的第 3 次派生修订。更新器只识别带有该派生后缀的 Release，不会把历史上不带后缀的 fork 标签当作当前版本。
+
 ## 赞助说明
 
 本 fork 不代表上游赞助商关系，也不对上游赞助商广告作背书。除非获得针对本仓库的独立授权，否则不在此列出商业推广内容。仓库中的合作方 logo 仅作为上游历史资源保留，不构成推荐或赞助声明。
@@ -166,10 +168,30 @@ sudo systemctl enable sub2api
 
 可以直接在 **管理后台** 左上角点击 **检测更新** 按钮进行在线升级。
 
+如果是通过 systemd 脚本安装，也可以在服务器上执行：
+
+```bash
+curl -sSL https://raw.githubusercontent.com/zhjai/sub2api-plus/main/deploy/install.sh | sudo bash -s -- upgrade
+```
+
+安装或回退到本 fork 的指定 Release：
+
+```bash
+curl -sSL https://raw.githubusercontent.com/zhjai/sub2api-plus/main/deploy/install.sh | sudo bash -s -- upgrade -v v0.2.7-zhjai.3
+```
+
+升级命令只替换二进制并重启服务，不会删除 `/etc/sub2api`、PostgreSQL 数据或 Redis 数据；升级前仍建议备份数据库和配置，并保留旧 Release 以便回退。
+
 网页升级功能支持：
 - 自动检测新版本
 - 一键下载并应用更新
 - 支持回滚
+
+#### Responses 流诊断
+
+`codex.response.metadata` 只是前导事件，不代表请求完成。如果上游在该事件之后直接关闭，且没有发送 `response.completed`、`response.done`、`response.incomplete`、`response.failed` 或取消类终止事件，网关会判定为上游提前 EOF。只有在尚未向客户端发送有效文本或工具参数时才允许内部切号；已经发送正文或工具调用后会以 incomplete 结束，禁止重放整个 turn。
+
+如果上游响应声明的模型与实际发送的模型不一致（例如请求 `gpt-6-astra`，响应却声明 `gpt-5.6-luna`），本 fork 会记录模型完整性故障，临时隔离该 OpenAI 账号，并让后续调度选择其他账号。配置中明确的合法别名在规范化后相同的情况下不会误判。
 
 #### 常用命令
 

@@ -66,6 +66,56 @@ func TestAdaptResponsesClientTools_LowersDeclarationsHistoryChoiceAndNamespaces(
 	require.Equal(t, "team__send", namespaceCall["name"])
 }
 
+func TestPromoteResponsesAdditionalToolsMovesLiteCustomToolsForCompatibilityUpstreams(t *testing.T) {
+	req := map[string]any{
+		"tools": []any{map[string]any{"type": "function", "name": "lookup"}},
+		"input": []any{
+			map[string]any{"type": "message", "role": "user", "content": "run it"},
+			map[string]any{"type": "additional_tools", "tools": []any{
+				map[string]any{"type": "custom", "name": "exec"},
+			}},
+		},
+	}
+
+	changed, err := PromoteResponsesAdditionalTools(req)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.Len(t, req["tools"], 2)
+	require.Equal(t, "custom", req["tools"].([]any)[1].(map[string]any)["type"])
+	require.Len(t, req["input"], 1)
+	require.Equal(t, "message", req["input"].([]any)[0].(map[string]any)["type"])
+
+	mapping, changed, err := AdaptResponsesClientTools(req)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.True(t, mapping.CustomTools["exec"])
+	require.Equal(t, "function", req["tools"].([]any)[1].(map[string]any)["type"])
+}
+
+func TestPromoteResponsesAdditionalToolsRejectsMalformedCarrier(t *testing.T) {
+	_, err := PromoteResponsesAdditionalTools(map[string]any{
+		"input": []any{map[string]any{"type": "additional_tools", "tools": "exec"}},
+	})
+	require.ErrorContains(t, err, "additional_tools.tools must be an array")
+}
+
+func TestPromoteResponsesAdditionalToolsPreservesExplicitEmptyToolReset(t *testing.T) {
+	req := map[string]any{
+		"tools": []any{},
+		"input": []any{
+			map[string]any{"type": "additional_tools", "tools": []any{}},
+			map[string]any{"type": "custom_tool_call", "name": "exec", "input": "pwd"},
+		},
+	}
+
+	changed, err := PromoteResponsesAdditionalTools(req)
+	require.NoError(t, err)
+	require.True(t, changed)
+	tools, present := req["tools"]
+	require.True(t, present)
+	require.Empty(t, tools)
+}
+
 func TestAdaptResponsesClientTools_RemovesDeferredFlagsWhenToolSearchIsLowered(t *testing.T) {
 	req := map[string]any{
 		"tools": []any{
@@ -593,6 +643,36 @@ func TestAdaptResponsesClientToolsWithInheritedMapping_ExplicitToolResetDoesNotP
 		item := requireResponsesClientToolValue[map[string]any](t, requireResponsesClientToolValue[[]any](t, req["input"])[0])
 		require.Equal(t, "tool_search_output", item["type"])
 	}
+}
+
+func TestInferResponsesClientToolMappingLowersContinuationWithoutDeclarations(t *testing.T) {
+	req := map[string]any{
+		"input": []any{
+			map[string]any{"type": "message", "role": "user", "content": "continue"},
+			map[string]any{"type": "custom_tool_call", "id": "ctc_1", "call_id": "call_1", "name": "exec", "input": "pwd"},
+		},
+	}
+
+	inferred, ok := InferResponsesClientToolMapping(req)
+	require.True(t, ok)
+	require.True(t, inferred.CustomTools["exec"])
+
+	mapping, changed, err := AdaptResponsesClientToolsWithInheritedMapping(req, inferred)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.True(t, mapping.CustomTools["exec"])
+	require.Equal(t, "function", requireResponsesClientToolValue[[]any](t, req["tools"])[0].(map[string]any)["type"])
+	call := requireResponsesClientToolValue[map[string]any](t, requireResponsesClientToolValue[[]any](t, req["input"])[1])
+	require.Equal(t, "function_call", call["type"])
+	require.Equal(t, "{\"input\":\"pwd\"}", call["arguments"])
+}
+
+func TestInferResponsesClientToolMappingIgnoresOrphanedOutput(t *testing.T) {
+	req := map[string]any{"input": []any{map[string]any{
+		"type": "custom_tool_call_output", "call_id": "call_1", "output": "ok",
+	}}}
+	_, ok := InferResponsesClientToolMapping(req)
+	require.False(t, ok)
 }
 
 func TestRestoreResponsesClientToolPayload_RestoresClientAndNamespaceCalls(t *testing.T) {

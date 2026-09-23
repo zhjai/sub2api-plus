@@ -1584,6 +1584,26 @@ func TestOpenAIGatewayService_OpenAIAccountSchedulerMetrics_DisabledNoOp(t *test
 	require.Equal(t, OpenAIAccountSchedulerMetricsSnapshot{}, snapshot)
 }
 
+func TestOpenAIGatewayService_ObserveOpenAIAccountHealthFailureReportsSchedulerEWMA(t *testing.T) {
+	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	defer resetOpenAIAdvancedSchedulerSettingCacheForTest()
+
+	svc := &OpenAIGatewayService{
+		rateLimitService: newOpenAIAdvancedSchedulerRateLimitService("true"),
+		cfg:              &config.Config{},
+	}
+	account := &Account{ID: 7411, Platform: PlatformOpenAI}
+	streamErr := errors.New("stream ended before response.completed")
+
+	svc.ObserveOpenAIAccountHealthFailure(context.Background(), account, streamErr)
+	errorRate, _, _ := svc.openaiAccountStats.snapshot(account.ID)
+	require.InDelta(t, 0.20, errorRate, 1e-9)
+
+	svc.ObserveOpenAIAccountHealthFailure(context.Background(), account, streamErr)
+	errorRate, _, _ = svc.openaiAccountStats.snapshot(account.ID)
+	require.InDelta(t, 0.36, errorRate, 1e-9)
+}
+
 func TestOpenAIGatewayService_SelectAccountWithScheduler_SkipsQuarantinedSharedProxy(t *testing.T) {
 	resetOpenAIAdvancedSchedulerSettingCacheForTest()
 

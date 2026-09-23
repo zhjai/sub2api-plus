@@ -40,6 +40,8 @@ Install commands below point to this fork. For upstream issues and releases, use
 
 Fork releases are published at [zhjai/sub2api-plus/releases](https://github.com/zhjai/sub2api-plus/releases). The commands below use this fork's installer, source tree, and container images.
 
+Versioning follows the upstream baseline without impersonating upstream releases. The current fork line is `0.2.7-zhjai.3`: `0.2.7` identifies the upstream baseline and `-zhjai.3` identifies the third fork revision. The updater only considers releases with this derived suffix; legacy unqualified fork tags are not treated as current releases.
+
 ## Sponsorship
 
 This fork does not claim or reproduce upstream sponsor relationships. Sponsor listings are intentionally omitted unless independently authorized for this repository. The inherited partner logo assets remain in the tree as historical resources only and do not constitute an endorsement.
@@ -142,10 +144,30 @@ The Setup Wizard will guide you through:
 
 You can upgrade directly from the **Admin Dashboard** by clicking the **Check for Updates** button in the top-left corner.
 
+For a server using the systemd installer, the equivalent command is:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/zhjai/sub2api-plus/main/deploy/install.sh | sudo bash -s -- upgrade
+```
+
+To install or roll back to a specific fork release:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/zhjai/sub2api-plus/main/deploy/install.sh | sudo bash -s -- upgrade -v v0.2.7-zhjai.3
+```
+
+The upgrade command replaces the binary and restarts the service. It does not remove `/etc/sub2api`, PostgreSQL data, or Redis data; make a database/config backup before upgrading and keep the previous release available for rollback.
+
 The web interface will:
 - Check for new versions automatically
 - Download and apply updates with one click
 - Support rollback if needed
+
+#### Responses stream diagnostics
+
+`codex.response.metadata` is a preamble, not a completion event. If the upstream closes after that event without `response.completed`, `response.done`, `response.incomplete`, `response.failed`, or a cancellation event, the request is treated as a premature upstream EOF. The gateway may fail over only while no meaningful output has reached the client; after text or tool-call output has been sent it terminates the stream as incomplete and does not replay the turn.
+
+If an upstream response declares a model different from the model sent on the wire (for example, requested `gpt-6-astra` but the response declares `gpt-5.6-luna`), this fork records a model-integrity failure, temporarily quarantines that OpenAI account, and lets subsequent scheduling choose another account. Legitimate configured aliases are exempt when the sent and declared models normalize to the same supported runtime model.
 
 #### Useful Commands
 

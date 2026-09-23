@@ -97,6 +97,24 @@ func TestUpstreamModelMismatchTreatsGrokBuildRuntimeIDsAsAliases(t *testing.T) {
 	}
 }
 
+func TestUpstreamModelMismatchTreatsOpenAISnapshotsAsAliases(t *testing.T) {
+	tests := []struct {
+		sentModel     string
+		responseModel string
+	}{
+		{sentModel: "gpt-4o", responseModel: "gpt-4o-2024-08-06"},
+		{sentModel: "gpt-4o-latest", responseModel: "gpt-4o-2024-08-06"},
+		{sentModel: "gpt-4.1-2025-04-14", responseModel: "gpt-4.1"},
+		{sentModel: "gpt-5", responseModel: "GPT-5-2025-08-07"},
+	}
+
+	for _, tt := range tests {
+		mismatch := upstreamModelMismatch(tt.sentModel, tt.responseModel)
+		require.NotNil(t, mismatch)
+		require.False(t, *mismatch, "%s should match %s", tt.sentModel, tt.responseModel)
+	}
+}
+
 func TestUpstreamModelMismatchDoesNotCollapseDifferentModels(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -114,6 +132,11 @@ func TestUpstreamModelMismatchDoesNotCollapseDifferentModels(t *testing.T) {
 			responseModel: "gpt-5.5-build",
 		},
 		{
+			name:          "different OpenAI snapshot family",
+			sentModel:     "gpt-4o",
+			responseModel: "gpt-4o-mini-2024-07-18",
+		},
+		{
 			name:          "different grok runtime",
 			sentModel:     "grok-build-0.1",
 			responseModel: "grok-4.5-build",
@@ -128,6 +151,42 @@ func TestUpstreamModelMismatchDoesNotCollapseDifferentModels(t *testing.T) {
 			require.True(t, *mismatch)
 		})
 	}
+}
+
+func TestOpenAIForwardResultModelMismatchBlocksScheduling(t *testing.T) {
+	result := &OpenAIForwardResult{
+		Model:                 "gpt-6-astra",
+		UpstreamModel:         "gpt-6-astra",
+		UpstreamResponseModel: "gpt-5.6-luna",
+	}
+
+	require.True(t, result.HasUpstreamModelMismatch())
+	require.Equal(t, "gpt-6-astra", result.UpstreamSentModelForAudit())
+	require.Error(t, result.UpstreamModelMismatchError())
+	require.False(t, result.SucceededForScheduling())
+}
+
+func TestOpenAIForwardResultModelMismatchUsesRequestedModelWhenNoMapping(t *testing.T) {
+	result := &OpenAIForwardResult{
+		Model:                 "gpt-6-astra",
+		UpstreamResponseModel: "gpt-5.6-luna",
+	}
+
+	require.True(t, result.HasUpstreamModelMismatch())
+	require.Equal(t, "gpt-6-astra", result.UpstreamSentModelForAudit())
+	require.IsType(t, &OpenAIUpstreamModelMismatchError{}, result.UpstreamModelMismatchError())
+}
+
+func TestOpenAIForwardResultModelMappingDoesNotFalsePositive(t *testing.T) {
+	result := &OpenAIForwardResult{
+		Model:                 "public-gpt",
+		UpstreamModel:         "gpt-6-astra",
+		UpstreamResponseModel: "gpt-6-astra",
+	}
+
+	require.False(t, result.HasUpstreamModelMismatch())
+	require.NoError(t, result.UpstreamModelMismatchError())
+	require.True(t, result.SucceededForScheduling())
 }
 
 func TestObserveOpenAISSEBodyIgnoresMalformedPayload(t *testing.T) {

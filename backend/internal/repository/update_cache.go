@@ -8,7 +8,9 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const updateCacheKey = "update:latest"
+// Keep fork release metadata separate from caches written by the upstream
+// updater, which followed Wei-Shaw/sub2api and accepted unqualified tags.
+const updateCacheKey = "update:latest:zhjai-derived-v1"
 
 type updateCache struct {
 	rdb *redis.Client

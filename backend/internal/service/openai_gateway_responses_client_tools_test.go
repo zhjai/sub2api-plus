@@ -60,6 +60,58 @@ func TestAdaptOpenAIResponsesClientToolsLeavesNamespaceOnlyBodyUnchanged(t *test
 	require.False(t, mapping.ToolSearch)
 }
 
+func TestAdaptOpenAIResponsesClientToolsInfersContinuationCustomTool(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.5","input":[{"type":"custom_tool_call","id":"ctc_1","call_id":"call_1","name":"exec","input":"pwd"}]}`)
+
+	adapted, mapping, err := adaptOpenAIResponsesClientTools(body)
+
+	require.NoError(t, err)
+	require.True(t, mapping.CustomTools["exec"])
+	require.Equal(t, "function", gjson.GetBytes(adapted, "tools.0.type").String())
+	require.Equal(t, "function_call", gjson.GetBytes(adapted, "input.0.type").String())
+	require.Equal(t, `{"input":"pwd"}`, gjson.GetBytes(adapted, "input.0.arguments").String())
+}
+
+func TestAdaptOpenAIResponsesClientToolsPromotesFunctionOnlyAdditionalTools(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.5","input":[
+		{"type":"additional_tools","tools":[{"type":"function","name":"lookup","description":"Lookup","parameters":{"type":"object"}}]},
+		{"type":"message","role":"user","content":"look it up"}
+	]}`)
+
+	adapted, mapping, err := adaptOpenAIResponsesClientTools(body)
+
+	require.NoError(t, err)
+	require.Empty(t, mapping)
+	require.Equal(t, "function", gjson.GetBytes(adapted, "tools.0.type").String())
+	require.Equal(t, "lookup", gjson.GetBytes(adapted, "tools.0.name").String())
+	require.False(t, gjson.GetBytes(adapted, `input.#(type=="additional_tools")`).Exists())
+}
+
+func TestAdaptOpenAIResponsesClientToolsExplicitEmptyResetBlocksHistoryInference(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.5","tools":[],"input":[
+		{"type":"additional_tools","tools":[]},
+		{"type":"custom_tool_call","id":"ctc_1","call_id":"call_1","name":"exec","input":"pwd"}
+	]}`)
+
+	adapted, mapping, err := adaptOpenAIResponsesClientTools(body)
+
+	require.NoError(t, err)
+	require.Empty(t, mapping)
+	require.True(t, gjson.GetBytes(adapted, "tools").IsArray())
+	require.Equal(t, int64(0), gjson.GetBytes(adapted, "tools.#").Int())
+	require.Equal(t, "custom_tool_call", gjson.GetBytes(adapted, "input.0.type").String())
+}
+
+func TestAdaptOpenAIResponsesClientToolsDoesNotInferFromOrphanedOutput(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.5","input":[{"type":"custom_tool_call_output","call_id":"call_1","output":"ok"}]}`)
+
+	adapted, mapping, err := adaptOpenAIResponsesClientTools(body)
+
+	require.NoError(t, err)
+	require.Equal(t, body, adapted)
+	require.Empty(t, mapping)
+}
+
 func TestAdaptOpenAIResponsesClientToolsRejectsTrailingData(t *testing.T) {
 	tests := map[string][]byte{
 		"trailing garbage":     append(openAIClientToolsRequest(false), []byte(` garbage`)...),
@@ -248,6 +300,36 @@ func TestOpenAIPassthroughAPIKeyRestoresClientToolsNonStreaming(t *testing.T) {
 	require.Equal(t, "pwd", gjson.Get(recorder.Body.String(), "output.0.input").String())
 	require.Equal(t, "custom_tool_call", gjson.Get(recorder.Body.String(), "output.1.type").String())
 	require.Equal(t, "*** Begin Patch", gjson.Get(recorder.Body.String(), "output.1.input").String())
+}
+
+func TestOpenAIPassthroughAPIKeyPromotesAdditionalToolsAndRestoresExec(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := []byte(`{"model":"gpt-5.4","stream":false,"input":[
+		{"type":"additional_tools","role":"developer","tools":[{"type":"custom","name":"exec"}]},
+		{"type":"message","role":"user","content":"run pwd"}
+	]}`)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body: io.NopCloser(strings.NewReader(`{"id":"resp_additional_tools","status":"completed","output":[
+			{"type":"function_call","id":"fc_1","call_id":"call_1","name":"exec","arguments":"{\"input\":\"pwd\"}"}],"usage":{}}`)),
+	}}
+	svc := openAIClientToolsTestService(upstream)
+	account := &Account{ID: 5664, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Credentials: map[string]any{"api_key": "test-key"}}
+
+	result, err := svc.forwardOpenAIPassthrough(context.Background(), c, account, body, body, "gpt-5.4", false, nil, false, time.Now())
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, "function", gjson.GetBytes(upstream.lastBody, "tools.0.type").String())
+	require.Equal(t, "exec", gjson.GetBytes(upstream.lastBody, "tools.0.name").String())
+	require.False(t, gjson.GetBytes(upstream.lastBody, `input.#(type=="additional_tools")`).Exists())
+	require.Equal(t, "custom_tool_call", gjson.Get(recorder.Body.String(), "output.0.type").String())
+	require.Equal(t, "pwd", gjson.Get(recorder.Body.String(), "output.0.input").String())
 }
 
 func TestOpenAIPassthroughAPIKeyPreservesCustomToolOutputContentParts(t *testing.T) {

@@ -28,9 +28,9 @@ var (
 )
 
 const (
-	updateCacheKey = "update_check_cache"
 	updateCacheTTL = 1200 // 20 minutes
-	githubRepo     = "Wei-Shaw/sub2api"
+	githubRepo     = "zhjai/sub2api-plus"
+	forkVersionTag = "-zhjai."
 
 	// Security: allowed download domains for updates
 	allowedDownloadHost = "github.com"
@@ -375,7 +375,7 @@ func (s *UpdateService) fetchRollbackCandidates(ctx context.Context) ([]*GitHubR
 			continue
 		}
 		v := strings.TrimPrefix(r.TagName, "v")
-		if v == "" || seen[v] {
+		if v == "" || !isDerivedForkVersion(v) || seen[v] {
 			continue
 		}
 		// Only versions strictly older than current (also excludes current itself)
@@ -403,6 +403,29 @@ func (s *UpdateService) fetchLatestRelease(ctx context.Context) (*UpdateInfo, er
 	release, err := s.githubClient.FetchLatestRelease(ctx, githubRepo)
 	if err != nil {
 		return nil, err
+	}
+	if release == nil {
+		return nil, fmt.Errorf("GitHub returned an empty latest release")
+	}
+
+	// GitHub's /releases/latest may still point at a legacy, unqualified fork
+	// tag. Never surface that tag as the fork's current release; search recent
+	// releases for the newest explicitly derived version instead.
+	if !isDerivedForkVersion(strings.TrimPrefix(release.TagName, "v")) {
+		releases, recentErr := s.githubClient.FetchRecentReleases(ctx, githubRepo, rollbackFetchPageSize)
+		if recentErr != nil {
+			return nil, recentErr
+		}
+		release = newestDerivedRelease(releases)
+		if release == nil {
+			return &UpdateInfo{
+				CurrentVersion: s.currentVersion,
+				LatestVersion:  s.currentVersion,
+				HasUpdate:      false,
+				Warning:        "No derived fork release is available yet",
+				BuildType:      s.buildType,
+			}, nil
+		}
 	}
 
 	latestVersion := strings.TrimPrefix(release.TagName, "v")
@@ -602,6 +625,7 @@ func (s *UpdateService) getFromCache(ctx context.Context) (*UpdateInfo, error) {
 	var cached struct {
 		Latest      string       `json:"latest"`
 		ReleaseInfo *ReleaseInfo `json:"release_info"`
+		Warning     string       `json:"warning,omitempty"`
 		Timestamp   int64        `json:"timestamp"`
 	}
 	if err := json.Unmarshal([]byte(data), &cached); err != nil {
@@ -611,12 +635,16 @@ func (s *UpdateService) getFromCache(ctx context.Context) (*UpdateInfo, error) {
 	if time.Now().Unix()-cached.Timestamp > updateCacheTTL {
 		return nil, fmt.Errorf("cache expired")
 	}
+	if !isDerivedForkVersion(cached.Latest) {
+		return nil, fmt.Errorf("cache does not contain a derived fork release")
+	}
 
 	return &UpdateInfo{
 		CurrentVersion: s.currentVersion,
 		LatestVersion:  cached.Latest,
 		HasUpdate:      compareVersions(s.currentVersion, cached.Latest) < 0,
 		ReleaseInfo:    cached.ReleaseInfo,
+		Warning:        cached.Warning,
 		Cached:         true,
 		BuildType:      s.buildType,
 	}, nil
@@ -626,10 +654,12 @@ func (s *UpdateService) saveToCache(ctx context.Context, info *UpdateInfo) {
 	cacheData := struct {
 		Latest      string       `json:"latest"`
 		ReleaseInfo *ReleaseInfo `json:"release_info"`
+		Warning     string       `json:"warning,omitempty"`
 		Timestamp   int64        `json:"timestamp"`
 	}{
 		Latest:      info.LatestVersion,
 		ReleaseInfo: info.ReleaseInfo,
+		Warning:     info.Warning,
 		Timestamp:   time.Now().Unix(),
 	}
 
@@ -642,7 +672,7 @@ func compareVersions(current, latest string) int {
 	currentParts := parseVersion(current)
 	latestParts := parseVersion(latest)
 
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 4; i++ {
 		if currentParts[i] < latestParts[i] {
 			return -1
 		}
@@ -653,17 +683,51 @@ func compareVersions(current, latest string) int {
 	return 0
 }
 
-func parseVersion(v string) [3]int {
-	v = strings.TrimPrefix(v, "v")
+func parseVersion(v string) [4]int {
+	base, _ := parseVersionParts(v)
+	return base
+}
+
+func parseVersionParts(v string) ([4]int, bool) {
+	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
+	baseVersion := v
+	revision := 0
+	derived := false
 	if idx := strings.IndexByte(v, '-'); idx != -1 {
-		v = v[:idx]
+		baseVersion = v[:idx]
+		suffix := v[idx+1:]
+		if strings.HasPrefix(suffix, strings.TrimPrefix(forkVersionTag, "-")) {
+			n, err := strconv.Atoi(strings.TrimPrefix(suffix, strings.TrimPrefix(forkVersionTag, "-")))
+			if err == nil && n >= 0 {
+				revision = n
+				derived = true
+			}
+		}
 	}
-	parts := strings.Split(v, ".")
-	result := [3]int{0, 0, 0}
+	parts := strings.Split(baseVersion, ".")
+	result := [4]int{0, 0, 0, revision}
 	for i := 0; i < len(parts) && i < 3; i++ {
 		if parsed, err := strconv.Atoi(parts[i]); err == nil {
 			result[i] = parsed
 		}
 	}
-	return result
+	return result, derived
+}
+
+func isDerivedForkVersion(v string) bool {
+	_, derived := parseVersionParts(v)
+	return derived
+}
+
+func newestDerivedRelease(releases []*GitHubRelease) *GitHubRelease {
+	var newest *GitHubRelease
+	for _, release := range releases {
+		if release == nil || release.Draft || release.Prerelease || !isDerivedForkVersion(release.TagName) {
+			continue
+		}
+		if newest == nil || compareVersions(newest.TagName, release.TagName) < 0 {
+			newest = release
+		}
+	}
+	return newest
 }

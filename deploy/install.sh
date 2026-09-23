@@ -528,10 +528,20 @@ github_api_curl() {
     fi
 }
 
-# Get latest release version
+# Return only explicitly derived fork releases. Historical unqualified tags in
+# this repository mirror old upstream numbering and must never win "latest".
+fetch_derived_versions() {
+    github_api_curl -s --connect-timeout 10 --max-time 30 \
+        "https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=100" 2>/dev/null \
+        | grep '"tag_name"' \
+        | sed -E 's/.*"([^"]+)".*/\1/' \
+        | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-zhjai\.[0-9]+$'
+}
+
+# Get latest derived fork release version
 get_latest_version() {
     print_info "$(msg 'fetching_version')"
-    LATEST_VERSION=$(github_api_curl -s --connect-timeout 10 --max-time 30 "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+    LATEST_VERSION=$(fetch_derived_versions | LC_ALL=C sort -V | tail -1 || true)
 
     if [ -z "$LATEST_VERSION" ]; then
         print_error "$(msg 'failed_get_version')"
@@ -547,7 +557,7 @@ list_versions() {
     print_info "$(msg 'fetching_versions')"
 
     local versions
-    versions=$(github_api_curl -s --connect-timeout 10 --max-time 30 "https://api.github.com/repos/${GITHUB_REPO}/releases" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' | head -20)
+    versions=$(fetch_derived_versions | LC_ALL=C sort -Vr | head -20 || true)
 
     if [ -z "$versions" ]; then
         print_error "$(msg 'failed_get_version')"
@@ -580,6 +590,11 @@ validate_version() {
         version="v$version"
     fi
 
+    if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-zhjai\.[0-9]+$ ]]; then
+        print_error "$(msg 'version_not_found'): $version" >&2
+        return 1
+    fi
+
     print_info "$(msg 'validating_version') $version" >&2
 
     # Check if the release exists
@@ -607,7 +622,7 @@ validate_version() {
 get_current_version() {
     if [ -f "$INSTALL_DIR/sub2api" ]; then
         # Use grep -E for better compatibility (works on macOS and Linux)
-        "$INSTALL_DIR/sub2api" --version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "unknown"
+        "$INSTALL_DIR/sub2api" --version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?' | head -1 || echo "unknown"
     else
         echo "not_installed"
     fi
@@ -863,7 +878,7 @@ upgrade() {
     print_info "$(msg 'upgrading')"
 
     # Get current version
-    CURRENT_VERSION=$("$INSTALL_DIR/sub2api" --version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
+    CURRENT_VERSION=$("$INSTALL_DIR/sub2api" --version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?' || echo "unknown")
     print_info "$(msg 'current_version'): $CURRENT_VERSION"
 
     # Stop service
@@ -1181,10 +1196,10 @@ main() {
             echo ""
             echo "Examples:"
             echo "  $0                        # Install latest version"
-            echo "  $0 install -v v0.1.0      # Install specific version"
+            echo "  $0 install -v v0.2.7-zhjai.3  # Install specific fork version"
             echo "  $0 upgrade                # Upgrade to latest"
-            echo "  $0 upgrade -v v0.2.0      # Upgrade to specific version"
-            echo "  $0 rollback v0.1.0        # Rollback to v0.1.0"
+            echo "  $0 upgrade -v v0.2.7-zhjai.3  # Upgrade to specific fork version"
+            echo "  $0 rollback v0.2.7-zhjai.2    # Roll back to an older fork version"
             echo "  $0 list-versions          # List available versions"
             echo ""
             exit 0
