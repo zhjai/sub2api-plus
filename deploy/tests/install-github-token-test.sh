@@ -101,8 +101,9 @@ test "$(grep -c 'github_api_curl -s' "$ROOT_DIR/deploy/install.sh")" -eq 2
 grep -Fq "grep -E '^v[0-9]+\\.[0-9]+\\.[0-9]+-zhjai\\.[0-9]+$'" "$ROOT_DIR/deploy/install.sh"
 grep -Fq 'sort -V' "$ROOT_DIR/deploy/install.sh"
 
-# Asset and checksum downloads must continue to call curl directly.
-grep -Fq 'curl -sL "$download_url"' "$ROOT_DIR/deploy/install.sh"
-grep -Fq 'curl -sL "$checksum_url"' "$ROOT_DIR/deploy/install.sh"
+# Asset and checksum downloads must fail on HTTP errors instead of treating a
+# GitHub 404 body as a valid archive or checksum file.
+grep -Fq 'curl -fsSL "$download_url"' "$ROOT_DIR/deploy/install.sh"
+grep -Fq 'curl -fsSL "$checksum_url"' "$ROOT_DIR/deploy/install.sh"
 
 echo "install GitHub token checks passed"

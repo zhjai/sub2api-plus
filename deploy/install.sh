@@ -642,27 +642,37 @@ download_and_extract() {
     trap "rm -rf $TEMP_DIR" EXIT
 
     # Download archive
-    if ! curl -sL "$download_url" -o "$TEMP_DIR/$archive_name"; then
+    if ! curl -fsSL "$download_url" -o "$TEMP_DIR/$archive_name"; then
         print_error "$(msg 'download_failed')"
         exit 1
     fi
 
     # Download and verify checksum
     print_info "$(msg 'verifying_checksum')"
-    if curl -sL "$checksum_url" -o "$TEMP_DIR/checksums.txt" 2>/dev/null; then
-        local expected_checksum=$(grep "$archive_name" "$TEMP_DIR/checksums.txt" | awk '{print $1}')
-        local actual_checksum=$(sha256sum "$TEMP_DIR/$archive_name" | awk '{print $1}')
-
-        if [ "$expected_checksum" != "$actual_checksum" ]; then
-            print_error "$(msg 'checksum_failed')"
-            print_error "Expected: $expected_checksum"
-            print_error "Actual: $actual_checksum"
-            exit 1
-        fi
-        print_success "$(msg 'checksum_verified')"
-    else
-        print_warning "$(msg 'checksum_not_found')"
+    if ! curl -fsSL "$checksum_url" -o "$TEMP_DIR/checksums.txt" 2>/dev/null; then
+        print_error "$(msg 'checksum_not_found')"
+        print_error "Checksum file unavailable: $checksum_url"
+        exit 1
     fi
+
+    local expected_checksum
+    expected_checksum=$(awk -v archive="$archive_name" '$2 == archive || $2 == "*" archive { print $1; exit }' "$TEMP_DIR/checksums.txt")
+    local actual_checksum
+    actual_checksum=$(sha256sum "$TEMP_DIR/$archive_name" | awk '{print $1}')
+
+    if [[ ! "$expected_checksum" =~ ^[[:xdigit:]]{64}$ ]]; then
+        print_error "$(msg 'checksum_failed')"
+        print_error "No valid checksum entry for $archive_name"
+        exit 1
+    fi
+
+    if [ "${expected_checksum,,}" != "${actual_checksum,,}" ]; then
+        print_error "$(msg 'checksum_failed')"
+        print_error "Expected: $expected_checksum"
+        print_error "Actual: $actual_checksum"
+        exit 1
+    fi
+    print_success "$(msg 'checksum_verified')"
 
     # Extract
     print_info "$(msg 'extracting')"
@@ -1196,9 +1206,9 @@ main() {
             echo ""
             echo "Examples:"
             echo "  $0                        # Install latest version"
-            echo "  $0 install -v v0.2.7-zhjai.4  # Install specific fork version"
+            echo "  $0 install -v v0.2.7-zhjai.5  # Install specific fork version"
             echo "  $0 upgrade                # Upgrade to latest"
-            echo "  $0 upgrade -v v0.2.7-zhjai.4  # Upgrade to specific fork version"
+            echo "  $0 upgrade -v v0.2.7-zhjai.5  # Upgrade to specific fork version"
             echo "  $0 rollback v0.2.7-zhjai.2    # Roll back to an older fork version"
             echo "  $0 list-versions          # List available versions"
             echo ""
