@@ -645,6 +645,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	// 生图意图只影响能力路由与图片计费，不关门：混合 /v1/responses 请求的
 	// token 计费部分仍受利润门保护，独立图片/视频端点才在门外。
 	pricingCtx, pricingAt := h.gatewayService.WithOpenAIRequestPricingContext(c.Request.Context(), apiKey.GroupID)
+	pricingCtx = service.WithOpenAIExecCapability(pricingCtx, body)
 	c.Request = c.Request.WithContext(pricingCtx)
 
 	for {
@@ -981,6 +982,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			}
 		}
 		if result != nil {
+			h.gatewayService.ObserveOpenAIExecCapabilityResult(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, result), result)
 			if result.RequiresSessionAccountEscape() {
 				if escapeErr := h.gatewayService.EscapeOpenAISessionAccount(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID); escapeErr != nil {
 					reqLog.Warn("openai.session_account_escape_failed",
@@ -1292,6 +1294,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 
 	// 分组利润控制：Messages 文本入口同样请求级装门并固定 pricingAt。
 	msgPricingCtx, pricingAt := h.gatewayService.WithOpenAIRequestPricingContext(c.Request.Context(), apiKey.GroupID)
+	msgPricingCtx = service.WithOpenAIExecCapability(msgPricingCtx, body)
 	c.Request = c.Request.WithContext(msgPricingCtx)
 
 	for {
@@ -1540,6 +1543,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			}
 		}
 		if result != nil {
+			h.gatewayService.ObserveOpenAIExecCapabilityResult(account, openAIAccountScheduleModel(c, account, currentRoutingModel, false, result), result)
 			mismatchErr := result.UpstreamModelMismatchError()
 			if mismatchErr != nil {
 				h.gatewayService.QuarantineOpenAIUpstreamModelMismatch(c.Request.Context(), account, result.UpstreamSentModelForAudit(), result.UpstreamResponseModel)
@@ -2652,6 +2656,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	// 继续按建连时刻的谷价计费。生图意图只影响能力路由与图片计费，不关门。
 	// 建连时刻只用于选号/准入，不作为任何 turn 的计费定价时刻。
 	wsPricingCtx, _ := h.gatewayService.WithOpenAIRequestPricingContext(ctx, apiKey.GroupID)
+	wsPricingCtx = service.WithOpenAIExecCapability(wsPricingCtx, firstMessage)
 	ctx = wsPricingCtx
 
 	for {

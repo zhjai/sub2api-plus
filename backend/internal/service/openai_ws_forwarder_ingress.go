@@ -520,6 +520,10 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	if err != nil {
 		return err
 	}
+	// Keep the exec contract scoped to this ingress request.  The WS path has
+	// no SSE handler context, but the gin context remains alive for the entire
+	// session and is already used for request-scoped tool restoration state.
+	setOpenAIExecContract(c, firstClientMessage, false)
 
 	useHTTPBridge := forceHTTPBridge || s.shouldBridgeOpenAIWSHTTP(account, firstPayload.payloadBytes, firstPayload.previousResponseID)
 	turnState := strings.TrimSpace(c.GetHeader(openAIWSTurnStateHeader))
@@ -961,6 +965,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		if lease == nil {
 			return nil, errors.New("upstream websocket lease is nil")
 		}
+		setOpenAIExecContract(c, payload, true)
 		turnStart := time.Now()
 		wroteDownstream := false
 		if err := lease.WriteJSONWithContextTimeout(ctx, json.RawMessage(payload), s.openAIWSWriteTimeout()); err != nil {
@@ -1025,6 +1030,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			}
 
 			eventType, eventResponseID, _ := parseOpenAIWSEventEnvelope(upstreamMessage)
+			observeOpenAIToolCapabilitySSE(c, eventType, upstreamMessage)
 			responseModelObserver.ObserveOpenAI(upstreamMessage, eventType)
 			if responseID == "" && eventResponseID != "" {
 				responseID = eventResponseID
@@ -1237,6 +1243,10 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					)
 				}
 				imageCount := imageCounter.Count()
+				toolCapabilityFailure := openAIToolCapabilityFailure(c, terminalEvent == "response.completed" || terminalEvent == "response.done")
+				if toolCapabilityFailure {
+					logOpenAIToolCapabilityFailure(c, account, mappedModel)
+				}
 				result := &OpenAIForwardResult{
 					RequestID:                     responseID,
 					Usage:                         usage,
@@ -1254,6 +1264,10 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					ResponseHeaders:               lease.HandshakeHeaders(),
 					Duration:                      time.Since(turnStart),
 					FirstTokenMs:                  firstTokenMs,
+					ToolCapabilityFailure:         toolCapabilityFailure,
+				}
+				if toolCapabilityFailure {
+					result.ResponsesProtocolStatus = "completed"
 				}
 				if replayInput := replayCollector.Items(); len(replayInput) > 0 {
 					result.wsReplayInput = replayInput
@@ -1882,6 +1896,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		if parseErr != nil {
 			return parseErr
 		}
+		setOpenAIExecContract(c, nextClientMessage, false)
 		nextRoutingFields := gjson.GetManyBytes(nextPayload.payloadRaw, "model", "service_tier")
 		if nextPayload.promptCacheKey != "" {
 			// ingress 会话在整个客户端 WS 生命周期内复用同一上游连接；

@@ -97,6 +97,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 	// 里的任何工具声明（含 Codex 被动 image_gen namespace）而关闭。生图意图
 	// 仅用于能力路由与图片计费；独立图片/视频端点才在利润门范围之外。
 	requestCtx, pricingAt := service.WithGatewayTokenRequestPricing(requestCtx)
+	requestCtx = service.WithOpenAIExecCapability(requestCtx, body)
 	if service.IsImageGenerationIntentForPlatform("/v1/responses", reqModel, body, openAICompatibleRequestPlatform(c.Request.Context(), apiKey)) {
 		requestCtx = service.WithOpenAIImageGenerationIntent(requestCtx)
 	}
@@ -287,6 +288,13 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 		if err != nil {
 			var failoverErr *service.UpstreamFailoverError
 			if errors.As(err, &failoverErr) {
+				if result != nil {
+					modelForCapability := strings.TrimSpace(result.UpstreamModel)
+					if modelForCapability == "" {
+						modelForCapability = reqModel
+					}
+					h.openAIGatewayService.ObserveOpenAIExecCapabilityFailure(account, modelForCapability, result.ToolCapabilityFailure && result.RequiresSessionAccountEscape())
+				}
 				if failoverErr.SessionAccountEscape {
 					_ = h.openAIGatewayService.EscapeOpenAISessionAccount(requestCtx, apiKey.GroupID, sessionHash, account.ID)
 				}
@@ -327,6 +335,11 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 			return
 		}
 		if result != nil && result.RequiresSessionAccountEscape() {
+			modelForCapability := strings.TrimSpace(result.UpstreamModel)
+			if modelForCapability == "" {
+				modelForCapability = reqModel
+			}
+			h.openAIGatewayService.ObserveOpenAIExecCapabilityFailure(account, modelForCapability, result.ToolCapabilityFailure)
 			if escapeErr := h.openAIGatewayService.EscapeOpenAISessionAccount(requestCtx, apiKey.GroupID, sessionHash, account.ID); escapeErr != nil {
 				reqLog.Warn("gateway.responses.session_account_escape_failed", zap.Int64("account_id", account.ID), zap.Error(escapeErr))
 			} else {

@@ -19,7 +19,9 @@ type openAIToolCapabilityState struct {
 	OutboundExecDeclared bool
 	ExecCallObserved     bool
 	ExplicitDenial       bool
+	ProtocolLeakObserved bool
 	TextWindow           string
+	OutputTextWindow     string
 }
 
 // setOpenAIExecContract records the client and current outbound tool contract.
@@ -34,11 +36,16 @@ func setOpenAIExecContract(c *gin.Context, body []byte, outbound bool) {
 		state, _ = raw.(openAIToolCapabilityState)
 	}
 	declared := responsesBodyDeclaresExec(body)
+	if c.Request != nil && !outbound {
+		c.Request = c.Request.WithContext(withOpenAIExecCapability(c.Request.Context(), declared))
+	}
 	if outbound {
 		state.OutboundExecDeclared = declared
 		state.ExecCallObserved = false
 		state.ExplicitDenial = false
+		state.ProtocolLeakObserved = false
 		state.TextWindow = ""
+		state.OutputTextWindow = ""
 	} else {
 		state = openAIToolCapabilityState{ClientExecDeclared: declared}
 	}
@@ -59,6 +66,30 @@ func observeOpenAIToolCapabilitySSE(c *gin.Context, eventType string, data []byt
 	}
 	if (itemType == "custom_tool_call" || itemType == "function_call" || strings.Contains(typ, "tool_call") || strings.Contains(typ, "function_call")) && strings.EqualFold(name, "exec") {
 		capability.ExecCallObserved = true
+	}
+	// Only assistant-generated output text can prove a tool-call protocol leak.
+	// A request echo, error payload, or quoted input must not poison the route.
+	generatedText := ""
+	switch typ {
+	case "response.output_text.delta":
+		generatedText = gjson.GetBytes(data, "delta").String()
+	case "response.output_text.done":
+		if capability.OutputTextWindow == "" {
+			generatedText = gjson.GetBytes(data, "text").String()
+		}
+	case "response.output_item.done":
+		if itemType == "message" && capability.OutputTextWindow == "" {
+			generatedText = gjson.GetBytes(data, "item.content.0.text").String()
+		}
+	}
+	if generatedText != "" {
+		capability.OutputTextWindow += generatedText
+		if len(capability.OutputTextWindow) > 4096 {
+			capability.OutputTextWindow = capability.OutputTextWindow[len(capability.OutputTextWindow)-4096:]
+		}
+		if leakedExecProtocol(capability.OutputTextWindow) {
+			capability.ProtocolLeakObserved = true
+		}
 	}
 	for _, text := range []string{
 		gjson.GetBytes(data, "delta").String(),
@@ -91,7 +122,8 @@ func openAIToolCapabilityFailure(c *gin.Context, completedTerminal bool) bool {
 	}
 	state, _ := c.Get(openAIToolCapabilityContextKey)
 	capability, ok := state.(openAIToolCapabilityState)
-	return ok && capability.ClientExecDeclared && capability.OutboundExecDeclared && capability.ExplicitDenial && !capability.ExecCallObserved
+	return ok && capability.ClientExecDeclared && capability.OutboundExecDeclared &&
+		(capability.ExplicitDenial || capability.ProtocolLeakObserved) && !capability.ExecCallObserved
 }
 
 func logOpenAIToolCapabilityFailure(c *gin.Context, account *Account, model string) {
@@ -121,8 +153,30 @@ func logOpenAIToolCapabilityFailure(c *gin.Context, account *Account, model stri
 		zap.Bool("outbound_exec_declared", capability.OutboundExecDeclared),
 		zap.Bool("exec_call_observed", capability.ExecCallObserved),
 		zap.Bool("explicit_denial", capability.ExplicitDenial),
+		zap.Bool("protocol_leak_observed", capability.ProtocolLeakObserved),
 	)
 	c.Set(openAIToolCapabilityLoggedKey, true)
+}
+
+// leakedExecProtocol deliberately recognizes only a complete, leading raw
+// tool-call envelope with a JSON cmd. Explanations, Markdown code fences, and
+// ordinary mentions of exec are not evidence of a broken tool channel.
+func leakedExecProtocol(text string) bool {
+	text = strings.TrimLeft(text, " \t\r\n")
+	const prefix = "to=functions.exec code:"
+	if !strings.HasPrefix(text, prefix) {
+		return false
+	}
+	text = strings.TrimLeft(strings.TrimPrefix(text, prefix), " \t")
+	if !strings.HasPrefix(text, "\n") && !strings.HasPrefix(text, "\r\n") {
+		return false
+	}
+	text = strings.TrimSpace(text)
+	if !gjson.Valid(text) {
+		return false
+	}
+	cmd := gjson.Get(text, "cmd")
+	return cmd.Type == gjson.String && strings.TrimSpace(cmd.String()) != ""
 }
 
 func responsesBodyDeclaresExec(body []byte) bool {

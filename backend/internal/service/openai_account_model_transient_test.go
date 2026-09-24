@@ -60,6 +60,18 @@ func TestOpenAIModelTransient_BlockIsIsolatedByModel(t *testing.T) {
 	assert.False(t, state.isBlocked(47, "gpt-5.6-terra", now.Add(2*time.Second)))
 }
 
+func TestOpenAIModelTransient_BlockIsIsolatedByCapability(t *testing.T) {
+	state := newOpenAIAccountModelTransientState(128)
+	now := time.Date(2026, 7, 10, 10, 0, 0, 0, time.UTC)
+	state.recordFailure(35, "gpt-5.5", now, openAITransientCapabilityExec)
+	state.recordFailure(35, "gpt-5.5", now.Add(time.Second), openAITransientCapabilityExec)
+
+	assert.True(t, state.isBlocked(35, "gpt-5.5", now.Add(2*time.Second), openAITransientCapabilityExec))
+	assert.False(t, state.isBlocked(35, "gpt-5.5", now.Add(2*time.Second)))
+	state.recordSuccess(35, "gpt-5.5", openAITransientCapabilityExec)
+	assert.False(t, state.isBlocked(35, "gpt-5.5", now.Add(3*time.Second), openAITransientCapabilityExec))
+}
+
 func TestOpenAIModelTransient_SuccessClearsStreakAndBlock(t *testing.T) {
 	state := newOpenAIAccountModelTransientState(128)
 	now := time.Date(2026, 7, 10, 10, 0, 0, 0, time.UTC)

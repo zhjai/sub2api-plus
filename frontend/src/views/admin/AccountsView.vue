@@ -173,60 +173,100 @@
             {{ t('admin.accounts.listPendingSyncAction') }}
           </button>
         </div>
-        <div class="mt-3 rounded-lg border border-gray-200 bg-white px-3 py-2 dark:border-dark-700 dark:bg-dark-800">
-          <div class="flex items-center justify-between gap-3">
-            <span class="text-sm font-medium text-gray-800 dark:text-gray-100">{{ t('admin.accounts.schedulerTrace.title') }}</span>
-            <button class="btn btn-secondary px-2 py-1 text-xs" :disabled="schedulerTraceLoading" @click="loadSchedulerTraces">
+        <section class="mt-3 rounded-lg border border-gray-200 bg-white px-3 py-2 dark:border-dark-700 dark:bg-dark-800" aria-live="polite">
+          <div class="flex min-h-8 items-center gap-2">
+            <button
+              type="button"
+              class="flex min-w-0 flex-1 items-center gap-2 text-left text-sm font-medium text-gray-800 dark:text-gray-100"
+              :aria-expanded="schedulerTraceExpanded"
+              @click="toggleSchedulerTraceExpanded"
+            >
+              <Icon name="chevronDown" size="xs" :class="['shrink-0 transition-transform', schedulerTraceExpanded ? 'rotate-180' : '']" />
+              <span class="shrink-0">{{ t('admin.accounts.schedulerTrace.title') }}</span>
+              <span class="min-w-0 truncate text-xs font-normal text-gray-500 dark:text-dark-400">
+                <template v-if="latestSchedulerTrace">
+                  {{ formatRelativeTime(latestSchedulerTrace.at) }} · {{ t('admin.accounts.schedulerTrace.selected') }} #{{ latestSchedulerTrace.selected_account_id || '-' }} · {{ latestSchedulerTrace.reason_code }}
+                </template>
+                <template v-else>{{ t('admin.accounts.schedulerTrace.empty') }}</template>
+              </span>
+            </button>
+            <button
+              type="button"
+              class="btn btn-secondary shrink-0 px-2 py-1 text-xs"
+              :disabled="schedulerTraceLoading"
+              :title="t('admin.accounts.schedulerTrace.refresh')"
+              @click="loadSchedulerTraces"
+            >
               <Icon name="refresh" size="xs" :class="schedulerTraceLoading ? 'animate-spin' : ''" />
-              {{ t('admin.accounts.schedulerTrace.refresh') }}
+              <span class="hidden sm:inline">{{ t('admin.accounts.schedulerTrace.refresh') }}</span>
+            </button>
+            <button
+              type="button"
+              class="btn btn-secondary shrink-0 px-2 py-1 text-xs"
+              :disabled="!schedulerTraces.length"
+              @click="showSchedulerHistoryDrawer = true"
+            >
+              <Icon name="document" size="xs" />
+              <span class="hidden sm:inline">{{ t('admin.accounts.schedulerTrace.viewAll') }}</span>
             </button>
           </div>
-          <div v-if="schedulerTraces.length" class="mt-2 space-y-1.5 text-xs">
-            <p class="text-[11px] text-gray-500 dark:text-dark-400">{{ t('admin.accounts.schedulerTrace.scope') }}</p>
-            <div v-for="trace in schedulerTraces.slice(0, 5)" :key="`${trace.at}-${trace.selected_account_id}`" class="grid gap-1 border-t border-gray-100 pt-1.5 dark:border-dark-700 md:grid-cols-[auto_1fr_auto] md:items-center">
-              <span class="font-mono text-gray-500 dark:text-dark-400">{{ formatRelativeTime(trace.at) }}</span>
-              <span class="truncate text-gray-700 dark:text-gray-200" :title="trace.reason_text">
-                {{ t('admin.accounts.schedulerTrace.reason') }}: {{ trace.reason_code }}<span v-if="trace.reason_text"> · {{ trace.reason_text }}</span>
-              </span>
-              <span class="font-mono text-gray-600 dark:text-dark-300">
-                {{ t('admin.accounts.schedulerTrace.selected') }} #{{ trace.selected_account_id || '-' }}
-                <span v-if="trace.excluded_account_ids?.length" class="text-amber-700 dark:text-amber-300"> · {{ t('admin.accounts.schedulerTrace.excluded') }} #{{ trace.excluded_account_ids.join(', #') }}</span>
-              </span>
-              <div v-if="trace.candidates?.length" class="col-span-full mt-1 grid gap-1 text-[11px] text-gray-500 dark:text-dark-400 md:grid-cols-2">
-                <div v-for="candidate in trace.candidates" :key="candidate.account_id" class="flex flex-wrap items-center gap-1 rounded border border-gray-100 px-1.5 py-1 dark:border-dark-700">
-                  <span class="font-mono">#{{ candidate.account_id }}</span>
-                  <span v-if="candidate.selected" class="text-emerald-700 dark:text-emerald-300">{{ t('admin.accounts.schedulerTrace.selectedShort') }}</span>
-                  <span v-else-if="candidate.exclusion_reason" class="text-amber-700 dark:text-amber-300">{{ candidate.exclusion_reason }}</span>
-                  <span v-else-if="candidate.in_top_k">{{ t('admin.accounts.schedulerTrace.scoreTopK') }}</span>
-                  <span v-else-if="candidate.decision_reason">{{ candidate.decision_reason }}</span>
-                  <span v-if="candidate.score != null">score={{ candidate.score.toFixed(2) }}</span>
-                  <span v-if="candidate.load_rate != null">load={{ candidate.load_rate }}%</span>
+          <div v-if="schedulerTraceExpanded" class="scheduler-trace-expanded mt-2 max-h-[220px] overflow-y-auto pr-1 text-xs">
+            <p class="mb-2 text-[11px] text-gray-500 dark:text-dark-400">{{ t('admin.accounts.schedulerTrace.scope') }}</p>
+            <div v-if="schedulerTraces.length" class="space-y-1.5">
+              <div
+                v-for="trace in schedulerTraces.slice(0, 5)"
+                :key="`${trace.at}-${trace.selected_account_id}`"
+                :class="[
+                  'grid gap-1 border-t border-gray-100 pt-1.5 dark:border-dark-700 md:grid-cols-[auto_1fr_auto] md:items-center',
+                  isSchedulerTraceError(trace) ? 'scheduler-trace-error' : ''
+                ]"
+              >
+                <span class="font-mono text-gray-500 dark:text-dark-400">{{ formatRelativeTime(trace.at) }}</span>
+                <span class="truncate text-gray-700 dark:text-gray-200" :title="trace.reason_text">
+                  {{ t('admin.accounts.schedulerTrace.reason') }}: {{ trace.reason_code }}<span v-if="trace.reason_text"> · {{ trace.reason_text }}</span>
+                </span>
+                <span class="font-mono text-gray-600 dark:text-dark-300">
+                  {{ t('admin.accounts.schedulerTrace.selected') }} #{{ trace.selected_account_id || '-' }}
+                  <span v-if="trace.excluded_account_ids?.length" class="text-amber-700 dark:text-amber-300"> · {{ t('admin.accounts.schedulerTrace.excluded') }} #{{ trace.excluded_account_ids.join(', #') }}</span>
+                </span>
+                <div v-if="trace.candidates?.length" class="col-span-full mt-1 grid gap-1 text-[11px] text-gray-500 dark:text-dark-400 md:grid-cols-2">
+                  <div v-for="candidate in trace.candidates" :key="candidate.account_id" class="flex flex-wrap items-center gap-1 rounded border border-gray-100 px-1.5 py-1 dark:border-dark-700">
+                    <span class="font-mono">#{{ candidate.account_id }}</span>
+                    <span v-if="candidate.selected" class="text-emerald-700 dark:text-emerald-300">{{ t('admin.accounts.schedulerTrace.selectedShort') }}</span>
+                    <span v-else-if="candidate.exclusion_reason" class="text-amber-700 dark:text-amber-300">{{ candidate.exclusion_reason }}</span>
+                    <span v-else-if="candidate.in_top_k">{{ t('admin.accounts.schedulerTrace.scoreTopK') }}</span>
+                    <span v-else-if="candidate.decision_reason">{{ candidate.decision_reason }}</span>
+                    <span v-if="candidate.score != null">score={{ candidate.score.toFixed(2) }}</span>
+                    <span v-if="candidate.load_rate != null">load={{ candidate.load_rate }}%</span>
+                  </div>
                 </div>
+                <span v-if="isAffinityOnlyTrace(trace)" class="col-span-full text-[11px] text-blue-700 dark:text-blue-300">{{ t('admin.accounts.schedulerTrace.affinityOnly') }}</span>
+                <span v-if="trace.candidates_truncated" class="col-span-full text-[11px] text-amber-700 dark:text-amber-300">{{ t('admin.accounts.schedulerTrace.truncated') }}</span>
               </div>
-              <span v-if="isAffinityOnlyTrace(trace)" class="col-span-full text-[11px] text-blue-700 dark:text-blue-300">{{ t('admin.accounts.schedulerTrace.affinityOnly') }}</span>
-              <span v-if="trace.candidates_truncated" class="col-span-full text-[11px] text-amber-700 dark:text-amber-300">{{ t('admin.accounts.schedulerTrace.truncated') }}</span>
             </div>
+            <div v-else class="text-gray-500 dark:text-dark-400">{{ t('admin.accounts.schedulerTrace.empty') }}</div>
           </div>
-          <div v-else class="mt-2 text-xs text-gray-500 dark:text-dark-400">{{ t('admin.accounts.schedulerTrace.empty') }}</div>
-        </div>
+        </section>
       </template>
       <template #table>
-        <AccountBulkActionsBar
-          :selected-ids="selIds"
-          :total-results="pagination.total"
-          :selecting-all="selectingAllResults"
-          :all-results-selected="allResultsSelected"
-          @delete="handleBulkDelete"
-          @reset-status="handleBulkResetStatus"
-          @refresh-token="handleBulkRefreshToken"
-          @probe-upstream-billing="handleBulkProbeUpstreamBilling"
-          @edit-selected="openBulkEditSelected"
-          @edit-filtered="openBulkEditFiltered"
-          @clear="clearSelection"
-          @select-page="selectPage"
-          @select-all-results="handleSelectAllResults"
-          @toggle-schedulable="handleBulkToggleSchedulable"
-        />
+        <div class="sticky top-0 z-20 shrink-0 border-b border-gray-200 bg-white/95 backdrop-blur dark:border-dark-700 dark:bg-dark-800/95">
+          <AccountBulkActionsBar
+            :selected-ids="selIds"
+            :total-results="pagination.total"
+            :selecting-all="selectingAllResults"
+            :all-results-selected="allResultsSelected"
+            @delete="handleBulkDelete"
+            @reset-status="handleBulkResetStatus"
+            @refresh-token="handleBulkRefreshToken"
+            @probe-upstream-billing="handleBulkProbeUpstreamBilling"
+            @edit-selected="openBulkEditSelected"
+            @edit-filtered="openBulkEditFiltered"
+            @clear="clearSelection"
+            @select-page="selectPage"
+            @select-all-results="handleSelectAllResults"
+            @toggle-schedulable="handleBulkToggleSchedulable"
+          />
+        </div>
         <div ref="accountTableRef" class="flex min-h-0 flex-1 flex-col overflow-hidden">
         <DataTable
           ref="dataTableRef"
@@ -518,6 +558,79 @@
     <ErrorPassthroughRulesModal :show="showErrorPassthrough" @close="showErrorPassthrough = false" />
     <TLSFingerprintProfilesModal :show="showTLSFingerprintProfiles" @close="showTLSFingerprintProfiles = false" />
     <TotpStepUpDialog :controller="accountExportStepUp" />
+    <Teleport to="body">
+      <div v-if="showSchedulerHistoryDrawer" class="fixed inset-0 z-[9998]" role="presentation">
+        <button
+          type="button"
+          class="absolute inset-0 h-full w-full bg-gray-900/35"
+          :aria-label="t('admin.accounts.schedulerTrace.close')"
+          @click="showSchedulerHistoryDrawer = false"
+        ></button>
+        <aside
+          class="absolute inset-y-0 right-0 flex w-full max-w-xl flex-col border-l border-gray-200 bg-white shadow-2xl dark:border-dark-700 dark:bg-dark-800"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="t('admin.accounts.schedulerTrace.details')"
+        >
+          <div class="flex shrink-0 items-center justify-between gap-3 border-b border-gray-200 px-4 py-3 dark:border-dark-700">
+            <div class="min-w-0">
+              <h2 class="truncate text-base font-semibold text-gray-900 dark:text-gray-100">{{ t('admin.accounts.schedulerTrace.details') }}</h2>
+              <p class="text-xs text-gray-500 dark:text-dark-400">{{ t('admin.accounts.schedulerTrace.scope') }}</p>
+            </div>
+            <div class="flex shrink-0 items-center gap-2">
+              <button type="button" class="btn btn-secondary px-2 py-1 text-xs" :disabled="schedulerTraceLoading" @click="loadSchedulerTraces">
+                <Icon name="refresh" size="xs" :class="schedulerTraceLoading ? 'animate-spin' : ''" />
+                <span class="hidden sm:inline">{{ t('admin.accounts.schedulerTrace.refresh') }}</span>
+              </button>
+              <button type="button" class="btn btn-secondary px-2 py-1 text-xs" @click="showSchedulerHistoryDrawer = false">
+                <Icon name="x" size="xs" />
+                <span class="hidden sm:inline">{{ t('admin.accounts.schedulerTrace.close') }}</span>
+              </button>
+            </div>
+          </div>
+          <div class="min-h-0 flex-1 overflow-y-auto p-4">
+            <div v-if="schedulerTraces.length" class="space-y-3 text-xs">
+              <article
+                v-for="trace in schedulerTraces"
+                :key="`drawer-${trace.at}-${trace.selected_account_id}`"
+                :class="[
+                  'rounded-lg border p-3',
+                  isSchedulerTraceError(trace)
+                    ? 'border-red-200 bg-red-50/70 dark:border-red-800/60 dark:bg-red-950/20'
+                    : 'border-gray-200 dark:border-dark-700'
+                ]"
+              >
+                <div class="grid gap-1 md:grid-cols-[auto_1fr_auto] md:items-center">
+                  <span class="font-mono text-gray-500 dark:text-dark-400">{{ formatRelativeTime(trace.at) }}</span>
+                  <span class="truncate font-medium text-gray-800 dark:text-gray-100" :title="trace.reason_text">
+                    {{ t('admin.accounts.schedulerTrace.reason') }}: {{ trace.reason_code }}<span v-if="trace.reason_text"> · {{ trace.reason_text }}</span>
+                  </span>
+                  <span class="font-mono text-gray-600 dark:text-dark-300">
+                    {{ t('admin.accounts.schedulerTrace.selected') }} #{{ trace.selected_account_id || '-' }}
+                  </span>
+                  <span v-if="trace.error" class="col-span-full text-red-700 dark:text-red-300">{{ t('admin.accounts.schedulerTrace.error') }}: {{ trace.error }}</span>
+                  <span v-if="trace.excluded_account_ids?.length" class="col-span-full text-amber-700 dark:text-amber-300">{{ t('admin.accounts.schedulerTrace.excluded') }} #{{ trace.excluded_account_ids.join(', #') }}</span>
+                </div>
+                <div v-if="trace.candidates?.length" class="mt-2 grid gap-1 text-[11px] text-gray-600 dark:text-dark-300 sm:grid-cols-2">
+                  <div v-for="candidate in trace.candidates" :key="candidate.account_id" class="flex flex-wrap items-center gap-1 rounded border border-gray-200 px-2 py-1.5 dark:border-dark-700">
+                    <span class="font-mono">#{{ candidate.account_id }}</span>
+                    <span v-if="candidate.selected" class="text-emerald-700 dark:text-emerald-300">{{ t('admin.accounts.schedulerTrace.selectedShort') }}</span>
+                    <span v-else-if="candidate.exclusion_reason" class="text-amber-700 dark:text-amber-300">{{ candidate.exclusion_reason }}</span>
+                    <span v-else-if="candidate.in_top_k">{{ t('admin.accounts.schedulerTrace.scoreTopK') }}</span>
+                    <span v-else-if="candidate.decision_reason">{{ candidate.decision_reason }}</span>
+                    <span v-if="candidate.score != null">score={{ candidate.score.toFixed(2) }}</span>
+                    <span v-if="candidate.load_rate != null">load={{ candidate.load_rate }}%</span>
+                  </div>
+                </div>
+                <p v-if="isAffinityOnlyTrace(trace)" class="mt-2 text-[11px] text-blue-700 dark:text-blue-300">{{ t('admin.accounts.schedulerTrace.affinityOnly') }}</p>
+                <p v-if="trace.candidates_truncated" class="mt-2 text-[11px] text-amber-700 dark:text-amber-300">{{ t('admin.accounts.schedulerTrace.truncated') }}</p>
+              </article>
+            </div>
+            <div v-else class="text-sm text-gray-500 dark:text-dark-400">{{ t('admin.accounts.schedulerTrace.empty') }}</div>
+          </div>
+        </aside>
+      </div>
+    </Teleport>
   </AppLayout>
 </template>
 
@@ -660,6 +773,10 @@ const upstreamBillingRateETag = ref<string | null>(null)
 const upstreamBillingRateRefreshing = ref(false)
 const schedulerTraces = ref<SchedulerDecisionTrace[]>([])
 const schedulerTraceLoading = ref(false)
+const schedulerTraceExpanded = ref(false)
+const showSchedulerHistoryDrawer = ref(false)
+const SCHEDULER_TRACE_EXPANDED_KEY = 'accounts-scheduler-trace-expanded'
+const latestSchedulerTrace = computed(() => schedulerTraces.value[0] ?? null)
 const loadSchedulerTraces = async () => {
   schedulerTraceLoading.value = true
   try {
@@ -671,6 +788,16 @@ const loadSchedulerTraces = async () => {
     schedulerTraceLoading.value = false
   }
 }
+const toggleSchedulerTraceExpanded = () => {
+  schedulerTraceExpanded.value = !schedulerTraceExpanded.value
+  try {
+    localStorage.setItem(SCHEDULER_TRACE_EXPANDED_KEY, String(schedulerTraceExpanded.value))
+  } catch {
+    // localStorage can be unavailable in privacy-restricted browsers.
+  }
+}
+const isSchedulerTraceError = (trace: SchedulerDecisionTrace): boolean =>
+  Boolean(trace.error) || trace.reason_code.includes('error') || trace.reason_code.includes('failed')
 const isAffinityOnlyTrace = (trace: SchedulerDecisionTrace): boolean =>
   ['previous_response_id', 'session_hash', 'guardian_parent'].includes(trace.layer) &&
   trace.reason_code !== 'sticky_escape'
@@ -2572,6 +2699,11 @@ const handleClickOutside = (event: MouseEvent) => {
 }
 
 onMounted(async () => {
+  try {
+    schedulerTraceExpanded.value = localStorage.getItem(SCHEDULER_TRACE_EXPANDED_KEY) === 'true'
+  } catch {
+    schedulerTraceExpanded.value = false
+  }
   loadSchedulerTraces().catch(() => undefined)
   if (typeof window !== 'undefined') {
     desktopViewportMediaQuery = window.matchMedia(desktopViewportQuery)

@@ -776,6 +776,40 @@ func TestOpenAIForwardResult_RequiresSessionAccountEscape(t *testing.T) {
 	}
 }
 
+func TestOpenAIForwardResult_SucceededForScheduling(t *testing.T) {
+	tests := []struct {
+		name   string
+		result *OpenAIForwardResult
+		want   bool
+	}{
+		{
+			name: "completed tool capability failure is not healthy success",
+			result: &OpenAIForwardResult{
+				ResponsesOutcomeObserved: true,
+				ResponsesProtocolStatus:  "completed",
+				UpstreamTerminalEvent:    "response.completed",
+				ToolCapabilityFailure:    true,
+			},
+			want: false,
+		},
+		{
+			name: "ordinary completed response remains success",
+			result: &OpenAIForwardResult{
+				ResponsesOutcomeObserved: true,
+				ResponsesProtocolStatus:  "completed",
+				UpstreamTerminalEvent:    "response.completed",
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, tt.result.SucceededForScheduling())
+		})
+	}
+}
+
 type responseBindContextProbeCache struct {
 	stubGatewayCache
 	setContextErrors []error

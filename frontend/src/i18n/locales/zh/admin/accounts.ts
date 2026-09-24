@@ -128,6 +128,9 @@ export default {
       schedulerTrace: {
         title: '最近调度解释',
         refresh: '刷新解释',
+        viewAll: '查看全部',
+        details: '调度记录',
+        close: '关闭',
         empty: '暂无请求级调度记录',
         scope: '仅覆盖进入本次调度器账号池的账号；更早的账号池、分组或可调度状态过滤不在此记录中。',
         selected: '选中账号',

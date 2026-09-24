@@ -252,6 +252,9 @@ export default {
       schedulerTrace: {
         title: 'Recent scheduling explanations',
         refresh: 'Refresh explanations',
+        viewAll: 'View all',
+        details: 'Scheduling records',
+        close: 'Close',
         empty: 'No request-level scheduling records yet',
         scope: 'Covers only accounts that reached this scheduler pool. Earlier account-pool, group, or schedulability filters are not included.',
         selected: 'Selected account',

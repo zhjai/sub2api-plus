@@ -2136,6 +2136,9 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 	if account == nil {
 		return false, "account_nil"
 	}
+	if s != nil && s.service != nil && s.service.isOpenAIExecCapabilityBlocked(ctx, account, req.RequestedModel) {
+		return false, "exec_capability_cooldown"
+	}
 	if req.RequirePrivacySet && !account.IsPrivacySet() {
 		return false, "privacy_not_set"
 	}
@@ -2661,7 +2664,8 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 				if selection == nil || selection.Account == nil {
 					return selection, decision, nil
 				}
-				if accountSupportsOpenAICapabilities(selection.Account, requiredCapability, requiredImageCapability) {
+				if accountSupportsOpenAICapabilities(selection.Account, requiredCapability, requiredImageCapability) &&
+					!s.isOpenAIExecCapabilityBlocked(ctx, selection.Account, requestedModel) {
 					return selection, decision, nil
 				}
 				if selection.ReleaseFunc != nil {

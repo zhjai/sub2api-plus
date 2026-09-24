@@ -53,3 +53,18 @@ func TestExplicitExecDenial(t *testing.T) {
 		require.False(t, explicitExecDenial(text), text)
 	}
 }
+
+func TestLeakedExecProtocolRequiresStructuredOutput(t *testing.T) {
+	require.True(t, leakedExecProtocol("to=functions.exec code:\n{\"cmd\":\"pwd\"}"))
+	require.False(t, leakedExecProtocol("I did not modify executor.go"))
+	require.False(t, leakedExecProtocol("why there is no terminal output"))
+	require.False(t, leakedExecProtocol("to=functions.exec code: not json"))
+}
+
+func TestOpenAIToolCapabilityFailureAcceptsProtocolLeakOnlyOnOutputText(t *testing.T) {
+	c, _ := gin.CreateTestContext(nil)
+	setOpenAIExecContract(c, []byte(`{"tools":[{"type":"custom","name":"exec"}]}`), false)
+	setOpenAIExecContract(c, []byte(`{"tools":[{"type":"function","name":"exec"}]}`), true)
+	observeOpenAIToolCapabilitySSE(c, "response.output_text.delta", []byte(`{"delta":"to=functions.exec code:\n{\"cmd\":\"pwd\"}"}`))
+	require.True(t, openAIToolCapabilityFailure(c, true))
+}

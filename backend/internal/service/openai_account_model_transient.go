@@ -1,12 +1,14 @@
 package service
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"time"
 )
 
 const (
+	openAITransientCapabilityExec = "exec"
 	// openAIModelTransientStreakTTL bounds how long a failure streak survives
 	// without a new failure. It exists only so the map does not keep state for
 	// account+model pairs that stopped being used; a streak is otherwise reset
@@ -26,9 +28,24 @@ const (
 	openAIModelTransientMaxModelBytes = 512
 )
 
+type openAIExecCapabilityContextKey struct{}
+
+func withOpenAIExecCapability(ctx context.Context, enabled bool) context.Context {
+	return context.WithValue(ctx, openAIExecCapabilityContextKey{}, enabled)
+}
+
+func openAIExecCapabilityRequired(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	v, _ := ctx.Value(openAIExecCapabilityContextKey{}).(bool)
+	return v
+}
+
 type openAIAccountModelKey struct {
-	AccountID int64
-	Model     string
+	AccountID  int64
+	Model      string
+	Capability string
 }
 
 type openAIAccountModelTransientEntry struct {
@@ -68,16 +85,20 @@ func normalizeOpenAIAccountModelTransientModel(model string) string {
 	return strings.ToLower(model)
 }
 
-func openAIAccountModelTransientKey(accountID int64, model string) (openAIAccountModelKey, bool) {
+func openAIAccountModelTransientKey(accountID int64, model string, capability ...string) (openAIAccountModelKey, bool) {
 	model = normalizeOpenAIAccountModelTransientModel(model)
 	if accountID <= 0 || model == "" {
 		return openAIAccountModelKey{}, false
 	}
-	return openAIAccountModelKey{AccountID: accountID, Model: model}, true
+	key := openAIAccountModelKey{AccountID: accountID, Model: model}
+	if len(capability) > 0 {
+		key.Capability = capability[0]
+	}
+	return key, true
 }
 
-func (s *openAIAccountModelTransientState) recordFailure(accountID int64, model string, now time.Time) openAIAccountModelTransientDecision {
-	key, ok := openAIAccountModelTransientKey(accountID, model)
+func (s *openAIAccountModelTransientState) recordFailure(accountID int64, model string, now time.Time, capability ...string) openAIAccountModelTransientDecision {
+	key, ok := openAIAccountModelTransientKey(accountID, model, capability...)
 	if s == nil || !ok {
 		return openAIAccountModelTransientDecision{}
 	}
@@ -128,8 +149,8 @@ func (s *openAIAccountModelTransientState) recordFailure(accountID int64, model 
 	}
 }
 
-func (s *openAIAccountModelTransientState) recordSuccess(accountID int64, model string) {
-	key, ok := openAIAccountModelTransientKey(accountID, model)
+func (s *openAIAccountModelTransientState) recordSuccess(accountID int64, model string, capability ...string) {
+	key, ok := openAIAccountModelTransientKey(accountID, model, capability...)
 	if s == nil || !ok {
 		return
 	}
@@ -138,8 +159,8 @@ func (s *openAIAccountModelTransientState) recordSuccess(accountID int64, model 
 	s.mu.Unlock()
 }
 
-func (s *openAIAccountModelTransientState) isBlocked(accountID int64, model string, now time.Time) bool {
-	key, ok := openAIAccountModelTransientKey(accountID, model)
+func (s *openAIAccountModelTransientState) isBlocked(accountID int64, model string, now time.Time, capability ...string) bool {
+	key, ok := openAIAccountModelTransientKey(accountID, model, capability...)
 	if s == nil || !ok {
 		return false
 	}

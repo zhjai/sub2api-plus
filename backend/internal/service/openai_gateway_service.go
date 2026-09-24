@@ -341,6 +341,12 @@ func (r *OpenAIForwardResult) SucceededForScheduling() bool {
 	if r == nil {
 		return true
 	}
+	// A completed response can still prove that this account did not honor the
+	// requested tool contract. Keep that signal out of the scheduler's success
+	// EWMA and do not clear transient account state for the affected route.
+	if r.ToolCapabilityFailure {
+		return false
+	}
 	// A syntactically successful response from a different model is a channel
 	// integrity failure. Do not clear transient account state or mark the
 	// credential healthy when the upstream has served the wrong model.

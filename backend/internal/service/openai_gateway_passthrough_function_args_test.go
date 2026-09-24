@@ -14,11 +14,48 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
+
+func TestResponsesClientToolStreamBodyRestoresGenericPassthroughCustomTool(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstream := strings.Join([]string{
+		`event: response.output_item.added`,
+		`data: {"type":"response.output_item.added","sequence_number":10,"output_index":0,"item":{"type":"function_call","id":"fc_exec","call_id":"call_exec","name":"exec","arguments":"","status":"in_progress"}}`,
+		``,
+		`event: response.function_call_arguments.done`,
+		`data: {"type":"response.function_call_arguments.done","sequence_number":11,"output_index":0,"item_id":"fc_exec","call_id":"call_exec","name":"exec","arguments":"pwd"}`,
+		``,
+		`event: response.output_item.done`,
+		`data: {"type":"response.output_item.done","sequence_number":12,"output_index":0,"item":{"type":"function_call","id":"fc_exec","call_id":"call_exec","name":"exec","arguments":"pwd","status":"completed"}}`,
+		``,
+	}, "\n")
+
+	body := newResponsesClientToolStreamBody(
+		io.NopCloser(strings.NewReader(upstream)),
+		apicompat.ResponsesClientToolMapping{CustomTools: map[string]bool{"exec": true}},
+		defaultMaxLineSize,
+	)
+	defer body.Close()
+
+	data, err := io.ReadAll(body)
+	require.NoError(t, err)
+	frames := collectSSEDataPayloads(t, string(data))
+	require.Len(t, frames, 4)
+	require.Equal(t, "custom_tool_call", gjson.Get(frames[0], "item.type").String())
+	require.Equal(t, "response.custom_tool_call_input.delta", gjson.Get(frames[1], "type").String())
+	require.Equal(t, "response.custom_tool_call_input.done", gjson.Get(frames[2], "type").String())
+	require.Equal(t, "custom_tool_call", gjson.Get(frames[3], "item.type").String())
+	require.Equal(t, "pwd", gjson.Get(frames[2], "input").String())
+	for index, frame := range frames {
+		require.Equal(t, 10+index, int(gjson.Get(frame, "sequence_number").Int()))
+	}
+}
 
 func TestHandleStreamingResponsePassthroughDeduplicatesFunctionCallArguments(t *testing.T) {
 	gin.SetMode(gin.TestMode)
