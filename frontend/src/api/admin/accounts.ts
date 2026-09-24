@@ -50,6 +50,23 @@ export interface SchedulerDecisionTrace {
   previous_response_given: boolean
   session_given: boolean
   error?: string
+  candidates?: SchedulerDecisionCandidate[]
+  candidates_truncated?: boolean
+}
+
+export interface SchedulerDecisionCandidate {
+  account_id: number
+  eligible: boolean
+  selected: boolean
+  in_top_k: boolean
+  score?: number
+  priority?: number
+  load_rate?: number
+  waiting_count?: number
+  error_rate?: number
+  ttft_ms?: number
+  exclusion_reason?: string
+  decision_reason?: string
 }
 
 export async function listSchedulerDecisions(limit = 50): Promise<{ items: SchedulerDecisionTrace[]; limit: number }> {

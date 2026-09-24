@@ -43,6 +43,7 @@ func FlattenResponsesNamespacesExcept(req map[string]any, preserved map[string]b
 	}
 
 	names := make(map[string]ResponsesNamespaceName)
+	customNames := make(map[string]string)
 	for _, raw := range tools {
 		tool, ok := raw.(map[string]any)
 		if !ok || strings.TrimSpace(stringValue(tool["type"])) != "namespace" {
@@ -54,11 +55,28 @@ func FlattenResponsesNamespacesExcept(req map[string]any, preserved map[string]b
 		}
 		for _, rawChild := range namespaceChildren(tool) {
 			child, ok := rawChild.(map[string]any)
-			if !ok || strings.TrimSpace(stringValue(child["type"])) != "function" {
+			if !ok {
 				continue
 			}
+			childType := strings.TrimSpace(stringValue(child["type"]))
 			name := strings.TrimSpace(stringValue(child["name"]))
-			if name == "" {
+			if name == "" || (childType != "function" && childType != "custom") {
+				continue
+			}
+			if childType == "custom" {
+				// Responses Lite puts Codex's free-form tools (notably
+				// functions.exec) inside a namespace. Function-only upstreams
+				// cannot consume that private wrapper, so promote the custom
+				// child by its original name. Keep the name unqualified: Codex
+				// expects the restored custom_tool_call to be named exec, not
+				// functions__exec.
+				if topLevel[name] {
+					return nil, false, fmt.Errorf("namespace custom tool %q/%q conflicts with a top-level tool of the same name; this upstream cannot disambiguate them, rename one of the tools", namespace, name)
+				}
+				if prev, exists := customNames[name]; exists && prev != namespace {
+					return nil, false, fmt.Errorf("namespace custom tools %q/%q and %q/%q both use the name %q; this upstream cannot disambiguate them, rename one of the tools", prev, name, namespace, name, name)
+				}
+				customNames[name] = namespace
 				continue
 			}
 			flat := flattenNamespaceToolName(namespace, name)
@@ -72,7 +90,10 @@ func FlattenResponsesNamespacesExcept(req map[string]any, preserved map[string]b
 			names[flat] = entry
 		}
 	}
-	if len(names) == 0 {
+	// A namespace may contain only custom/free-form tools (for example
+	// functions.exec). Those tools do not need a namespace identity mapping,
+	// but still must be promoted to the top-level declaration list.
+	if len(names) == 0 && len(customNames) == 0 {
 		return nil, false, nil
 	}
 
@@ -91,12 +112,31 @@ func FlattenResponsesNamespacesExcept(req map[string]any, preserved map[string]b
 		}
 		for _, rawChild := range namespaceChildren(tool) {
 			child, ok := rawChild.(map[string]any)
-			if !ok || strings.TrimSpace(stringValue(child["type"])) != "function" {
+			if !ok {
 				continue
 			}
+			childType := strings.TrimSpace(stringValue(child["type"]))
 			name := strings.TrimSpace(stringValue(child["name"]))
+			if name == "" {
+				continue
+			}
+			if childType == "custom" {
+				if seen[name] {
+					continue
+				}
+				seen[name] = true
+				customChild := make(map[string]any, len(child))
+				for key, value := range child {
+					customChild[key] = value
+				}
+				flattened = append(flattened, customChild)
+				continue
+			}
+			if childType != "function" {
+				continue
+			}
 			flat := flattenNamespaceToolName(namespace, name)
-			if name == "" || seen[flat] {
+			if seen[flat] {
 				continue
 			}
 			seen[flat] = true

@@ -768,6 +768,8 @@ func TestOpenAIForwardResult_RequiresSessionAccountEscape(t *testing.T) {
 		{"incomplete terminal", &OpenAIForwardResult{ResponsesOutcomeObserved: true, ResponsesProtocolStatus: "incomplete", ResponsesIncompleteReason: "stream_terminated", ResponsesToolCallForwarded: true}, true},
 		{"max output is not escape", &OpenAIForwardResult{ResponsesOutcomeObserved: true, ResponsesProtocolStatus: "incomplete", ResponsesIncompleteReason: "max_output_tokens", ResponsesMeaningfulOutput: true}, false},
 		{"completed is not escape", &OpenAIForwardResult{ResponsesOutcomeObserved: true, ResponsesProtocolStatus: "completed", ResponsesMeaningfulOutput: true}, false},
+		{"tool capability failure without terminal is not escape", &OpenAIForwardResult{ToolCapabilityFailure: true}, false},
+		{"tool capability failure after completed terminal is escape", &OpenAIForwardResult{ToolCapabilityFailure: true, ResponsesOutcomeObserved: true, ResponsesProtocolStatus: "completed", UpstreamTerminalEvent: "response.completed"}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) { require.Equal(t, tt.want, tt.result.RequiresSessionAccountEscape()) })

@@ -48,6 +48,18 @@ func TestIsUpstreamModelNotFoundError(t *testing.T) {
 			body:       []byte(`{"error":{"message":"model not found"}}`),
 			want:       false,
 		},
+		{
+			name:       "503 wrapped model not found matches",
+			statusCode: http.StatusServiceUnavailable,
+			body:       []byte(`{"error":{"message":"auth_unavailable: no auth available; last upstream error: model_not_found: The model gpt-6-sol does not exist"}}`),
+			want:       true,
+		},
+		{
+			name:       "generic 503 remains transient",
+			statusCode: http.StatusServiceUnavailable,
+			body:       []byte(`{"error":{"message":"upstream overloaded; please retry later"}}`),
+			want:       false,
+		},
 	}
 
 	for _, tt := range tests {

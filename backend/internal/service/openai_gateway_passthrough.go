@@ -78,6 +78,57 @@ func adaptOpenAIResponsesClientTools(body []byte) ([]byte, apicompat.ResponsesCl
 	return rebuilt, mapping, nil
 }
 
+// logOpenAIResponsesToolAdaptation records only the post-adaptation tool
+// contract. It intentionally excludes descriptions, prompts, credentials, and
+// tool arguments so a production diagnostic cannot become a request dump.
+func logOpenAIResponsesToolAdaptation(
+	ctx context.Context,
+	account *Account,
+	model string,
+	path string,
+	originalBody []byte,
+	adaptedBody []byte,
+	mapping apicompat.ResponsesClientToolMapping,
+) {
+	if len(originalBody) == 0 || !needsOpenAIResponsesClientToolAdaptation(originalBody) {
+		return
+	}
+	toolNames := make([]string, 0, 8)
+	toolTypes := make([]string, 0, 8)
+	tools := gjson.GetBytes(adaptedBody, "tools")
+	if tools.IsArray() {
+		tools.ForEach(func(_, value gjson.Result) bool {
+			name := strings.TrimSpace(value.Get("name").String())
+			typ := strings.TrimSpace(value.Get("type").String())
+			if name != "" && typ != "" && len(toolNames) < 32 {
+				toolNames = append(toolNames, name)
+				toolTypes = append(toolTypes, typ)
+			}
+			return true
+		})
+	}
+	accountID := int64(0)
+	accountType := ""
+	if account != nil {
+		accountID = account.ID
+		accountType = account.Type
+	}
+	logger.FromContext(ctx).Info("openai_responses_tool_contract",
+		zap.Int64("account_id", accountID),
+		zap.String("account_type", accountType),
+		zap.String("model", strings.TrimSpace(model)),
+		zap.String("path", path),
+		zap.Bool("adapted", !bytes.Equal(originalBody, adaptedBody)),
+		zap.Int("input_additional_tools", int(gjson.GetBytes(originalBody, `input.#(type=="additional_tools")`).Int())),
+		zap.Int("declared_tools", len(tools.Array())),
+		zap.Strings("tool_names", toolNames),
+		zap.Strings("tool_types", toolTypes),
+		zap.Int("mapped_custom_tools", len(mapping.CustomTools)),
+		zap.Bool("mapped_tool_search", mapping.ToolSearch),
+		zap.Int("mapped_namespace_tools", len(mapping.NamespaceTools)),
+	)
+}
+
 func needsOpenAIResponsesClientToolAdaptation(body []byte) bool {
 	needsAdaptation := false
 	var visit func(gjson.Result) bool
@@ -249,14 +300,15 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 			}
 		}
 	}
-
 	if account != nil && account.Platform == PlatformOpenAI && account.Type == AccountTypeAPIKey &&
 		!isOpenAIResponsesCompactPath(c) && needsOpenAIResponsesClientToolAdaptation(body) {
+		originalToolBody := body
 		adaptedBody, mapping, adaptErr := adaptOpenAIResponsesClientTools(body)
 		if adaptErr != nil {
 			return nil, adaptErr
 		}
 		body = adaptedBody
+		logOpenAIResponsesToolAdaptation(ctx, account, reqModel, openAIResponsesEndpoint, originalToolBody, body, mapping)
 		setOpenAIResponsesClientToolMapping(c, mapping)
 	}
 
@@ -406,6 +458,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 			ResponsesIncompleteReason:  streamResult.incompleteReason,
 			ResponsesMeaningfulOutput:  streamResult.meaningfulOutput,
 			ResponsesToolCallForwarded: streamResult.toolCallForwarded,
+			ToolCapabilityFailure:      streamResult.toolCapabilityFailure,
 			ClientDisconnect:           streamResult.clientDisconnected,
 			ImageCount:                 streamResult.imageCount,
 			ImageOutputSizes:           streamResult.imageOutputSizes,
@@ -625,7 +678,10 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		ResponsesIncompleteReason:     responsesIncompleteReason,
 		ResponsesMeaningfulOutput:     responsesMeaningfulOutput,
 		ResponsesToolCallForwarded:    responsesToolCallForwarded,
-		ClientDisconnect:              responsesClientDisconnected,
+		ToolCapabilityFailure: openAIToolCapabilityFailure(c,
+			strings.EqualFold(responsesProtocolStatus, "completed") &&
+				(responsesTerminalEvent == "response.completed" || responsesTerminalEvent == "response.done")),
+		ClientDisconnect: responsesClientDisconnected,
 	}
 	if imageCount > 0 {
 		forwardResult.ImageCount = imageCount
@@ -700,6 +756,8 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 
 	// DeepSeek / Kimi 原生 Responses 端点为无状态实现（见 normalizeDeepSeekResponsesRequestBody）。
 	body = normalizeDeepSeekResponsesRequestBody(account, body)
+	// Record capability from the final body after all passthrough rewrites.
+	setOpenAIExecContract(c, body, true)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
 	if err != nil {
@@ -1125,32 +1183,34 @@ func collectOpenAIPassthroughTimeoutHeaders(h http.Header) []string {
 }
 
 type openaiStreamingResultPassthrough struct {
-	usage              *OpenAIUsage
-	firstTokenMs       *int
-	responseID         string
-	imageCount         int
-	imageOutputSizes   []string
-	terminalEventType  string
-	protocolStatus     string
-	responseStatus     string
-	incompleteReason   string
-	meaningfulOutput   bool
-	toolCallForwarded  bool
-	clientDisconnected bool
+	usage                 *OpenAIUsage
+	firstTokenMs          *int
+	responseID            string
+	imageCount            int
+	imageOutputSizes      []string
+	terminalEventType     string
+	protocolStatus        string
+	responseStatus        string
+	incompleteReason      string
+	meaningfulOutput      bool
+	toolCallForwarded     bool
+	toolCapabilityFailure bool
+	clientDisconnected    bool
 }
 
 type openaiNonStreamingResultPassthrough struct {
 	*OpenAIUsage
-	usage             *OpenAIUsage
-	responseID        string
-	imageCount        int
-	imageOutputSizes  []string
-	terminalEventType string
-	protocolStatus    string
-	responseStatus    string
-	incompleteReason  string
-	meaningfulOutput  bool
-	toolCallForwarded bool
+	usage                 *OpenAIUsage
+	responseID            string
+	imageCount            int
+	imageOutputSizes      []string
+	terminalEventType     string
+	protocolStatus        string
+	responseStatus        string
+	incompleteReason      string
+	meaningfulOutput      bool
+	toolCallForwarded     bool
+	toolCapabilityFailure bool
 }
 
 const openAIStreamKeepaliveBytesKey = "openai_stream_keepalive_bytes"
@@ -2123,19 +2183,26 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 
 	needModelReplace := strings.TrimSpace(originalModel) != "" && strings.TrimSpace(mappedModel) != "" && strings.TrimSpace(originalModel) != strings.TrimSpace(mappedModel)
 	resultWithUsage := func() *openaiStreamingResultPassthrough {
+		completedTerminal := strings.EqualFold(protocolStatus, "completed") &&
+			(terminalEventType == "response.completed" || terminalEventType == "response.done")
+		toolCapabilityFailure := openAIToolCapabilityFailure(c, completedTerminal)
+		if toolCapabilityFailure {
+			logOpenAIToolCapabilityFailure(c, account, originalModel)
+		}
 		return &openaiStreamingResultPassthrough{
-			usage:              usage,
-			firstTokenMs:       firstTokenMs,
-			responseID:         responseID,
-			imageCount:         imageCounter.Count(),
-			imageOutputSizes:   imageCounter.Sizes(),
-			terminalEventType:  terminalEventType,
-			protocolStatus:     protocolStatus,
-			responseStatus:     responseStatus,
-			incompleteReason:   incompleteReason,
-			meaningfulOutput:   semanticOutputSeen,
-			toolCallForwarded:  toolCallForwarded,
-			clientDisconnected: clientDisconnected,
+			usage:                 usage,
+			firstTokenMs:          firstTokenMs,
+			responseID:            responseID,
+			imageCount:            imageCounter.Count(),
+			imageOutputSizes:      imageCounter.Sizes(),
+			terminalEventType:     terminalEventType,
+			protocolStatus:        protocolStatus,
+			responseStatus:        responseStatus,
+			incompleteReason:      incompleteReason,
+			meaningfulOutput:      semanticOutputSeen,
+			toolCallForwarded:     toolCallForwarded,
+			toolCapabilityFailure: toolCapabilityFailure,
+			clientDisconnected:    clientDisconnected,
 		}
 	}
 
@@ -2189,6 +2256,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				}
 			}
 			eventType := effectiveOpenAISSEEventType(dataBytes, rawEventType)
+			observeOpenAIToolCapabilitySSE(c, eventType, dataBytes)
 			itemType := strings.TrimSpace(gjson.GetBytes(dataBytes, "item.type").String())
 			if strings.Contains(eventType, "tool_call") || strings.Contains(eventType, "function_call") ||
 				itemType == "function_call" || itemType == "custom_tool_call" || itemType == "tool_search_call" {

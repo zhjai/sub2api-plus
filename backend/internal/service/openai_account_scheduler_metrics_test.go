@@ -25,6 +25,43 @@ func TestOpenAIAccountScheduleTraceStoreIsBoundedAndNewestFirst(t *testing.T) {
 	require.Equal(t, int64(3), all[len(all)-1].SelectedAccountID)
 }
 
+func TestBuildOpenAIAccountScheduleCandidatesExplainsSelectionAndExclusions(t *testing.T) {
+	first := &Account{ID: 2}
+	second := &Account{ID: 1}
+	plan := openAIAccountLoadPlan{
+		candidates: []openAIAccountCandidateScore{
+			{account: first, loadInfo: &AccountLoadInfo{AccountID: 2, LoadRate: 20}, score: 4.5, priority: 2},
+			{account: second, loadInfo: &AccountLoadInfo{AccountID: 1, LoadRate: 80}, score: 3.5, priority: 4},
+		},
+		topK: 1,
+	}
+	got := buildOpenAIAccountScheduleCandidates(plan, map[int64]string{9: "session_excluded"})
+	require.Len(t, got, 3)
+	require.Equal(t, int64(1), got[0].AccountID)
+	require.False(t, got[0].InTopK)
+	require.Equal(t, int64(2), got[1].AccountID)
+	require.True(t, got[1].InTopK)
+	require.Equal(t, int64(9), got[2].AccountID)
+	require.False(t, got[2].Eligible)
+	require.Equal(t, "session_excluded", got[2].ExclusionReason)
+	require.Equal(t, "ranked_below_top_k", got[0].DecisionReason)
+	require.Equal(t, "score_top_k_candidate", got[1].DecisionReason)
+}
+
+func TestPrioritizeOpenAIAccountScheduleCandidatesKeepsDecisionEvidence(t *testing.T) {
+	candidates := make([]OpenAIAccountScheduleCandidate, openAIAccountScheduleCandidateLimit+3)
+	for i := range candidates {
+		candidates[i] = OpenAIAccountScheduleCandidate{AccountID: int64(i + 1), Eligible: true}
+	}
+	candidates[openAIAccountScheduleCandidateLimit+1].InTopK = true
+	candidates[openAIAccountScheduleCandidateLimit+2].Selected = true
+
+	got := prioritizeOpenAIAccountScheduleCandidates(candidates, openAIAccountScheduleCandidateLimit)
+	require.Len(t, got, openAIAccountScheduleCandidateLimit)
+	require.Contains(t, got, candidates[openAIAccountScheduleCandidateLimit+1])
+	require.Contains(t, got, candidates[openAIAccountScheduleCandidateLimit+2])
+}
+
 type schedulerLatencyAccountRepo struct{ schedulerTestOpenAIAccountRepo }
 
 func (r schedulerLatencyAccountRepo) ListSchedulableByPlatform(ctx context.Context, platform string) ([]Account, error) {

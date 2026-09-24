@@ -253,7 +253,13 @@ export default {
         title: 'Recent scheduling explanations',
         refresh: 'Refresh explanations',
         empty: 'No request-level scheduling records yet',
+        scope: 'Covers only accounts that reached this scheduler pool. Earlier account-pool, group, or schedulability filters are not included.',
         selected: 'Selected account',
+        selectedShort: 'selected',
+        topK: 'in Top-K',
+        scoreTopK: 'score Top-K candidate (not attempt order)',
+        affinityOnly: 'This request was decided directly by affinity. Only the matched account is shown; other accounts were not fully ranked.',
+        truncated: 'Candidate details were truncated; showing at most 64 accounts.',
         excluded: 'Excluded this request',
         reason: 'Reason',
         error: 'Error'

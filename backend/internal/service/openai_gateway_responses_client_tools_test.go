@@ -87,6 +87,27 @@ func TestAdaptOpenAIResponsesClientToolsPromotesFunctionOnlyAdditionalTools(t *t
 	require.False(t, gjson.GetBytes(adapted, `input.#(type=="additional_tools")`).Exists())
 }
 
+func TestAdaptOpenAIResponsesClientToolsPromotesNamespacedCustomExec(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.5","input":[
+		{"type":"additional_tools","tools":[
+			{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"exec"}]},
+			{"type":"namespace","name":"clock","tools":[{"type":"function","name":"sleep","parameters":{"type":"object"}}]}
+		]},
+		{"type":"message","role":"user","content":"run it"}
+	]}`)
+
+	adapted, mapping, err := adaptOpenAIResponsesClientTools(body)
+
+	require.NoError(t, err)
+	require.True(t, mapping.CustomTools["exec"])
+	require.Equal(t, apicompat.ResponsesNamespaceName{Namespace: "clock", Name: "sleep"}, mapping.NamespaceTools["clock__sleep"])
+	require.Equal(t, "function", gjson.GetBytes(adapted, "tools.0.type").String())
+	require.Equal(t, "exec", gjson.GetBytes(adapted, "tools.0.name").String())
+	require.Equal(t, "function", gjson.GetBytes(adapted, "tools.1.type").String())
+	require.Equal(t, "clock__sleep", gjson.GetBytes(adapted, "tools.1.name").String())
+	require.False(t, gjson.GetBytes(adapted, `input.#(type=="additional_tools")`).Exists())
+}
+
 func TestAdaptOpenAIResponsesClientToolsExplicitEmptyResetBlocksHistoryInference(t *testing.T) {
 	body := []byte(`{"model":"gpt-5.5","tools":[],"input":[
 		{"type":"additional_tools","tools":[]},

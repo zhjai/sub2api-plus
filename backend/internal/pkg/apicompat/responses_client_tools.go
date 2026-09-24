@@ -58,8 +58,13 @@ func PromoteResponsesAdditionalTools(req map[string]any) (bool, error) {
 		return false, nil
 	}
 	req["input"] = kept
+	// Preserve an explicit additional_tools carrier even when it is empty. An
+	// empty carrier is a caller-level declaration that this turn has no extra
+	// executable tools; deleting it would make continuation history look like a
+	// missing declaration and allow InferResponsesClientToolMapping to resurrect
+	// stale custom tools.
 	if len(tools) == 0 && !toolsPresent {
-		delete(req, "tools")
+		req["tools"] = []any{}
 	} else {
 		req["tools"] = tools
 	}

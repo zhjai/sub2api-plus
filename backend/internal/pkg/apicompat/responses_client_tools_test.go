@@ -116,6 +116,26 @@ func TestPromoteResponsesAdditionalToolsPreservesExplicitEmptyToolReset(t *testi
 	require.Empty(t, tools)
 }
 
+func TestPromoteResponsesAdditionalToolsEmptyCarrierBlocksHistoryInference(t *testing.T) {
+	req := map[string]any{
+		"input": []any{
+			map[string]any{"type": "additional_tools", "tools": []any{}},
+			map[string]any{"type": "custom_tool_call", "name": "exec", "input": "pwd"},
+		},
+	}
+
+	changed, err := PromoteResponsesAdditionalTools(req)
+	require.NoError(t, err)
+	require.True(t, changed)
+	tools, present := req["tools"]
+	require.True(t, present)
+	require.Empty(t, tools)
+	mapping, adapted, err := AdaptResponsesClientTools(req)
+	require.NoError(t, err)
+	require.False(t, adapted)
+	require.Empty(t, mapping.CustomTools)
+}
+
 func TestAdaptResponsesClientTools_RemovesDeferredFlagsWhenToolSearchIsLowered(t *testing.T) {
 	req := map[string]any{
 		"tools": []any{

@@ -283,6 +283,7 @@ type OpenAIForwardResult struct {
 	ResponsesIncompleteReason  string
 	ResponsesMeaningfulOutput  bool
 	ResponsesToolCallForwarded bool
+	ToolCapabilityFailure      bool
 	ResponseHeaders            http.Header
 	Duration                   time.Duration
 	FirstTokenMs               *int
@@ -315,7 +316,14 @@ type OpenAIForwardResult struct {
 // next sampling should not reuse this request's sticky upstream account.
 // Normal model truncation (for example max_output_tokens) remains sticky.
 func (r *OpenAIForwardResult) RequiresSessionAccountEscape() bool {
-	if r == nil || !r.ResponsesOutcomeObserved {
+	if r == nil {
+		return false
+	}
+	if r.ToolCapabilityFailure && strings.EqualFold(strings.TrimSpace(r.ResponsesProtocolStatus), "completed") &&
+		(r.UpstreamTerminalEvent == "response.completed" || r.UpstreamTerminalEvent == "response.done") {
+		return true
+	}
+	if !r.ResponsesOutcomeObserved {
 		return false
 	}
 	if !r.ResponsesMeaningfulOutput && !r.ResponsesToolCallForwarded {

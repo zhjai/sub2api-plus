@@ -129,7 +129,13 @@ export default {
         title: '最近调度解释',
         refresh: '刷新解释',
         empty: '暂无请求级调度记录',
+        scope: '仅覆盖进入本次调度器账号池的账号；更早的账号池、分组或可调度状态过滤不在此记录中。',
         selected: '选中账号',
+        selectedShort: '已选',
+        topK: '进入 Top-K',
+        scoreTopK: '评分 Top-K 候选（非尝试顺序）',
+        affinityOnly: '本次由亲和关系直接决定，仅展示命中的账号；未对其他账号执行完整候选排名。',
+        truncated: '候选解释已截断，最多显示 64 个账号。',
         excluded: '本次排除账号',
         reason: '原因',
         error: '错误'

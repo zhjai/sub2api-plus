@@ -40,6 +40,7 @@ type openaiStreamingResult struct {
 	responsesIncompleteReason  string
 	responsesMeaningfulOutput  bool
 	responsesToolCallForwarded bool
+	toolCapabilityFailure      bool
 }
 
 type openaiNonStreamingResult struct {
@@ -360,6 +361,12 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	// both list the same call_id — counting both would ~2× the surcharge).
 	streamSearchSeen := make(map[string]struct{})
 	resultWithUsage := func() *openaiStreamingResult {
+		completedTerminal := strings.EqualFold(responsesProtocolStatus, "completed") &&
+			(terminalEventType == "response.completed" || terminalEventType == "response.done")
+		toolCapabilityFailure := openAIToolCapabilityFailure(c, completedTerminal)
+		if toolCapabilityFailure {
+			logOpenAIToolCapabilityFailure(c, account, originalModel)
+		}
 		return &openaiStreamingResult{
 			usage:                      usage,
 			firstTokenMs:               firstTokenMs,
@@ -374,6 +381,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			responsesIncompleteReason:  responsesIncompleteReason,
 			responsesMeaningfulOutput:  responsesSemanticOutputSeen,
 			responsesToolCallForwarded: responsesToolCallForwarded,
+			toolCapabilityFailure:      toolCapabilityFailure,
 		}
 	}
 	flushPending := func(disconnectMessage string) {
@@ -581,6 +589,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				suppressCurrentEvent = true
 			}
 			observer.ObserveOpenAI(dataBytes, eventType)
+			observeOpenAIToolCapabilitySSE(c, eventType, dataBytes)
 			// 初始上游 data 的 type 只解析一次：原始值保持终止事件的精确匹配，规范化值供后续分支复用。
 			if openAIStreamEventIsTerminalWithType(data, eventType) {
 				sawTerminalEvent = true
@@ -1027,7 +1036,11 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			// on another account, even when metadata/preamble bytes were flushed.
 			// Never send a generic error event here: that would make a clean account
 			// switch impossible for strict Responses clients.
-			if !responsesSemanticOutputSeen && !openAIStreamClientOutputStarted(c, clientOutputStarted) && !eventShouldFlush {
+			// Metadata/preamble may still be buffered in the current SSE frame. It
+			// has not reached the client while clientOutputStarted is false, so the
+			// request is still safe to fail over. Do not let eventShouldFlush turn a
+			// pre-output watchdog timeout into the generic stream_timeout response.
+			if !responsesSemanticOutputSeen && !openAIStreamClientOutputStarted(c, clientOutputStarted) {
 				_ = resp.Body.Close()
 				failoverErr := s.newOpenAIStreamFailoverError(
 					c,

@@ -8,7 +8,10 @@ import (
 var upstreamModelNotFoundKeywords = []string{"model not found", "unknown model", "not found"}
 
 func isUpstreamModelNotFoundError(statusCode int, body []byte) bool {
-	if statusCode != http.StatusNotFound {
+	// OpenAI-compatible gateways sometimes wrap a deterministic upstream
+	// model_not_found in 503/auth_unavailable. Treat only a body that explicitly
+	// names a model as model-scoped; a generic 503 remains transient.
+	if statusCode != http.StatusNotFound && statusCode != http.StatusServiceUnavailable {
 		return false
 	}
 	normalized := normalizeModelNotFoundBody(body)

@@ -182,6 +182,7 @@
             </button>
           </div>
           <div v-if="schedulerTraces.length" class="mt-2 space-y-1.5 text-xs">
+            <p class="text-[11px] text-gray-500 dark:text-dark-400">{{ t('admin.accounts.schedulerTrace.scope') }}</p>
             <div v-for="trace in schedulerTraces.slice(0, 5)" :key="`${trace.at}-${trace.selected_account_id}`" class="grid gap-1 border-t border-gray-100 pt-1.5 dark:border-dark-700 md:grid-cols-[auto_1fr_auto] md:items-center">
               <span class="font-mono text-gray-500 dark:text-dark-400">{{ formatRelativeTime(trace.at) }}</span>
               <span class="truncate text-gray-700 dark:text-gray-200" :title="trace.reason_text">
@@ -191,6 +192,19 @@
                 {{ t('admin.accounts.schedulerTrace.selected') }} #{{ trace.selected_account_id || '-' }}
                 <span v-if="trace.excluded_account_ids?.length" class="text-amber-700 dark:text-amber-300"> · {{ t('admin.accounts.schedulerTrace.excluded') }} #{{ trace.excluded_account_ids.join(', #') }}</span>
               </span>
+              <div v-if="trace.candidates?.length" class="col-span-full mt-1 grid gap-1 text-[11px] text-gray-500 dark:text-dark-400 md:grid-cols-2">
+                <div v-for="candidate in trace.candidates" :key="candidate.account_id" class="flex flex-wrap items-center gap-1 rounded border border-gray-100 px-1.5 py-1 dark:border-dark-700">
+                  <span class="font-mono">#{{ candidate.account_id }}</span>
+                  <span v-if="candidate.selected" class="text-emerald-700 dark:text-emerald-300">{{ t('admin.accounts.schedulerTrace.selectedShort') }}</span>
+                  <span v-else-if="candidate.exclusion_reason" class="text-amber-700 dark:text-amber-300">{{ candidate.exclusion_reason }}</span>
+                  <span v-else-if="candidate.in_top_k">{{ t('admin.accounts.schedulerTrace.scoreTopK') }}</span>
+                  <span v-else-if="candidate.decision_reason">{{ candidate.decision_reason }}</span>
+                  <span v-if="candidate.score != null">score={{ candidate.score.toFixed(2) }}</span>
+                  <span v-if="candidate.load_rate != null">load={{ candidate.load_rate }}%</span>
+                </div>
+              </div>
+              <span v-if="isAffinityOnlyTrace(trace)" class="col-span-full text-[11px] text-blue-700 dark:text-blue-300">{{ t('admin.accounts.schedulerTrace.affinityOnly') }}</span>
+              <span v-if="trace.candidates_truncated" class="col-span-full text-[11px] text-amber-700 dark:text-amber-300">{{ t('admin.accounts.schedulerTrace.truncated') }}</span>
             </div>
           </div>
           <div v-else class="mt-2 text-xs text-gray-500 dark:text-dark-400">{{ t('admin.accounts.schedulerTrace.empty') }}</div>
@@ -657,6 +671,9 @@ const loadSchedulerTraces = async () => {
     schedulerTraceLoading.value = false
   }
 }
+const isAffinityOnlyTrace = (trace: SchedulerDecisionTrace): boolean =>
+  ['previous_response_id', 'session_hash', 'guardian_parent'].includes(trace.layer) &&
+  trace.reason_code !== 'sticky_escape'
 let upstreamBillingRateAbortController: AbortController | null = null
 useIntervalFn(() => { upstreamBillingNow.value = Date.now() }, 60_000)
 

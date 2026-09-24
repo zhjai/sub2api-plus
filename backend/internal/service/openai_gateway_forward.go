@@ -20,6 +20,7 @@ import (
 // Forward forwards request to OpenAI API
 func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
 	beginUpstreamResponseModelObservation(c)
+	setOpenAIExecContract(c, body, false)
 	ClearActualOpenAIUpstreamEndpoint(c)
 	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
 		SetActualOpenAIUpstreamEndpoint(c, "/v1/chat/completions")
@@ -141,11 +142,13 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	nativeDeepSeekResponses := account.Platform == PlatformDeepseek && nativeCNResponses
 	if nativeDeepSeekResponses && account.Type == AccountTypeAPIKey && !compactPath &&
 		needsOpenAIResponsesClientToolAdaptation(body) {
+		originalToolBody := body
 		adaptedBody, mapping, adaptErr := adaptOpenAIResponsesClientTools(body)
 		if adaptErr != nil {
 			return nil, fmt.Errorf("adapt DeepSeek Responses client tools: %w", adaptErr)
 		}
 		body = adaptedBody
+		logOpenAIResponsesToolAdaptation(ctx, account, gjson.GetBytes(originalToolBody, "model").String(), openAIResponsesEndpoint, originalToolBody, body, mapping)
 		setOpenAIResponsesClientToolMapping(c, mapping)
 	}
 
@@ -1340,6 +1343,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			forwardResult.ResponsesIncompleteReason = streamOutcome.responsesIncompleteReason
 			forwardResult.ResponsesMeaningfulOutput = streamOutcome.responsesMeaningfulOutput
 			forwardResult.ResponsesToolCallForwarded = streamOutcome.responsesToolCallForwarded
+			forwardResult.ToolCapabilityFailure = streamOutcome.toolCapabilityFailure
 			forwardResult.UpstreamTerminalEvent = streamOutcome.responsesTerminalEvent
 		}
 		if imageCount > 0 {
@@ -1420,6 +1424,8 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 	// DeepSeek / Kimi 原生 Responses 端点为无状态实现：强制 store=false、清除
 	// previous_response_id，避免携带状态字段被上游拒绝。
 	body = normalizeDeepSeekResponsesRequestBody(account, body)
+	// Record capability from the exact body sent upstream, after request rewriting.
+	setOpenAIExecContract(c, body, true)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", targetURL, bytes.NewReader(body))
 	if err != nil {

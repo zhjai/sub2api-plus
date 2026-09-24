@@ -90,6 +90,32 @@ func TestFlattenResponsesNamespaces_NamespaceGroupChoiceFallsBackToAuto(t *testi
 	require.Equal(t, "auto", req["tool_choice"])
 }
 
+func TestFlattenResponsesNamespaces_PromotesCustomOnlyNamespace(t *testing.T) {
+	req := map[string]any{
+		"tools": []any{map[string]any{
+			"type": "namespace", "name": "functions", "tools": []any{
+				map[string]any{"type": "custom", "name": "exec", "description": "run a command"},
+			},
+		}},
+		"input": []any{map[string]any{
+			"type": "custom_tool_call", "name": "exec", "call_id": "call_1", "input": "ls",
+		}},
+	}
+
+	names, changed, err := FlattenResponsesNamespaces(req)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.Empty(t, names)
+
+	tools, ok := req["tools"].([]any)
+	require.True(t, ok)
+	require.Len(t, tools, 1)
+	tool, ok := tools[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "custom", tool["type"])
+	require.Equal(t, "exec", tool["name"])
+}
+
 func TestFlattenResponsesNamespacesExcept_PreservesBuiltInNamespaceAndChoice(t *testing.T) {
 	req := map[string]any{
 		"tools": []any{

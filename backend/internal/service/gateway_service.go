@@ -693,6 +693,7 @@ type ForwardResult struct {
 	ResponsesIncompleteReason  string
 	ResponsesMeaningfulOutput  bool
 	ResponsesToolCallForwarded bool
+	ToolCapabilityFailure      bool
 	Duration                   time.Duration
 	FirstTokenMs               *int // 首字时间（流式请求）
 	ClientDisconnect           bool // 客户端是否在流式传输过程中断开
@@ -721,7 +722,13 @@ type ForwardResult struct {
 // caused by the upstream watchdog/transport. The next sampling should avoid
 // this account; normal model truncation is not an escape trigger.
 func (r *ForwardResult) RequiresSessionAccountEscape() bool {
-	if r == nil || !r.ResponsesOutcomeObserved {
+	if r == nil {
+		return false
+	}
+	if r.ToolCapabilityFailure {
+		return true
+	}
+	if !r.ResponsesOutcomeObserved {
 		return false
 	}
 	if !r.ResponsesMeaningfulOutput && !r.ResponsesToolCallForwarded {
