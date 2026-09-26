@@ -581,7 +581,7 @@ export default {
         apiModeResponses: 'Responses API',
         apiModeResponsesHint: 'Use /v1/responses with default instructions + input; best for self-check/Codex paths.',
         endpoint: 'Endpoint',
-        endpointPlaceholder: 'https://api.example.com',
+        endpointPlaceholder: 'http://127.0.0.1:8080 or https://api.example.com',
         useCurrentDomain: 'Use current service',
         apiKey: 'API Key',
         apiKeyPlaceholder: 'Enter API Key',

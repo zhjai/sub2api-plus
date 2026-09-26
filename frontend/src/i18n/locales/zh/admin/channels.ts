@@ -581,7 +581,7 @@ export default {
         apiModeResponses: 'Responses API',
         apiModeResponsesHint: '使用 /v1/responses，默认带 instructions + input；适合本站自检/Codex。',
         endpoint: '上游地址',
-        endpointPlaceholder: 'https://api.example.com',
+        endpointPlaceholder: 'http://127.0.0.1:8080 或 https://api.example.com',
         useCurrentDomain: '使用当前服务',
         apiKey: 'API Key',
         apiKeyPlaceholder: '请输入 API Key',

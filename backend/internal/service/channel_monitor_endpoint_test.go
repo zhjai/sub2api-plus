@@ -14,6 +14,9 @@ import (
 func TestValidateMonitorEndpoint_BasePath(t *testing.T) {
 	for _, endpoint := range []string{
 		"https://8.8.8.8",
+		"http://127.0.0.1:8080",
+		"http://192.168.1.20:3000/api",
+		"https://internal-gateway.local/v1",
 		"https://8.8.8.8/anthropic",
 		"https://8.8.8.8/anthropic/",
 		"https://8.8.8.8/anthropic/v1",
@@ -28,14 +31,9 @@ func TestValidateMonitorEndpoint_BasePath(t *testing.T) {
 		endpoint string
 		want     error
 	}{
-		{"http://8.8.8.8/anthropic", ErrChannelMonitorEndpointScheme},
+		{"ftp://8.8.8.8/anthropic", ErrChannelMonitorEndpointScheme},
 		{"https://8.8.8.8/anthropic?key=secret", ErrChannelMonitorEndpointPath},
 		{"https://8.8.8.8/anthropic#fragment", ErrChannelMonitorEndpointPath},
-		{"https://127.0.0.1/anthropic", ErrChannelMonitorEndpointPrivate},
-		{"https://10.0.0.1/anthropic", ErrChannelMonitorEndpointPrivate},
-		{"https://169.254.169.254/anthropic", ErrChannelMonitorEndpointPrivate},
-		{"https://[::1]/anthropic", ErrChannelMonitorEndpointPrivate},
-		{"https://[fd00::1]/anthropic", ErrChannelMonitorEndpointPrivate},
 		{"https:///anthropic", ErrChannelMonitorInvalidEndpoint},
 	} {
 		t.Run(tc.endpoint, func(t *testing.T) {

@@ -118,9 +118,6 @@ const (
 	// monitorTimelineMaxPoints 用户视图 timeline 每个监控最多返回的历史点数。
 	monitorTimelineMaxPoints = 60
 
-	// monitorEndpointResolveTimeout validateEndpoint 解析 hostname 的最长耗时。
-	monitorEndpointResolveTimeout = 5 * time.Second
-
 	// ---- checker / runner 行为参数（消除 magic 值）----
 
 	// monitorAnthropicAPIVersion Anthropic Messages API 版本头。
@@ -179,16 +176,16 @@ var (
 		"CHANNEL_MONITOR_INVALID_JITTER", "jitter_seconds must be >= 0 and interval_seconds - jitter_seconds must be >= 15",
 	)
 	ErrChannelMonitorInvalidEndpoint = infraerrors.BadRequest(
-		"CHANNEL_MONITOR_INVALID_ENDPOINT", "endpoint must be a valid https URL",
+		"CHANNEL_MONITOR_INVALID_ENDPOINT", "endpoint must be a valid http or https URL",
 	)
 	ErrChannelMonitorEndpointScheme = infraerrors.BadRequest(
-		"CHANNEL_MONITOR_ENDPOINT_SCHEME", "endpoint must use https scheme",
+		"CHANNEL_MONITOR_ENDPOINT_SCHEME", "endpoint must use http or https scheme",
 	)
 	ErrChannelMonitorEndpointPath = infraerrors.BadRequest(
 		"CHANNEL_MONITOR_ENDPOINT_PATH", "endpoint must not contain query parameters or a fragment",
 	)
 	ErrChannelMonitorEndpointPrivate = infraerrors.BadRequest(
-		"CHANNEL_MONITOR_ENDPOINT_PRIVATE", "endpoint must be a public host",
+		"CHANNEL_MONITOR_ENDPOINT_PRIVATE", "endpoint host is not allowed",
 	)
 	ErrChannelMonitorEndpointUnreachable = infraerrors.BadRequest(
 		"CHANNEL_MONITOR_ENDPOINT_UNREACHABLE", "endpoint hostname could not be resolved",
