@@ -38,6 +38,10 @@ const (
 	openAIEvalFingerprintPermutationN    = 1000
 )
 
+// Keep the Candy canary compatible with the upstream CPA plugin contract.
+// The prompt and data version are pinned so historical runs remain comparable.
+const OpenAIEvalCandyExpectedAnswer = 21
+
 // CPA Candy/Fingerprint probe and reference data are vendored from
 // haowang02/cpa-plugin-codex-candy-eval at commit 5654020c1815b4c4d29139fa76b1fbfcffd9a990.
 // The upstream MIT license and copyright notice are kept beside these data files.
@@ -336,7 +340,7 @@ func OpenAIEvalFingerprintCostEstimate(samples int, inputTokensPerRequest int, i
 }
 
 func ScoreOpenAIEvalCandy(answer string) OpenAIEvalOutcome {
-	if value, ok := firstEvalNumber(answer); ok && value == 21 {
+	if value, ok := firstEvalNumber(answer); ok && value == OpenAIEvalCandyExpectedAnswer {
 		return OpenAIEvalOutcome{Status: "pass", Reason: "correct_answer", Score: 1, SampleCount: 1, ExpectedCount: 1, Confidence: "low", Scheduling: "neutral"}
 	}
 	return OpenAIEvalOutcome{Status: "warning", Reason: "single_public_item_failed", Score: 0, SampleCount: 1, ExpectedCount: 1, Confidence: "low", Scheduling: "alert_only"}
@@ -473,7 +477,9 @@ func firstEvalWord(value string) string {
 				break
 			}
 		} else if !unicode.IsLetter(runes[end]) && !unicode.IsDigit(runes[end]) {
-			break
+			if runes[end] != '-' || end+1 >= len(runes) || !unicode.IsLetter(runes[end+1]) {
+				break
+			}
 		}
 		end++
 	}
@@ -503,7 +509,60 @@ func parseEvalNumber(value string) (int, bool) {
 		return n, err == nil
 	}
 
+	if n, ok := parseEnglishEvalNumber(value); ok {
+		return n, true
+	}
+
 	return parseChineseEvalNumber(value)
+}
+
+// parseEnglishEvalNumber accepts the compact number words commonly returned
+// by English fingerprint probes (for example "seventy" or "forty-two").
+// It deliberately handles only cardinal numbers through 999 so explanatory
+// prose cannot be mistaken for a probe answer.
+func parseEnglishEvalNumber(value string) (int, bool) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, "-", " ")
+	parts := strings.Fields(value)
+	if len(parts) == 0 || len(parts) > 3 {
+		return 0, false
+	}
+	ones := map[string]int{"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19}
+	tens := map[string]int{"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90}
+	if len(parts) == 1 {
+		if n, ok := ones[parts[0]]; ok {
+			return n, true
+		}
+		if n, ok := tens[parts[0]]; ok {
+			return n, true
+		}
+		return 0, false
+	}
+	if len(parts) == 2 {
+		if tensValue, ok := tens[parts[0]]; ok {
+			if onesValue, ok := ones[parts[1]]; ok && onesValue > 0 && onesValue < 10 {
+				return tensValue + onesValue, true
+			}
+		}
+		return 0, false
+	}
+	if parts[1] != "hundred" {
+		return 0, false
+	}
+	hundreds, ok := ones[parts[0]]
+	if !ok || hundreds == 0 {
+		return 0, false
+	}
+	if parts[2] == "" {
+		return hundreds * 100, true
+	}
+	if n, ok := ones[parts[2]]; ok {
+		return hundreds*100 + n, true
+	}
+	if n, ok := tens[parts[2]]; ok {
+		return hundreds*100 + n, true
+	}
+	return 0, false
 }
 
 func parseChineseEvalNumber(value string) (int, bool) {

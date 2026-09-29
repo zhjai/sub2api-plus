@@ -123,7 +123,7 @@ func (h *AccountHandler) ListOpenAIEvalModels(c *gin.Context) {
 			}
 			return out
 		}(),
-		"candy":             gin.H{"expected_answer": 21, "confidence": "low", "scheduling": "alert_only"},
+		"candy":             gin.H{"expected_answer": service.OpenAIEvalCandyExpectedAnswer, "confidence": "low", "scheduling": "alert_only"},
 		"evaluation_notice": "Fingerprint is behavioral routing evidence, not an intelligence verdict. Candy is a low-confidence public canary. Insufficient or uncertain results never change scheduling.",
 		"reasoning_efforts": []string{"", "minimal", "low", "medium", "high", "xhigh", "max"},
 		"fingerprint_modes": []gin.H{

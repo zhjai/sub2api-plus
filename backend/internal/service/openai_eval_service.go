@@ -248,6 +248,7 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 
 	if request.TestType == OpenAIEvalTypeCandy {
 		allPassed := true
+		validSamples := 0
 		for i := 0; i < 5; i++ {
 			result, sampleErr := s.accountTest.RunOpenAIEvalSample(runCtx, target, OpenAIEvalCandyPrompt, request.ReasoningEffort)
 			run.RequestCount++
@@ -260,13 +261,20 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 				run.Samples = append(run.Samples, OpenAIEvalSampleRecord{ProbeID: fmt.Sprintf("candy-21-v1-%d", i+1), ErrorCode: safeOpenAIEvalErrorCode(sampleErr)})
 				continue
 			}
+			validSamples++
 			run.InputTokens += result.InputTokens
 			run.OutputTokens += result.OutputTokens
 			outcome := ScoreOpenAIEvalCandy(result.Text)
 			allPassed = allPassed && outcome.Status == "pass"
 			run.Samples = append(run.Samples, OpenAIEvalSampleRecord{ProbeID: fmt.Sprintf("candy-21-v1-%d", i+1), Valid: outcome.Status == "pass", ErrorCode: outcome.Reason})
 		}
-		if allPassed {
+		if validSamples < 5 {
+			// A transport/upstream failure means this run did not produce
+			// enough evidence for a canary verdict. Keep it neutral in the UI
+			// and let the operational error code explain what to retry.
+			run.Outcome = OpenAIEvalOutcome{Status: "insufficient", Reason: "insufficient_valid_samples", Score: 0, SampleCount: validSamples, ExpectedCount: 5, Confidence: "none", Scheduling: "alert_only"}
+			run.Status = "insufficient"
+		} else if allPassed {
 			run.Outcome = OpenAIEvalOutcome{Status: "pass", Reason: "all_public_candy_variants_passed", Score: 1, SampleCount: run.RequestCount, ExpectedCount: run.RequestCount, Confidence: "low", Scheduling: "alert_only"}
 			run.Status = "pass"
 		} else {

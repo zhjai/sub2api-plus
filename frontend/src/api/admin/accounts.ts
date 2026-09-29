@@ -173,7 +173,9 @@ export async function runOpenAIEval(request: {
   reasoning_effort: string
   sample_mode?: string
 }): Promise<OpenAIEvalRun> {
-  const { data } = await apiClient.post<OpenAIEvalRun>('/admin/accounts/evaluations/run', request)
+  // Fingerprint runs can make 60-400 upstream requests; the shared 30s UI
+  // timeout would cancel a healthy run and incorrectly show an error.
+  const { data } = await apiClient.post<OpenAIEvalRun>('/admin/accounts/evaluations/run', request, { timeout: 30 * 60 * 1000 })
   return data
 }
 

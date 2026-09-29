@@ -1039,11 +1039,19 @@ func collectOpenAIPassthroughTimeoutHeaders(h http.Header) []string {
 }
 
 type openaiStreamingResultPassthrough struct {
-	usage            *OpenAIUsage
-	firstTokenMs     *int
-	responseID       string
-	imageCount       int
-	imageOutputSizes []string
+	usage                 *OpenAIUsage
+	firstTokenMs          *int
+	responseID            string
+	imageCount            int
+	imageOutputSizes      []string
+	terminalEventType     string
+	protocolStatus        string
+	responseStatus        string
+	incompleteReason      string
+	meaningfulOutput      bool
+	toolCallForwarded     bool
+	toolCapabilityFailure bool
+	clientDisconnected    bool
 }
 
 type openaiNonStreamingResultPassthrough struct {
@@ -1084,6 +1092,15 @@ func openAIStreamClientOutputStarted(c *gin.Context, localStarted bool) bool {
 func openAIStreamEventIsMetadata(eventType string) bool {
 	switch strings.TrimSpace(eventType) {
 	case "response.created", "response.in_progress", "keepalive":
+		return true
+	default:
+		return false
+	}
+}
+
+func openAIStreamEventIsPreamble(eventType string) bool {
+	switch strings.TrimSpace(eventType) {
+	case "response.created", "response.in_progress", "codex.response.metadata":
 		return true
 	default:
 		return false

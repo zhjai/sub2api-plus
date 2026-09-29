@@ -26,7 +26,7 @@ func TestScoreOpenAIEvalCandyRequiresCorrectLeadingAnswer(t *testing.T) {
 		require.Equal(t, "low", outcome.Confidence)
 	}
 
-	for _, answer := range []string{"29", "至少 30 颗，29 颗不够。", "答案是 20，21 才是最大反例。", "二十颗", "21.5"} {
+	for _, answer := range []string{"29", "至少 30 颗，29 颗不够。", "答案是 20，21 才是最大反例。", "二十颗", "29.5"} {
 		outcome := ScoreOpenAIEvalCandy(answer)
 		require.Equal(t, "warning", outcome.Status, answer)
 		require.Equal(t, "alert_only", outcome.Scheduling)
@@ -35,7 +35,7 @@ func TestScoreOpenAIEvalCandyRequiresCorrectLeadingAnswer(t *testing.T) {
 
 func TestNormalizeOpenAIEvalFingerprintAnswer(t *testing.T) {
 	probe := OpenAIEvalProbe{Kind: "int", Low: 1, High: 100}
-	for raw, expected := range map[string]string{" ４２。 ": "42", "四十二": "42", "42 because random": "42"} {
+	for raw, expected := range map[string]string{" ４２。 ": "42", "四十二": "42", "42 because random": "42", "seventy": "70", "forty-two": "42"} {
 		got, ok := NormalizeOpenAIEvalFingerprintAnswer(raw, probe)
 		require.True(t, ok, raw)
 		require.Equal(t, expected, got)
@@ -433,7 +433,7 @@ func TestOpenAIEvalRunCandyAndFingerprintUseSafeRouteOutcomes(t *testing.T) {
 		svc, evalRepo, healthRepo, _ := newHarness("20")
 		run, err := svc.Run(context.Background(), OpenAIEvalRunRequest{AccountID: 51, TestType: OpenAIEvalTypeCandy, RequestedModel: "gpt-5.4", ReasoningEffort: "high"}, 8, "manual")
 		require.NoError(t, err)
-		require.Equal(t, "warning", run.Status)
+		require.Equal(t, "insufficient", run.Status)
 		require.Equal(t, "alert_only", run.Outcome.Scheduling)
 		require.Len(t, evalRepo.runs, 1)
 		require.Equal(t, 1, evalRepo.leaseAcquire)
@@ -462,7 +462,7 @@ func TestOpenAIEvalRunCandyAndFingerprintUseSafeRouteOutcomes(t *testing.T) {
 	})
 
 	t.Run("active lease blocks duplicate run", func(t *testing.T) {
-		svc, evalRepo, _, _ := newHarness("29")
+		svc, evalRepo, _, _ := newHarness("21")
 		evalRepo.leaseHeld = true
 		_, err := svc.Run(context.Background(), OpenAIEvalRunRequest{AccountID: 51, TestType: OpenAIEvalTypeCandy, RequestedModel: "gpt-5.4"}, 8, "manual")
 		require.ErrorContains(t, err, "already running")
