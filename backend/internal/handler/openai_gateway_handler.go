@@ -174,6 +174,8 @@ type grokMediaEligibilityProber interface {
 
 const maxOpenAIFirstOutputTimeoutSwitches = 1
 
+const maxOpenAIExecProtocolLeakSwitches = 3
+
 func openAIForwardSucceededForScheduling(result *service.OpenAIForwardResult) bool {
 	return result.SucceededForScheduling()
 }
@@ -459,6 +461,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		return
 	}
 	reqModel := modelResult.String()
+	// Keep the client-requested model and reasoning effort on the request
+	// context before any mapping or account selection. Runtime route health and
+	// session escape state are keyed by these public dimensions.
+	bindRequestedReasoningEffort(c, body, reqModel)
 	ensureCompositeTargetPlatform(c, apiKey, reqModel)
 	if !openAICompatibleTextTargetAllowed(c, apiKey, reqModel) {
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Model is not supported by this OpenAI-compatible endpoint for composite groups")
@@ -611,6 +617,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 
 	// Generate session hash (header first; fallback to prompt_cache_key)
 	sessionHash := h.gatewayService.GenerateSessionHash(c, sessionHashBody)
+	// Keep route escape state on the stable client session identity. Pool-mode
+	// account namespacing below is for sticky affinity only and must not change
+	// which session/model/effort owns the migration record.
+	routeSessionHash := sessionHash
 	if h.rejectIfCyberSessionBlocked(c, apiKey, sessionHashBody, reqModel, cyberBlockFormatResponses) {
 		return
 	}
@@ -622,10 +632,21 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	maxAccountSwitches := h.maxAccountSwitches
 	switchCount := 0
 	firstOutputTimeoutSwitchCount := 0
+	execProtocolLeakSwitchCount := 0
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
-	for escapedID := range h.gatewayService.OpenAISessionEscapedAccountIDs(apiKey.GroupID, sessionHash) {
+	requestedEffort := ""
+	if effort := service.RequestedReasoningEffortFromContext(c.Request.Context()); effort != nil {
+		requestedEffort = *effort
+	}
+	escapeRouteState := h.gatewayService.OpenAISessionEscapeRouteStateForRequest(apiKey.GroupID, routeSessionHash, reqModel, requestedEffort)
+	for _, escapedID := range escapeRouteState.AccountIDs {
 		failedAccountIDs[escapedID] = struct{}{}
+	}
+	if escapeRouteState.HasFailedRate {
+		c.Request = c.Request.WithContext(service.WithOpenAIRouteMigration(
+			c.Request.Context(), escapeRouteState.FailedRateMultiplier, reqModel, requestedEffort,
+		))
 	}
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
@@ -722,6 +743,24 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			zap.Float64("load_skew", scheduleDecision.LoadSkew),
 		)
 		account := selection.Account
+		if previousResponseID != "" && requestPlatform == service.PlatformOpenAI &&
+			!scheduleDecision.StickyPreviousHit && !previousResponseCanMove {
+			// The request still depends on opaque upstream continuation state, but
+			// its owner was excluded or became unavailable.  Do not send that ID to
+			// a different account; the account cannot resolve another account's
+			// response state and the resulting tool/history failure is misleading.
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+				selection.ReleaseFunc = nil
+			}
+			const continuationUnavailableMessage = "previous_response_id owner is unavailable for this continuation"
+			reqLog.Warn("openai.previous_response_owner_unavailable",
+				zap.String("reason", "context_not_movable"),
+				zap.String("previous_response_id_kind", service.ClassifyOpenAIPreviousResponseIDKind(previousResponseID)),
+			)
+			h.handleStreamingAwareError(c, http.StatusBadRequest, "invalid_request_error", continuationUnavailableMessage, streamStarted)
+			return
+		}
 		if previousResponseID != "" && requestPlatform == service.PlatformOpenAI && !account.IsOpenAIApiKey() {
 			// The public Responses HTTP API supports previous_response_id on API-key
 			// accounts. OAuth/SetupToken upstreams do not, so keep searching instead
@@ -781,6 +820,11 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			}()
 			return h.gatewayService.Forward(c.Request.Context(), c, account, attemptBody)
 		}()
+		// Keep the requested model/effort dimensions attached before any
+		// schedule-quality report.  Responses may return a partial result with
+		// an error, so stamping only in the usage-record callback is too late for
+		// the runtime route statistics used by the next selection.
+		stampOpenAIRequestedReasoningEffort(result, c)
 		var cyberBlockBodyHTTP []byte
 		if service.GetOpsCyberPolicy(c) != nil {
 			cyberBlockBodyHTTP = sessionHashBody
@@ -868,10 +912,14 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			} else {
 				var failoverErr *service.UpstreamFailoverError
 				if errors.As(err, &failoverErr) {
+					if failoverErr.Reason == service.OpenAIExecProtocolLeakReason {
+						h.gatewayService.ObserveOpenAIExecProtocolLeak(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, result), routeSessionHash)
+					}
 					if failoverErr.SessionAccountEscape {
-						if escapeErr := h.gatewayService.EscapeOpenAISessionAccount(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID); escapeErr != nil {
+						if escapeErr := h.gatewayService.EscapeOpenAISessionAccountForRequest(c.Request.Context(), apiKey.GroupID, routeSessionHash, reqModel, requestedEffort, account.ID, account.BillingRateMultiplier()); escapeErr != nil {
 							reqLog.Warn("openai.session_account_escape_failed", zap.Int64("account_id", account.ID), zap.Error(escapeErr))
 						}
+						markOpenAIRouteMigration(c, account, reqModel)
 					}
 					if failoverClientGone(c) {
 						reqLog.Info("openai.failover_aborted_client_disconnected",
@@ -897,7 +945,12 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
-					if openAIFirstOutputFailoverExhausted(failoverErr, &firstOutputTimeoutSwitchCount) {
+					if failoverErr.Reason == service.OpenAIExecProtocolLeakReason {
+						if openAIExecProtocolLeakFailoverExhausted(&execProtocolLeakSwitchCount) {
+							h.handleFailoverExhausted(c, failoverErr, streamStarted)
+							return
+						}
+					} else if openAIFirstOutputFailoverExhausted(failoverErr, &firstOutputTimeoutSwitchCount) {
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
@@ -953,7 +1006,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					reqLog.Warn("openai.upstream_failover_switching", failoverSwitchFields...)
 					continue
 				}
-				h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, result), false, nil, err)
+				h.gatewayService.ReportOpenAIAccountScheduleResultForRequest(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, result), result, false, nil, err)
 				upstreamErrorAlreadyCommunicated := openAIForwardErrorAlreadyCommunicated(c, writerSizeBeforeForward, err)
 				wroteFallback := false
 				if !upstreamErrorAlreadyCommunicated {
@@ -966,7 +1019,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					zap.Error(err),
 				}
 				if result != nil && result.RequiresSessionAccountEscape() {
-					if escapeErr := h.gatewayService.EscapeOpenAISessionAccount(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID); escapeErr != nil {
+					if escapeErr := h.gatewayService.EscapeOpenAISessionAccountForRequest(c.Request.Context(), apiKey.GroupID, routeSessionHash, reqModel, requestedEffort, account.ID, account.BillingRateMultiplier()); escapeErr != nil {
 						reqLog.Warn("openai.session_account_escape_failed", zap.Int64("account_id", account.ID), zap.Error(escapeErr))
 					} else {
 						reqLog.Warn("openai.session_account_escaped", zap.Int64("account_id", account.ID), zap.String("reason", result.ResponsesIncompleteReason))
@@ -982,9 +1035,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			}
 		}
 		if result != nil {
-			h.gatewayService.ObserveOpenAIExecCapabilityResult(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, result), result)
+			h.gatewayService.ObserveOpenAIExecCapabilityResult(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, result), result, routeSessionHash)
 			if result.RequiresSessionAccountEscape() {
-				if escapeErr := h.gatewayService.EscapeOpenAISessionAccount(c.Request.Context(), apiKey.GroupID, sessionHash, account.ID); escapeErr != nil {
+				if escapeErr := h.gatewayService.EscapeOpenAISessionAccountForRequest(c.Request.Context(), apiKey.GroupID, routeSessionHash, reqModel, requestedEffort, account.ID, account.BillingRateMultiplier()); escapeErr != nil {
 					reqLog.Warn("openai.session_account_escape_failed",
 						zap.Int64("account_id", account.ID), zap.Error(escapeErr))
 				} else {
@@ -1001,7 +1054,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			if mismatchErr != nil {
 				h.gatewayService.QuarantineOpenAIUpstreamModelMismatch(c.Request.Context(), account, result.UpstreamSentModelForAudit(), result.UpstreamResponseModel)
 			}
-			h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, result), openAIForwardSucceededForScheduling(result), result.FirstTokenMs, mismatchErr)
+			h.gatewayService.ReportOpenAIAccountScheduleResultForRequest(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, result), result, openAIForwardSucceededForScheduling(result), result.FirstTokenMs, mismatchErr)
 		} else {
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, result), openAIForwardSucceededForScheduling(result), nil)
 		}
@@ -3754,6 +3807,14 @@ func openAIFirstOutputFailoverExhausted(failoverErr *service.UpstreamFailoverErr
 		return false
 	}
 	if *switchCount >= maxOpenAIFirstOutputTimeoutSwitches {
+		return true
+	}
+	*switchCount = *switchCount + 1
+	return false
+}
+
+func openAIExecProtocolLeakFailoverExhausted(switchCount *int) bool {
+	if switchCount == nil || *switchCount >= maxOpenAIExecProtocolLeakSwitches {
 		return true
 	}
 	*switchCount = *switchCount + 1

@@ -2,6 +2,9 @@ package service
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"io"
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -13,6 +16,25 @@ import (
 const openAIToolCapabilityContextKey = "openai_tool_capability_state"
 
 const openAIToolCapabilityLoggedKey = "openai_tool_capability_failure_logged"
+
+const openAIExecProtocolPrefixMaxBytes = 8 * 1024
+
+const OpenAIExecProtocolLeakReason GatewayFailureReason = "openai_exec_protocol_leak"
+
+type openAIExecProtocolVerdict uint8
+
+const (
+	openAIExecProtocolPending openAIExecProtocolVerdict = iota
+	openAIExecProtocolOrdinary
+	openAIExecProtocolLeak
+)
+
+type openAIExecProtocolGuard struct {
+	enabled  bool
+	verdict  openAIExecProtocolVerdict
+	text     string
+	seenText bool
+}
 
 type openAIToolCapabilityState struct {
 	ClientExecDeclared   bool
@@ -46,18 +68,130 @@ func setOpenAIExecContract(c *gin.Context, body []byte, outbound bool) {
 		state.ProtocolLeakObserved = false
 		state.TextWindow = ""
 		state.OutputTextWindow = ""
+		c.Set(openAIToolCapabilityLoggedKey, false)
 	} else {
 		state = openAIToolCapabilityState{ClientExecDeclared: declared}
 	}
 	c.Set(openAIToolCapabilityContextKey, state)
 }
 
+func openAIToolCapabilityStateFromContext(c *gin.Context) openAIToolCapabilityState {
+	if c == nil {
+		return openAIToolCapabilityState{}
+	}
+	value, _ := c.Get(openAIToolCapabilityContextKey)
+	state, _ := value.(openAIToolCapabilityState)
+	return state
+}
+
+func newOpenAIExecProtocolGuard(c *gin.Context) *openAIExecProtocolGuard {
+	state := openAIToolCapabilityStateFromContext(c)
+	return &openAIExecProtocolGuard{enabled: state.ClientExecDeclared && state.OutboundExecDeclared && isNativeOpenAIResponsesRequest(c)}
+}
+
+func isNativeOpenAIResponsesRequest(c *gin.Context) bool {
+	if c == nil || c.Request == nil || c.Request.URL == nil {
+		return false
+	}
+	switch strings.TrimRight(strings.TrimSpace(c.Request.URL.Path), "/") {
+	case "/v1/responses", "/openai/v1/responses", "/responses", "/backend-api/codex/responses":
+		return true
+	default:
+		return false
+	}
+}
+
+func (g *openAIExecProtocolGuard) pending() bool {
+	return g != nil && g.enabled && g.verdict == openAIExecProtocolPending
+}
+
+func (g *openAIExecProtocolGuard) observe(eventType string, data []byte, startsClientOutput, execCallObserved bool) openAIExecProtocolVerdict {
+	if g == nil || !g.enabled || g.verdict == openAIExecProtocolLeak {
+		return openAIExecProtocolOrdinary
+	}
+	if execCallObserved {
+		g.verdict = openAIExecProtocolOrdinary
+		g.text = ""
+		return g.verdict
+	}
+	fragment := openAIAssistantOutputText(eventType, data, g.seenText)
+	if g.seenText && (eventType == "response.output_text.done" || eventType == "response.content_part.done" || eventType == "response.output_item.done") {
+		fullText := openAIAssistantOutputText(eventType, data, false)
+		if fullText != "" {
+			g.text = ""
+			g.verdict = openAIExecProtocolOrdinary
+			fragment = fullText
+		}
+	}
+	if fragment != "" {
+		g.seenText = true
+		g.observeText(fragment)
+	}
+	if g.pending() && (eventType == "response.output_text.done" || eventType == "response.content_part.done" ||
+		eventType == "response.output_item.done" || openAIStreamEventTypeIsTerminal(eventType) ||
+		(startsClientOutput && fragment == "" && !g.seenText)) {
+		g.verdict = openAIExecProtocolOrdinary
+		g.text = ""
+	}
+	return g.verdict
+}
+
+func (g *openAIExecProtocolGuard) observeText(fragment string) {
+	for len(fragment) > 0 {
+		lineEnd := strings.IndexByte(fragment, '\n')
+		lineBytes := len(fragment)
+		if lineEnd >= 0 {
+			lineBytes = lineEnd + 1
+		}
+		if lineBytes > openAIExecProtocolPrefixMaxBytes-len(g.text) {
+			g.text = ""
+			g.verdict = openAIExecProtocolOrdinary
+			fragment = fragment[lineBytes:]
+			continue
+		}
+		g.text += fragment[:lineBytes]
+		g.verdict = classifyLeakedExecProtocol(g.text)
+		fragment = fragment[lineBytes:]
+		if g.verdict == openAIExecProtocolLeak {
+			return
+		}
+		if g.verdict == openAIExecProtocolOrdinary && lineEnd >= 0 {
+			g.text = ""
+		}
+	}
+}
+
+func openAIAssistantOutputText(eventType string, data []byte, alreadySeen bool) string {
+	switch strings.TrimSpace(eventType) {
+	case "response.output_text.delta":
+		return gjson.GetBytes(data, "delta").String()
+	case "response.output_text.done":
+		if !alreadySeen {
+			return gjson.GetBytes(data, "text").String()
+		}
+	case "response.content_part.added", "response.content_part.done":
+		if !alreadySeen && gjson.GetBytes(data, "part.type").String() == "output_text" {
+			return gjson.GetBytes(data, "part.text").String()
+		}
+	case "response.output_item.added", "response.output_item.done":
+		if !alreadySeen && gjson.GetBytes(data, "item.type").String() == "message" {
+			var text strings.Builder
+			for _, part := range gjson.GetBytes(data, "item.content").Array() {
+				if part.Get("type").String() == "output_text" {
+					text.WriteString(part.Get("text").String())
+				}
+			}
+			return text.String()
+		}
+	}
+	return ""
+}
+
 func observeOpenAIToolCapabilitySSE(c *gin.Context, eventType string, data []byte) {
 	if c == nil {
 		return
 	}
-	state, _ := c.Get(openAIToolCapabilityContextKey)
-	capability, _ := state.(openAIToolCapabilityState)
+	capability := openAIToolCapabilityStateFromContext(c)
 	typ := strings.TrimSpace(eventType)
 	itemType := strings.TrimSpace(gjson.GetBytes(data, "item.type").String())
 	name := strings.TrimSpace(gjson.GetBytes(data, "name").String())
@@ -69,19 +203,7 @@ func observeOpenAIToolCapabilitySSE(c *gin.Context, eventType string, data []byt
 	}
 	// Only assistant-generated output text can prove a tool-call protocol leak.
 	// A request echo, error payload, or quoted input must not poison the route.
-	generatedText := ""
-	switch typ {
-	case "response.output_text.delta":
-		generatedText = gjson.GetBytes(data, "delta").String()
-	case "response.output_text.done":
-		if capability.OutputTextWindow == "" {
-			generatedText = gjson.GetBytes(data, "text").String()
-		}
-	case "response.output_item.done":
-		if itemType == "message" && capability.OutputTextWindow == "" {
-			generatedText = gjson.GetBytes(data, "item.content.0.text").String()
-		}
-	}
+	generatedText := openAIAssistantOutputText(typ, data, capability.OutputTextWindow != "")
 	if generatedText != "" {
 		capability.OutputTextWindow += generatedText
 		if len(capability.OutputTextWindow) > 4096 {
@@ -90,25 +212,13 @@ func observeOpenAIToolCapabilitySSE(c *gin.Context, eventType string, data []byt
 		if leakedExecProtocol(capability.OutputTextWindow) {
 			capability.ProtocolLeakObserved = true
 		}
-	}
-	for _, text := range []string{
-		gjson.GetBytes(data, "delta").String(),
-		gjson.GetBytes(data, "text").String(),
-		gjson.GetBytes(data, "item.content.0.text").String(),
-		gjson.GetBytes(data, "response.output_text").String(),
-	} {
-		if text != "" {
-			capability.TextWindow += text
-			if len(capability.TextWindow) > 1024 {
-				capability.TextWindow = capability.TextWindow[len(capability.TextWindow)-1024:]
-			}
+		capability.TextWindow += generatedText
+		if len(capability.TextWindow) > 1024 {
+			capability.TextWindow = capability.TextWindow[len(capability.TextWindow)-1024:]
 		}
-		if explicitExecDenial(text) {
+		if explicitExecDenial(capability.TextWindow) {
 			capability.ExplicitDenial = true
 		}
-	}
-	if explicitExecDenial(capability.TextWindow) {
-		capability.ExplicitDenial = true
 	}
 	c.Set(openAIToolCapabilityContextKey, capability)
 }
@@ -120,10 +230,15 @@ func openAIToolCapabilityFailure(c *gin.Context, completedTerminal bool) bool {
 	if c == nil {
 		return false
 	}
-	state, _ := c.Get(openAIToolCapabilityContextKey)
-	capability, ok := state.(openAIToolCapabilityState)
-	return ok && capability.ClientExecDeclared && capability.OutboundExecDeclared &&
+	capability := openAIToolCapabilityStateFromContext(c)
+	return capability.ClientExecDeclared && capability.OutboundExecDeclared &&
 		(capability.ExplicitDenial || capability.ProtocolLeakObserved) && !capability.ExecCallObserved
+}
+
+func openAIToolCapabilityStrongLeak(c *gin.Context) bool {
+	capability := openAIToolCapabilityStateFromContext(c)
+	return capability.ClientExecDeclared && capability.OutboundExecDeclared &&
+		capability.ProtocolLeakObserved && !capability.ExecCallObserved
 }
 
 func logOpenAIToolCapabilityFailure(c *gin.Context, account *Account, model string) {
@@ -158,25 +273,74 @@ func logOpenAIToolCapabilityFailure(c *gin.Context, account *Account, model stri
 	c.Set(openAIToolCapabilityLoggedKey, true)
 }
 
-// leakedExecProtocol deliberately recognizes only a complete, leading raw
-// tool-call envelope with a JSON cmd. Explanations, Markdown code fences, and
-// ordinary mentions of exec are not evidence of a broken tool channel.
 func leakedExecProtocol(text string) bool {
-	text = strings.TrimLeft(text, " \t\r\n")
-	const prefix = "to=functions.exec code:"
-	if !strings.HasPrefix(text, prefix) {
+	return classifyLeakedExecProtocol(text) == openAIExecProtocolLeak
+}
+
+func classifyLeakedExecProtocol(text string) openAIExecProtocolVerdict {
+	if len(text) > openAIExecProtocolPrefixMaxBytes {
+		return openAIExecProtocolOrdinary
+	}
+	trimmed := strings.TrimLeft(text, " \t\r\n")
+	if trimmed == "" {
+		return openAIExecProtocolPending
+	}
+	leading := text[:len(text)-len(trimmed)]
+	if strings.Contains(leading, "\t") || len(leading)-strings.LastIndex(leading, "\n")-1 >= 4 {
+		return openAIExecProtocolOrdinary
+	}
+	for _, header := range []string{
+		"to=functions.exec code:\n", "to=functions.exec code:\r\n",
+		"to=functions.exec:\n", "to=functions.exec:\r\n",
+		"to=container.exec code:\n", "to=container.exec code:\r\n",
+		"to=container.exec:\n", "to=container.exec:\r\n",
+	} {
+		if strings.HasPrefix(header, trimmed) {
+			return openAIExecProtocolPending
+		}
+		if !strings.HasPrefix(trimmed, header) {
+			continue
+		}
+		body := strings.TrimLeft(trimmed[len(header):], " \t\r\n")
+		if body == "" || body == "{" {
+			return openAIExecProtocolPending
+		}
+		if !strings.HasPrefix(body, "{") {
+			return openAIExecProtocolOrdinary
+		}
+		var fields map[string]json.RawMessage
+		err := json.NewDecoder(strings.NewReader(body)).Decode(&fields)
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return openAIExecProtocolPending
+		}
+		if err != nil {
+			return openAIExecProtocolOrdinary
+		}
+		for _, key := range []string{"cmd", "command", "commands", "input"} {
+			if raw := fields[key]; len(raw) > 0 && openAIExecProtocolCommand(raw) {
+				return openAIExecProtocolLeak
+			}
+		}
+		return openAIExecProtocolOrdinary
+	}
+	return openAIExecProtocolOrdinary
+}
+
+func openAIExecProtocolCommand(raw json.RawMessage) bool {
+	var command string
+	if json.Unmarshal(raw, &command) == nil {
+		return strings.TrimSpace(command) != ""
+	}
+	var commands []string
+	if json.Unmarshal(raw, &commands) != nil || len(commands) == 0 {
 		return false
 	}
-	text = strings.TrimLeft(strings.TrimPrefix(text, prefix), " \t")
-	if !strings.HasPrefix(text, "\n") && !strings.HasPrefix(text, "\r\n") {
-		return false
+	for _, item := range commands {
+		if strings.TrimSpace(item) != "" {
+			return true
+		}
 	}
-	text = strings.TrimSpace(text)
-	if !gjson.Valid(text) {
-		return false
-	}
-	cmd := gjson.Get(text, "cmd")
-	return cmd.Type == gjson.String && strings.TrimSpace(cmd.String()) != ""
+	return false
 }
 
 func responsesBodyDeclaresExec(body []byte) bool {

@@ -282,6 +282,30 @@ func ProvideAccountTestService(
 	return service
 }
 
+func ProvideOpenAIEvalService(
+	repo OpenAIEvalRepository,
+	accountRepo AccountRepository,
+	accountTestService *AccountTestService,
+	pricingService *PricingService,
+) *OpenAIEvalService {
+	service := NewOpenAIEvalService(repo, accountRepo, accountTestService)
+	service.SetPricingService(pricingService)
+	initCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := service.Initialize(initCtx); err != nil {
+		// Evaluation effects fail closed when the persisted configuration cannot
+		// be read during startup; the admin endpoint can retry the read later.
+		SetOpenAIEvalEffectsEnabled(false)
+	}
+	cancel()
+	return service
+}
+
+func ProvideOpenAIEvalRunner(repo OpenAIEvalRepository, evalService *OpenAIEvalService) *OpenAIEvalRunner {
+	runner := NewOpenAIEvalRunner(repo, evalService)
+	runner.Start()
+	return runner
+}
+
 func ProvideGrokQuotaService(
 	accountRepo AccountRepository,
 	proxyRepo ProxyRepository,
@@ -905,6 +929,8 @@ var ProviderSet = wire.NewSet(
 	ProvideRateLimitService,
 	ProvideAccountUsageService,
 	ProvideAccountTestService,
+	ProvideOpenAIEvalService,
+	ProvideOpenAIEvalRunner,
 	ProvideUpstreamBillingProbeService,
 	ProvideOllamaCloudUsageService,
 	ProvideOpenCodeGoUsageService,

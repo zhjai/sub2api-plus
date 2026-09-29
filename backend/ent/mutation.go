@@ -31,6 +31,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/group"
 	"github.com/Wei-Shaw/sub2api/ent/idempotencyrecord"
 	"github.com/Wei-Shaw/sub2api/ent/identityadoptiondecision"
+	"github.com/Wei-Shaw/sub2api/ent/openaievalrun"
 	"github.com/Wei-Shaw/sub2api/ent/paymentauditlog"
 	"github.com/Wei-Shaw/sub2api/ent/paymentorder"
 	"github.com/Wei-Shaw/sub2api/ent/paymentproviderinstance"
@@ -83,6 +84,7 @@ const (
 	TypeGroup                         = "Group"
 	TypeIdempotencyRecord             = "IdempotencyRecord"
 	TypeIdentityAdoptionDecision      = "IdentityAdoptionDecision"
+	TypeOpenAIEvalRun                 = "OpenAIEvalRun"
 	TypePaymentAuditLog               = "PaymentAuditLog"
 	TypePaymentOrder                  = "PaymentOrder"
 	TypePaymentProviderInstance       = "PaymentProviderInstance"
@@ -29554,6 +29556,1758 @@ func (m *IdentityAdoptionDecisionMutation) ResetEdge(name string) error {
 		return nil
 	}
 	return fmt.Errorf("unknown IdentityAdoptionDecision edge %s", name)
+}
+
+// OpenAIEvalRunMutation represents an operation that mutates the OpenAIEvalRun nodes in the graph.
+type OpenAIEvalRunMutation struct {
+	config
+	op                   Op
+	typ                  string
+	id                   *int64
+	account_id           *int64
+	addaccount_id        *int64
+	test_type            *string
+	requested_model      *string
+	upstream_model       *string
+	reasoning_effort     *string
+	data_version         *string
+	baseline_version     *string
+	status               *string
+	outcome              *map[string]interface{}
+	samples              *[]map[string]interface{}
+	appendsamples        []map[string]interface{}
+	request_count        *int
+	addrequest_count     *int
+	input_tokens         *int64
+	addinput_tokens      *int64
+	output_tokens        *int64
+	addoutput_tokens     *int64
+	cost_estimate_usd    *float64
+	addcost_estimate_usd *float64
+	duration_ms          *int64
+	addduration_ms       *int64
+	started_at           *time.Time
+	finished_at          *time.Time
+	triggered_by         *int64
+	addtriggered_by      *int64
+	trigger_source       *string
+	error_code           *string
+	created_at           *time.Time
+	retention_until      *time.Time
+	clearedFields        map[string]struct{}
+	done                 bool
+	oldValue             func(context.Context) (*OpenAIEvalRun, error)
+	predicates           []predicate.OpenAIEvalRun
+}
+
+var _ ent.Mutation = (*OpenAIEvalRunMutation)(nil)
+
+// openaievalrunOption allows management of the mutation configuration using functional options.
+type openaievalrunOption func(*OpenAIEvalRunMutation)
+
+// newOpenAIEvalRunMutation creates new mutation for the OpenAIEvalRun entity.
+func newOpenAIEvalRunMutation(c config, op Op, opts ...openaievalrunOption) *OpenAIEvalRunMutation {
+	m := &OpenAIEvalRunMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeOpenAIEvalRun,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withOpenAIEvalRunID sets the ID field of the mutation.
+func withOpenAIEvalRunID(id int64) openaievalrunOption {
+	return func(m *OpenAIEvalRunMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *OpenAIEvalRun
+		)
+		m.oldValue = func(ctx context.Context) (*OpenAIEvalRun, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().OpenAIEvalRun.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withOpenAIEvalRun sets the old OpenAIEvalRun of the mutation.
+func withOpenAIEvalRun(node *OpenAIEvalRun) openaievalrunOption {
+	return func(m *OpenAIEvalRunMutation) {
+		m.oldValue = func(context.Context) (*OpenAIEvalRun, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m OpenAIEvalRunMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m OpenAIEvalRunMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *OpenAIEvalRunMutation) ID() (id int64, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *OpenAIEvalRunMutation) IDs(ctx context.Context) ([]int64, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []int64{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().OpenAIEvalRun.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetAccountID sets the "account_id" field.
+func (m *OpenAIEvalRunMutation) SetAccountID(i int64) {
+	m.account_id = &i
+	m.addaccount_id = nil
+}
+
+// AccountID returns the value of the "account_id" field in the mutation.
+func (m *OpenAIEvalRunMutation) AccountID() (r int64, exists bool) {
+	v := m.account_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAccountID returns the old "account_id" field's value of the OpenAIEvalRun entity.
+// If the OpenAIEvalRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OpenAIEvalRunMutation) OldAccountID(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAccountID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAccountID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAccountID: %w", err)
+	}
+	return oldValue.AccountID, nil
+}
+
+// AddAccountID adds i to the "account_id" field.
+func (m *OpenAIEvalRunMutation) AddAccountID(i int64) {
+	if m.addaccount_id != nil {
+		*m.addaccount_id += i
+	} else {
+		m.addaccount_id = &i
+	}
+}
+
+// AddedAccountID returns the value that was added to the "account_id" field in this mutation.
+func (m *OpenAIEvalRunMutation) AddedAccountID() (r int64, exists bool) {
+	v := m.addaccount_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetAccountID resets all changes to the "account_id" field.
+func (m *OpenAIEvalRunMutation) ResetAccountID() {
+	m.account_id = nil
+	m.addaccount_id = nil
+}
+
+// SetTestType sets the "test_type" field.
+func (m *OpenAIEvalRunMutation) SetTestType(s string) {
+	m.test_type = &s
+}
+
+// TestType returns the value of the "test_type" field in the mutation.
+func (m *OpenAIEvalRunMutation) TestType() (r string, exists bool) {
+	v := m.test_type
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTestType returns the old "test_type" field's value of the OpenAIEvalRun entity.
+// If the OpenAIEvalRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OpenAIEvalRunMutation) OldTestType(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTestType is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTestType requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTestType: %w", err)
+	}
+	return oldValue.TestType, nil
+}
+
+// ResetTestType resets all changes to the "test_type" field.
+func (m *OpenAIEvalRunMutation) ResetTestType() {
+	m.test_type = nil
+}
+
+// SetRequestedModel sets the "requested_model" field.
+func (m *OpenAIEvalRunMutation) SetRequestedModel(s string) {
+	m.requested_model = &s
+}
+
+// RequestedModel returns the value of the "requested_model" field in the mutation.
+func (m *OpenAIEvalRunMutation) RequestedModel() (r string, exists bool) {
+	v := m.requested_model
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRequestedModel returns the old "requested_model" field's value of the OpenAIEvalRun entity.
+// If the OpenAIEvalRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OpenAIEvalRunMutation) OldRequestedModel(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRequestedModel is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRequestedModel requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRequestedModel: %w", err)
+	}
+	return oldValue.RequestedModel, nil
+}
+
+// ResetRequestedModel resets all changes to the "requested_model" field.
+func (m *OpenAIEvalRunMutation) ResetRequestedModel() {
+	m.requested_model = nil
+}
+
+// SetUpstreamModel sets the "upstream_model" field.
+func (m *OpenAIEvalRunMutation) SetUpstreamModel(s string) {
+	m.upstream_model = &s
+}
+
+// UpstreamModel returns the value of the "upstream_model" field in the mutation.
+func (m *OpenAIEvalRunMutation) UpstreamModel() (r string, exists bool) {
+	v := m.upstream_model
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpstreamModel returns the old "upstream_model" field's value of the OpenAIEvalRun entity.
+// If the OpenAIEvalRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OpenAIEvalRunMutation) OldUpstreamModel(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpstreamModel is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpstreamModel requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpstreamModel: %w", err)
+	}
+	return oldValue.UpstreamModel, nil
+}
+
+// ResetUpstreamModel resets all changes to the "upstream_model" field.
+func (m *OpenAIEvalRunMutation) ResetUpstreamModel() {
+	m.upstream_model = nil
+}
+
+// SetReasoningEffort sets the "reasoning_effort" field.
+func (m *OpenAIEvalRunMutation) SetReasoningEffort(s string) {
+	m.reasoning_effort = &s
+}
+
+// ReasoningEffort returns the value of the "reasoning_effort" field in the mutation.
+func (m *OpenAIEvalRunMutation) ReasoningEffort() (r string, exists bool) {
+	v := m.reasoning_effort
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldReasoningEffort returns the old "reasoning_effort" field's value of the OpenAIEvalRun entity.
+// If the OpenAIEvalRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OpenAIEvalRunMutation) OldReasoningEffort(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldReasoningEffort is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldReasoningEffort requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldReasoningEffort: %w", err)
+	}
+	return oldValue.ReasoningEffort, nil
+}
+
+// ResetReasoningEffort resets all changes to the "reasoning_effort" field.
+func (m *OpenAIEvalRunMutation) ResetReasoningEffort() {
+	m.reasoning_effort = nil
+}
+
+// SetDataVersion sets the "data_version" field.
+func (m *OpenAIEvalRunMutation) SetDataVersion(s string) {
+	m.data_version = &s
+}
+
+// DataVersion returns the value of the "data_version" field in the mutation.
+func (m *OpenAIEvalRunMutation) DataVersion() (r string, exists bool) {
+	v := m.data_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDataVersion returns the old "data_version" field's value of the OpenAIEvalRun entity.
+// If the OpenAIEvalRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OpenAIEvalRunMutation) OldDataVersion(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDataVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDataVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDataVersion: %w", err)
+	}
+	return oldValue.DataVersion, nil
+}
+
+// ResetDataVersion resets all changes to the "data_version" field.
+func (m *OpenAIEvalRunMutation) ResetDataVersion() {
+	m.data_version = nil
+}
+
+// SetBaselineVersion sets the "baseline_version" field.
+func (m *OpenAIEvalRunMutation) SetBaselineVersion(s string) {
+	m.baseline_version = &s
+}
+
+// BaselineVersion returns the value of the "baseline_version" field in the mutation.
+func (m *OpenAIEvalRunMutation) BaselineVersion() (r string, exists bool) {
+	v := m.baseline_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBaselineVersion returns the old "baseline_version" field's value of the OpenAIEvalRun entity.
+// If the OpenAIEvalRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OpenAIEvalRunMutation) OldBaselineVersion(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBaselineVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBaselineVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBaselineVersion: %w", err)
+	}
+	return oldValue.BaselineVersion, nil
+}
+
+// ResetBaselineVersion resets all changes to the "baseline_version" field.
+func (m *OpenAIEvalRunMutation) ResetBaselineVersion() {
+	m.baseline_version = nil
+}
+
+// SetStatus sets the "status" field.
+func (m *OpenAIEvalRunMutation) SetStatus(s string) {
+	m.status = &s
+}
+
+// Status returns the value of the "status" field in the mutation.
+func (m *OpenAIEvalRunMutation) Status() (r string, exists bool) {
+	v := m.status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStatus returns the old "status" field's value of the OpenAIEvalRun entity.
+// If the OpenAIEvalRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OpenAIEvalRunMutation) OldStatus(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStatus: %w", err)
+	}
+	return oldValue.Status, nil
+}
+
+// ResetStatus resets all changes to the "status" field.
+func (m *OpenAIEvalRunMutation) ResetStatus() {
+	m.status = nil
+}
+
+// SetOutcome sets the "outcome" field.
+func (m *OpenAIEvalRunMutation) SetOutcome(value map[string]interface{}) {
+	m.outcome = &value
+}
+
+// Outcome returns the value of the "outcome" field in the mutation.
+func (m *OpenAIEvalRunMutation) Outcome() (r map[string]interface{}, exists bool) {
+	v := m.outcome
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOutcome returns the old "outcome" field's value of the OpenAIEvalRun entity.
+// If the OpenAIEvalRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OpenAIEvalRunMutation) OldOutcome(ctx context.Context) (v map[string]interface{}, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOutcome is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOutcome requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOutcome: %w", err)
+	}
+	return oldValue.Outcome, nil
+}
+
+// ResetOutcome resets all changes to the "outcome" field.
+func (m *OpenAIEvalRunMutation) ResetOutcome() {
+	m.outcome = nil
+}
+
+// SetSamples sets the "samples" field.
+func (m *OpenAIEvalRunMutation) SetSamples(value []map[string]interface{}) {
+	m.samples = &value
+	m.appendsamples = nil
+}
+
+// Samples returns the value of the "samples" field in the mutation.
+func (m *OpenAIEvalRunMutation) Samples() (r []map[string]interface{}, exists bool) {
+	v := m.samples
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSamples returns the old "samples" field's value of the OpenAIEvalRun entity.
+// If the OpenAIEvalRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OpenAIEvalRunMutation) OldSamples(ctx context.Context) (v []map[string]interface{}, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSamples is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSamples requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSamples: %w", err)
+	}
+	return oldValue.Samples, nil
+}
+
+// AppendSamples adds value to the "samples" field.
+func (m *OpenAIEvalRunMutation) AppendSamples(value []map[string]interface{}) {
+	m.appendsamples = append(m.appendsamples, value...)
+}
+
+// AppendedSamples returns the list of values that were appended to the "samples" field in this mutation.
+func (m *OpenAIEvalRunMutation) AppendedSamples() ([]map[string]interface{}, bool) {
+	if len(m.appendsamples) == 0 {
+		return nil, false
+	}
+	return m.appendsamples, true
+}
+
+// ResetSamples resets all changes to the "samples" field.
+func (m *OpenAIEvalRunMutation) ResetSamples() {
+	m.samples = nil
+	m.appendsamples = nil
+}
+
+// SetRequestCount sets the "request_count" field.
+func (m *OpenAIEvalRunMutation) SetRequestCount(i int) {
+	m.request_count = &i
+	m.addrequest_count = nil
+}
+
+// RequestCount returns the value of the "request_count" field in the mutation.
+func (m *OpenAIEvalRunMutation) RequestCount() (r int, exists bool) {
+	v := m.request_count
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRequestCount returns the old "request_count" field's value of the OpenAIEvalRun entity.
+// If the OpenAIEvalRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OpenAIEvalRunMutation) OldRequestCount(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRequestCount is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRequestCount requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRequestCount: %w", err)
+	}
+	return oldValue.RequestCount, nil
+}
+
+// AddRequestCount adds i to the "request_count" field.
+func (m *OpenAIEvalRunMutation) AddRequestCount(i int) {
+	if m.addrequest_count != nil {
+		*m.addrequest_count += i
+	} else {
+		m.addrequest_count = &i
+	}
+}
+
+// AddedRequestCount returns the value that was added to the "request_count" field in this mutation.
+func (m *OpenAIEvalRunMutation) AddedRequestCount() (r int, exists bool) {
+	v := m.addrequest_count
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetRequestCount resets all changes to the "request_count" field.
+func (m *OpenAIEvalRunMutation) ResetRequestCount() {
+	m.request_count = nil
+	m.addrequest_count = nil
+}
+
+// SetInputTokens sets the "input_tokens" field.
+func (m *OpenAIEvalRunMutation) SetInputTokens(i int64) {
+	m.input_tokens = &i
+	m.addinput_tokens = nil
+}
+
+// InputTokens returns the value of the "input_tokens" field in the mutation.
+func (m *OpenAIEvalRunMutation) InputTokens() (r int64, exists bool) {
+	v := m.input_tokens
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInputTokens returns the old "input_tokens" field's value of the OpenAIEvalRun entity.
+// If the OpenAIEvalRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OpenAIEvalRunMutation) OldInputTokens(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInputTokens is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInputTokens requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInputTokens: %w", err)
+	}
+	return oldValue.InputTokens, nil
+}
+
+// AddInputTokens adds i to the "input_tokens" field.
+func (m *OpenAIEvalRunMutation) AddInputTokens(i int64) {
+	if m.addinput_tokens != nil {
+		*m.addinput_tokens += i
+	} else {
+		m.addinput_tokens = &i
+	}
+}
+
+// AddedInputTokens returns the value that was added to the "input_tokens" field in this mutation.
+func (m *OpenAIEvalRunMutation) AddedInputTokens() (r int64, exists bool) {
+	v := m.addinput_tokens
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetInputTokens resets all changes to the "input_tokens" field.
+func (m *OpenAIEvalRunMutation) ResetInputTokens() {
+	m.input_tokens = nil
+	m.addinput_tokens = nil
+}
+
+// SetOutputTokens sets the "output_tokens" field.
+func (m *OpenAIEvalRunMutation) SetOutputTokens(i int64) {
+	m.output_tokens = &i
+	m.addoutput_tokens = nil
+}
+
+// OutputTokens returns the value of the "output_tokens" field in the mutation.
+func (m *OpenAIEvalRunMutation) OutputTokens() (r int64, exists bool) {
+	v := m.output_tokens
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOutputTokens returns the old "output_tokens" field's value of the OpenAIEvalRun entity.
+// If the OpenAIEvalRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OpenAIEvalRunMutation) OldOutputTokens(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOutputTokens is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOutputTokens requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOutputTokens: %w", err)
+	}
+	return oldValue.OutputTokens, nil
+}
+
+// AddOutputTokens adds i to the "output_tokens" field.
+func (m *OpenAIEvalRunMutation) AddOutputTokens(i int64) {
+	if m.addoutput_tokens != nil {
+		*m.addoutput_tokens += i
+	} else {
+		m.addoutput_tokens = &i
+	}
+}
+
+// AddedOutputTokens returns the value that was added to the "output_tokens" field in this mutation.
+func (m *OpenAIEvalRunMutation) AddedOutputTokens() (r int64, exists bool) {
+	v := m.addoutput_tokens
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetOutputTokens resets all changes to the "output_tokens" field.
+func (m *OpenAIEvalRunMutation) ResetOutputTokens() {
+	m.output_tokens = nil
+	m.addoutput_tokens = nil
+}
+
+// SetCostEstimateUsd sets the "cost_estimate_usd" field.
+func (m *OpenAIEvalRunMutation) SetCostEstimateUsd(f float64) {
+	m.cost_estimate_usd = &f
+	m.addcost_estimate_usd = nil
+}
+
+// CostEstimateUsd returns the value of the "cost_estimate_usd" field in the mutation.
+func (m *OpenAIEvalRunMutation) CostEstimateUsd() (r float64, exists bool) {
+	v := m.cost_estimate_usd
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCostEstimateUsd returns the old "cost_estimate_usd" field's value of the OpenAIEvalRun entity.
+// If the OpenAIEvalRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OpenAIEvalRunMutation) OldCostEstimateUsd(ctx context.Context) (v *float64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCostEstimateUsd is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCostEstimateUsd requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCostEstimateUsd: %w", err)
+	}
+	return oldValue.CostEstimateUsd, nil
+}
+
+// AddCostEstimateUsd adds f to the "cost_estimate_usd" field.
+func (m *OpenAIEvalRunMutation) AddCostEstimateUsd(f float64) {
+	if m.addcost_estimate_usd != nil {
+		*m.addcost_estimate_usd += f
+	} else {
+		m.addcost_estimate_usd = &f
+	}
+}
+
+// AddedCostEstimateUsd returns the value that was added to the "cost_estimate_usd" field in this mutation.
+func (m *OpenAIEvalRunMutation) AddedCostEstimateUsd() (r float64, exists bool) {
+	v := m.addcost_estimate_usd
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearCostEstimateUsd clears the value of the "cost_estimate_usd" field.
+func (m *OpenAIEvalRunMutation) ClearCostEstimateUsd() {
+	m.cost_estimate_usd = nil
+	m.addcost_estimate_usd = nil
+	m.clearedFields[openaievalrun.FieldCostEstimateUsd] = struct{}{}
+}
+
+// CostEstimateUsdCleared returns if the "cost_estimate_usd" field was cleared in this mutation.
+func (m *OpenAIEvalRunMutation) CostEstimateUsdCleared() bool {
+	_, ok := m.clearedFields[openaievalrun.FieldCostEstimateUsd]
+	return ok
+}
+
+// ResetCostEstimateUsd resets all changes to the "cost_estimate_usd" field.
+func (m *OpenAIEvalRunMutation) ResetCostEstimateUsd() {
+	m.cost_estimate_usd = nil
+	m.addcost_estimate_usd = nil
+	delete(m.clearedFields, openaievalrun.FieldCostEstimateUsd)
+}
+
+// SetDurationMs sets the "duration_ms" field.
+func (m *OpenAIEvalRunMutation) SetDurationMs(i int64) {
+	m.duration_ms = &i
+	m.addduration_ms = nil
+}
+
+// DurationMs returns the value of the "duration_ms" field in the mutation.
+func (m *OpenAIEvalRunMutation) DurationMs() (r int64, exists bool) {
+	v := m.duration_ms
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDurationMs returns the old "duration_ms" field's value of the OpenAIEvalRun entity.
+// If the OpenAIEvalRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OpenAIEvalRunMutation) OldDurationMs(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDurationMs is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDurationMs requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDurationMs: %w", err)
+	}
+	return oldValue.DurationMs, nil
+}
+
+// AddDurationMs adds i to the "duration_ms" field.
+func (m *OpenAIEvalRunMutation) AddDurationMs(i int64) {
+	if m.addduration_ms != nil {
+		*m.addduration_ms += i
+	} else {
+		m.addduration_ms = &i
+	}
+}
+
+// AddedDurationMs returns the value that was added to the "duration_ms" field in this mutation.
+func (m *OpenAIEvalRunMutation) AddedDurationMs() (r int64, exists bool) {
+	v := m.addduration_ms
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetDurationMs resets all changes to the "duration_ms" field.
+func (m *OpenAIEvalRunMutation) ResetDurationMs() {
+	m.duration_ms = nil
+	m.addduration_ms = nil
+}
+
+// SetStartedAt sets the "started_at" field.
+func (m *OpenAIEvalRunMutation) SetStartedAt(t time.Time) {
+	m.started_at = &t
+}
+
+// StartedAt returns the value of the "started_at" field in the mutation.
+func (m *OpenAIEvalRunMutation) StartedAt() (r time.Time, exists bool) {
+	v := m.started_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStartedAt returns the old "started_at" field's value of the OpenAIEvalRun entity.
+// If the OpenAIEvalRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OpenAIEvalRunMutation) OldStartedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStartedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStartedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStartedAt: %w", err)
+	}
+	return oldValue.StartedAt, nil
+}
+
+// ResetStartedAt resets all changes to the "started_at" field.
+func (m *OpenAIEvalRunMutation) ResetStartedAt() {
+	m.started_at = nil
+}
+
+// SetFinishedAt sets the "finished_at" field.
+func (m *OpenAIEvalRunMutation) SetFinishedAt(t time.Time) {
+	m.finished_at = &t
+}
+
+// FinishedAt returns the value of the "finished_at" field in the mutation.
+func (m *OpenAIEvalRunMutation) FinishedAt() (r time.Time, exists bool) {
+	v := m.finished_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFinishedAt returns the old "finished_at" field's value of the OpenAIEvalRun entity.
+// If the OpenAIEvalRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OpenAIEvalRunMutation) OldFinishedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFinishedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFinishedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFinishedAt: %w", err)
+	}
+	return oldValue.FinishedAt, nil
+}
+
+// ClearFinishedAt clears the value of the "finished_at" field.
+func (m *OpenAIEvalRunMutation) ClearFinishedAt() {
+	m.finished_at = nil
+	m.clearedFields[openaievalrun.FieldFinishedAt] = struct{}{}
+}
+
+// FinishedAtCleared returns if the "finished_at" field was cleared in this mutation.
+func (m *OpenAIEvalRunMutation) FinishedAtCleared() bool {
+	_, ok := m.clearedFields[openaievalrun.FieldFinishedAt]
+	return ok
+}
+
+// ResetFinishedAt resets all changes to the "finished_at" field.
+func (m *OpenAIEvalRunMutation) ResetFinishedAt() {
+	m.finished_at = nil
+	delete(m.clearedFields, openaievalrun.FieldFinishedAt)
+}
+
+// SetTriggeredBy sets the "triggered_by" field.
+func (m *OpenAIEvalRunMutation) SetTriggeredBy(i int64) {
+	m.triggered_by = &i
+	m.addtriggered_by = nil
+}
+
+// TriggeredBy returns the value of the "triggered_by" field in the mutation.
+func (m *OpenAIEvalRunMutation) TriggeredBy() (r int64, exists bool) {
+	v := m.triggered_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTriggeredBy returns the old "triggered_by" field's value of the OpenAIEvalRun entity.
+// If the OpenAIEvalRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OpenAIEvalRunMutation) OldTriggeredBy(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTriggeredBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTriggeredBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTriggeredBy: %w", err)
+	}
+	return oldValue.TriggeredBy, nil
+}
+
+// AddTriggeredBy adds i to the "triggered_by" field.
+func (m *OpenAIEvalRunMutation) AddTriggeredBy(i int64) {
+	if m.addtriggered_by != nil {
+		*m.addtriggered_by += i
+	} else {
+		m.addtriggered_by = &i
+	}
+}
+
+// AddedTriggeredBy returns the value that was added to the "triggered_by" field in this mutation.
+func (m *OpenAIEvalRunMutation) AddedTriggeredBy() (r int64, exists bool) {
+	v := m.addtriggered_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetTriggeredBy resets all changes to the "triggered_by" field.
+func (m *OpenAIEvalRunMutation) ResetTriggeredBy() {
+	m.triggered_by = nil
+	m.addtriggered_by = nil
+}
+
+// SetTriggerSource sets the "trigger_source" field.
+func (m *OpenAIEvalRunMutation) SetTriggerSource(s string) {
+	m.trigger_source = &s
+}
+
+// TriggerSource returns the value of the "trigger_source" field in the mutation.
+func (m *OpenAIEvalRunMutation) TriggerSource() (r string, exists bool) {
+	v := m.trigger_source
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTriggerSource returns the old "trigger_source" field's value of the OpenAIEvalRun entity.
+// If the OpenAIEvalRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OpenAIEvalRunMutation) OldTriggerSource(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTriggerSource is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTriggerSource requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTriggerSource: %w", err)
+	}
+	return oldValue.TriggerSource, nil
+}
+
+// ResetTriggerSource resets all changes to the "trigger_source" field.
+func (m *OpenAIEvalRunMutation) ResetTriggerSource() {
+	m.trigger_source = nil
+}
+
+// SetErrorCode sets the "error_code" field.
+func (m *OpenAIEvalRunMutation) SetErrorCode(s string) {
+	m.error_code = &s
+}
+
+// ErrorCode returns the value of the "error_code" field in the mutation.
+func (m *OpenAIEvalRunMutation) ErrorCode() (r string, exists bool) {
+	v := m.error_code
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldErrorCode returns the old "error_code" field's value of the OpenAIEvalRun entity.
+// If the OpenAIEvalRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OpenAIEvalRunMutation) OldErrorCode(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldErrorCode is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldErrorCode requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldErrorCode: %w", err)
+	}
+	return oldValue.ErrorCode, nil
+}
+
+// ResetErrorCode resets all changes to the "error_code" field.
+func (m *OpenAIEvalRunMutation) ResetErrorCode() {
+	m.error_code = nil
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *OpenAIEvalRunMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *OpenAIEvalRunMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the OpenAIEvalRun entity.
+// If the OpenAIEvalRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OpenAIEvalRunMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *OpenAIEvalRunMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetRetentionUntil sets the "retention_until" field.
+func (m *OpenAIEvalRunMutation) SetRetentionUntil(t time.Time) {
+	m.retention_until = &t
+}
+
+// RetentionUntil returns the value of the "retention_until" field in the mutation.
+func (m *OpenAIEvalRunMutation) RetentionUntil() (r time.Time, exists bool) {
+	v := m.retention_until
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRetentionUntil returns the old "retention_until" field's value of the OpenAIEvalRun entity.
+// If the OpenAIEvalRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *OpenAIEvalRunMutation) OldRetentionUntil(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRetentionUntil is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRetentionUntil requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRetentionUntil: %w", err)
+	}
+	return oldValue.RetentionUntil, nil
+}
+
+// ResetRetentionUntil resets all changes to the "retention_until" field.
+func (m *OpenAIEvalRunMutation) ResetRetentionUntil() {
+	m.retention_until = nil
+}
+
+// Where appends a list predicates to the OpenAIEvalRunMutation builder.
+func (m *OpenAIEvalRunMutation) Where(ps ...predicate.OpenAIEvalRun) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the OpenAIEvalRunMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *OpenAIEvalRunMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.OpenAIEvalRun, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *OpenAIEvalRunMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *OpenAIEvalRunMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (OpenAIEvalRun).
+func (m *OpenAIEvalRunMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *OpenAIEvalRunMutation) Fields() []string {
+	fields := make([]string, 0, 22)
+	if m.account_id != nil {
+		fields = append(fields, openaievalrun.FieldAccountID)
+	}
+	if m.test_type != nil {
+		fields = append(fields, openaievalrun.FieldTestType)
+	}
+	if m.requested_model != nil {
+		fields = append(fields, openaievalrun.FieldRequestedModel)
+	}
+	if m.upstream_model != nil {
+		fields = append(fields, openaievalrun.FieldUpstreamModel)
+	}
+	if m.reasoning_effort != nil {
+		fields = append(fields, openaievalrun.FieldReasoningEffort)
+	}
+	if m.data_version != nil {
+		fields = append(fields, openaievalrun.FieldDataVersion)
+	}
+	if m.baseline_version != nil {
+		fields = append(fields, openaievalrun.FieldBaselineVersion)
+	}
+	if m.status != nil {
+		fields = append(fields, openaievalrun.FieldStatus)
+	}
+	if m.outcome != nil {
+		fields = append(fields, openaievalrun.FieldOutcome)
+	}
+	if m.samples != nil {
+		fields = append(fields, openaievalrun.FieldSamples)
+	}
+	if m.request_count != nil {
+		fields = append(fields, openaievalrun.FieldRequestCount)
+	}
+	if m.input_tokens != nil {
+		fields = append(fields, openaievalrun.FieldInputTokens)
+	}
+	if m.output_tokens != nil {
+		fields = append(fields, openaievalrun.FieldOutputTokens)
+	}
+	if m.cost_estimate_usd != nil {
+		fields = append(fields, openaievalrun.FieldCostEstimateUsd)
+	}
+	if m.duration_ms != nil {
+		fields = append(fields, openaievalrun.FieldDurationMs)
+	}
+	if m.started_at != nil {
+		fields = append(fields, openaievalrun.FieldStartedAt)
+	}
+	if m.finished_at != nil {
+		fields = append(fields, openaievalrun.FieldFinishedAt)
+	}
+	if m.triggered_by != nil {
+		fields = append(fields, openaievalrun.FieldTriggeredBy)
+	}
+	if m.trigger_source != nil {
+		fields = append(fields, openaievalrun.FieldTriggerSource)
+	}
+	if m.error_code != nil {
+		fields = append(fields, openaievalrun.FieldErrorCode)
+	}
+	if m.created_at != nil {
+		fields = append(fields, openaievalrun.FieldCreatedAt)
+	}
+	if m.retention_until != nil {
+		fields = append(fields, openaievalrun.FieldRetentionUntil)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *OpenAIEvalRunMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case openaievalrun.FieldAccountID:
+		return m.AccountID()
+	case openaievalrun.FieldTestType:
+		return m.TestType()
+	case openaievalrun.FieldRequestedModel:
+		return m.RequestedModel()
+	case openaievalrun.FieldUpstreamModel:
+		return m.UpstreamModel()
+	case openaievalrun.FieldReasoningEffort:
+		return m.ReasoningEffort()
+	case openaievalrun.FieldDataVersion:
+		return m.DataVersion()
+	case openaievalrun.FieldBaselineVersion:
+		return m.BaselineVersion()
+	case openaievalrun.FieldStatus:
+		return m.Status()
+	case openaievalrun.FieldOutcome:
+		return m.Outcome()
+	case openaievalrun.FieldSamples:
+		return m.Samples()
+	case openaievalrun.FieldRequestCount:
+		return m.RequestCount()
+	case openaievalrun.FieldInputTokens:
+		return m.InputTokens()
+	case openaievalrun.FieldOutputTokens:
+		return m.OutputTokens()
+	case openaievalrun.FieldCostEstimateUsd:
+		return m.CostEstimateUsd()
+	case openaievalrun.FieldDurationMs:
+		return m.DurationMs()
+	case openaievalrun.FieldStartedAt:
+		return m.StartedAt()
+	case openaievalrun.FieldFinishedAt:
+		return m.FinishedAt()
+	case openaievalrun.FieldTriggeredBy:
+		return m.TriggeredBy()
+	case openaievalrun.FieldTriggerSource:
+		return m.TriggerSource()
+	case openaievalrun.FieldErrorCode:
+		return m.ErrorCode()
+	case openaievalrun.FieldCreatedAt:
+		return m.CreatedAt()
+	case openaievalrun.FieldRetentionUntil:
+		return m.RetentionUntil()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *OpenAIEvalRunMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case openaievalrun.FieldAccountID:
+		return m.OldAccountID(ctx)
+	case openaievalrun.FieldTestType:
+		return m.OldTestType(ctx)
+	case openaievalrun.FieldRequestedModel:
+		return m.OldRequestedModel(ctx)
+	case openaievalrun.FieldUpstreamModel:
+		return m.OldUpstreamModel(ctx)
+	case openaievalrun.FieldReasoningEffort:
+		return m.OldReasoningEffort(ctx)
+	case openaievalrun.FieldDataVersion:
+		return m.OldDataVersion(ctx)
+	case openaievalrun.FieldBaselineVersion:
+		return m.OldBaselineVersion(ctx)
+	case openaievalrun.FieldStatus:
+		return m.OldStatus(ctx)
+	case openaievalrun.FieldOutcome:
+		return m.OldOutcome(ctx)
+	case openaievalrun.FieldSamples:
+		return m.OldSamples(ctx)
+	case openaievalrun.FieldRequestCount:
+		return m.OldRequestCount(ctx)
+	case openaievalrun.FieldInputTokens:
+		return m.OldInputTokens(ctx)
+	case openaievalrun.FieldOutputTokens:
+		return m.OldOutputTokens(ctx)
+	case openaievalrun.FieldCostEstimateUsd:
+		return m.OldCostEstimateUsd(ctx)
+	case openaievalrun.FieldDurationMs:
+		return m.OldDurationMs(ctx)
+	case openaievalrun.FieldStartedAt:
+		return m.OldStartedAt(ctx)
+	case openaievalrun.FieldFinishedAt:
+		return m.OldFinishedAt(ctx)
+	case openaievalrun.FieldTriggeredBy:
+		return m.OldTriggeredBy(ctx)
+	case openaievalrun.FieldTriggerSource:
+		return m.OldTriggerSource(ctx)
+	case openaievalrun.FieldErrorCode:
+		return m.OldErrorCode(ctx)
+	case openaievalrun.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case openaievalrun.FieldRetentionUntil:
+		return m.OldRetentionUntil(ctx)
+	}
+	return nil, fmt.Errorf("unknown OpenAIEvalRun field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *OpenAIEvalRunMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case openaievalrun.FieldAccountID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAccountID(v)
+		return nil
+	case openaievalrun.FieldTestType:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTestType(v)
+		return nil
+	case openaievalrun.FieldRequestedModel:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRequestedModel(v)
+		return nil
+	case openaievalrun.FieldUpstreamModel:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpstreamModel(v)
+		return nil
+	case openaievalrun.FieldReasoningEffort:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetReasoningEffort(v)
+		return nil
+	case openaievalrun.FieldDataVersion:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDataVersion(v)
+		return nil
+	case openaievalrun.FieldBaselineVersion:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBaselineVersion(v)
+		return nil
+	case openaievalrun.FieldStatus:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStatus(v)
+		return nil
+	case openaievalrun.FieldOutcome:
+		v, ok := value.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOutcome(v)
+		return nil
+	case openaievalrun.FieldSamples:
+		v, ok := value.([]map[string]interface{})
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSamples(v)
+		return nil
+	case openaievalrun.FieldRequestCount:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRequestCount(v)
+		return nil
+	case openaievalrun.FieldInputTokens:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInputTokens(v)
+		return nil
+	case openaievalrun.FieldOutputTokens:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOutputTokens(v)
+		return nil
+	case openaievalrun.FieldCostEstimateUsd:
+		v, ok := value.(float64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCostEstimateUsd(v)
+		return nil
+	case openaievalrun.FieldDurationMs:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDurationMs(v)
+		return nil
+	case openaievalrun.FieldStartedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStartedAt(v)
+		return nil
+	case openaievalrun.FieldFinishedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFinishedAt(v)
+		return nil
+	case openaievalrun.FieldTriggeredBy:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTriggeredBy(v)
+		return nil
+	case openaievalrun.FieldTriggerSource:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTriggerSource(v)
+		return nil
+	case openaievalrun.FieldErrorCode:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetErrorCode(v)
+		return nil
+	case openaievalrun.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case openaievalrun.FieldRetentionUntil:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRetentionUntil(v)
+		return nil
+	}
+	return fmt.Errorf("unknown OpenAIEvalRun field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *OpenAIEvalRunMutation) AddedFields() []string {
+	var fields []string
+	if m.addaccount_id != nil {
+		fields = append(fields, openaievalrun.FieldAccountID)
+	}
+	if m.addrequest_count != nil {
+		fields = append(fields, openaievalrun.FieldRequestCount)
+	}
+	if m.addinput_tokens != nil {
+		fields = append(fields, openaievalrun.FieldInputTokens)
+	}
+	if m.addoutput_tokens != nil {
+		fields = append(fields, openaievalrun.FieldOutputTokens)
+	}
+	if m.addcost_estimate_usd != nil {
+		fields = append(fields, openaievalrun.FieldCostEstimateUsd)
+	}
+	if m.addduration_ms != nil {
+		fields = append(fields, openaievalrun.FieldDurationMs)
+	}
+	if m.addtriggered_by != nil {
+		fields = append(fields, openaievalrun.FieldTriggeredBy)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *OpenAIEvalRunMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case openaievalrun.FieldAccountID:
+		return m.AddedAccountID()
+	case openaievalrun.FieldRequestCount:
+		return m.AddedRequestCount()
+	case openaievalrun.FieldInputTokens:
+		return m.AddedInputTokens()
+	case openaievalrun.FieldOutputTokens:
+		return m.AddedOutputTokens()
+	case openaievalrun.FieldCostEstimateUsd:
+		return m.AddedCostEstimateUsd()
+	case openaievalrun.FieldDurationMs:
+		return m.AddedDurationMs()
+	case openaievalrun.FieldTriggeredBy:
+		return m.AddedTriggeredBy()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *OpenAIEvalRunMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case openaievalrun.FieldAccountID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddAccountID(v)
+		return nil
+	case openaievalrun.FieldRequestCount:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddRequestCount(v)
+		return nil
+	case openaievalrun.FieldInputTokens:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddInputTokens(v)
+		return nil
+	case openaievalrun.FieldOutputTokens:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddOutputTokens(v)
+		return nil
+	case openaievalrun.FieldCostEstimateUsd:
+		v, ok := value.(float64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddCostEstimateUsd(v)
+		return nil
+	case openaievalrun.FieldDurationMs:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddDurationMs(v)
+		return nil
+	case openaievalrun.FieldTriggeredBy:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddTriggeredBy(v)
+		return nil
+	}
+	return fmt.Errorf("unknown OpenAIEvalRun numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *OpenAIEvalRunMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(openaievalrun.FieldCostEstimateUsd) {
+		fields = append(fields, openaievalrun.FieldCostEstimateUsd)
+	}
+	if m.FieldCleared(openaievalrun.FieldFinishedAt) {
+		fields = append(fields, openaievalrun.FieldFinishedAt)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *OpenAIEvalRunMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *OpenAIEvalRunMutation) ClearField(name string) error {
+	switch name {
+	case openaievalrun.FieldCostEstimateUsd:
+		m.ClearCostEstimateUsd()
+		return nil
+	case openaievalrun.FieldFinishedAt:
+		m.ClearFinishedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown OpenAIEvalRun nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *OpenAIEvalRunMutation) ResetField(name string) error {
+	switch name {
+	case openaievalrun.FieldAccountID:
+		m.ResetAccountID()
+		return nil
+	case openaievalrun.FieldTestType:
+		m.ResetTestType()
+		return nil
+	case openaievalrun.FieldRequestedModel:
+		m.ResetRequestedModel()
+		return nil
+	case openaievalrun.FieldUpstreamModel:
+		m.ResetUpstreamModel()
+		return nil
+	case openaievalrun.FieldReasoningEffort:
+		m.ResetReasoningEffort()
+		return nil
+	case openaievalrun.FieldDataVersion:
+		m.ResetDataVersion()
+		return nil
+	case openaievalrun.FieldBaselineVersion:
+		m.ResetBaselineVersion()
+		return nil
+	case openaievalrun.FieldStatus:
+		m.ResetStatus()
+		return nil
+	case openaievalrun.FieldOutcome:
+		m.ResetOutcome()
+		return nil
+	case openaievalrun.FieldSamples:
+		m.ResetSamples()
+		return nil
+	case openaievalrun.FieldRequestCount:
+		m.ResetRequestCount()
+		return nil
+	case openaievalrun.FieldInputTokens:
+		m.ResetInputTokens()
+		return nil
+	case openaievalrun.FieldOutputTokens:
+		m.ResetOutputTokens()
+		return nil
+	case openaievalrun.FieldCostEstimateUsd:
+		m.ResetCostEstimateUsd()
+		return nil
+	case openaievalrun.FieldDurationMs:
+		m.ResetDurationMs()
+		return nil
+	case openaievalrun.FieldStartedAt:
+		m.ResetStartedAt()
+		return nil
+	case openaievalrun.FieldFinishedAt:
+		m.ResetFinishedAt()
+		return nil
+	case openaievalrun.FieldTriggeredBy:
+		m.ResetTriggeredBy()
+		return nil
+	case openaievalrun.FieldTriggerSource:
+		m.ResetTriggerSource()
+		return nil
+	case openaievalrun.FieldErrorCode:
+		m.ResetErrorCode()
+		return nil
+	case openaievalrun.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case openaievalrun.FieldRetentionUntil:
+		m.ResetRetentionUntil()
+		return nil
+	}
+	return fmt.Errorf("unknown OpenAIEvalRun field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *OpenAIEvalRunMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *OpenAIEvalRunMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *OpenAIEvalRunMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *OpenAIEvalRunMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *OpenAIEvalRunMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *OpenAIEvalRunMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *OpenAIEvalRunMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown OpenAIEvalRun unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *OpenAIEvalRunMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown OpenAIEvalRun edge %s", name)
 }
 
 // PaymentAuditLogMutation represents an operation that mutates the PaymentAuditLog nodes in the graph.

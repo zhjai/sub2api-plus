@@ -17,9 +17,19 @@ func WithOpenAIExecCapability(ctx context.Context, body []byte) context.Context 
 // ObserveOpenAIExecCapabilityResult records completed capability failures in a
 // separate namespace from generic account/model health. A completed ordinary
 // chat request neither clears nor trips the exec breaker.
-func (s *OpenAIGatewayService) ObserveOpenAIExecCapabilityResult(account *Account, canonicalModel string, result *OpenAIForwardResult) {
-	if s == nil || account == nil || result == nil || !result.ToolCapabilityFailure ||
-		!result.RequiresSessionAccountEscape() {
+func (s *OpenAIGatewayService) ObserveOpenAIExecCapabilityResult(account *Account, canonicalModel string, result *OpenAIForwardResult, sessionHash ...string) {
+	if s == nil || account == nil || result == nil {
+		return
+	}
+	if result.ExecCallObserved {
+		s.getOpenAIAccountModelTransientState().recordSuccess(account.ID, canonicalModel, openAITransientCapabilityExec)
+		return
+	}
+	if !result.ToolCapabilityFailure || !result.RequiresSessionAccountEscape() {
+		return
+	}
+	if len(sessionHash) > 0 {
+		s.getOpenAIAccountModelTransientState().recordDistinctSessionFailure(account.ID, canonicalModel, time.Now(), sessionHash[0], openAITransientCapabilityExec)
 		return
 	}
 	s.getOpenAIAccountModelTransientState().recordFailure(account.ID, canonicalModel, time.Now(), openAITransientCapabilityExec)
@@ -32,6 +42,13 @@ func (s *OpenAIGatewayService) ObserveOpenAIExecCapabilityFailure(account *Accou
 		return
 	}
 	s.getOpenAIAccountModelTransientState().recordFailure(account.ID, canonicalModel, time.Now(), openAITransientCapabilityExec)
+}
+
+func (s *OpenAIGatewayService) ObserveOpenAIExecProtocolLeak(account *Account, canonicalModel, sessionHash string) {
+	if s == nil || account == nil {
+		return
+	}
+	s.getOpenAIAccountModelTransientState().recordDistinctSessionFailure(account.ID, canonicalModel, time.Now(), sessionHash, openAITransientCapabilityExec)
 }
 
 func (s *OpenAIGatewayService) isOpenAIExecCapabilityBlocked(ctx context.Context, account *Account, requestedModel string) bool {

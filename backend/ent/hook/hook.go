@@ -237,6 +237,18 @@ func (f IdentityAdoptionDecisionFunc) Mutate(ctx context.Context, m ent.Mutation
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.IdentityAdoptionDecisionMutation", m)
 }
 
+// The OpenAIEvalRunFunc type is an adapter to allow the use of ordinary
+// function as OpenAIEvalRun mutator.
+type OpenAIEvalRunFunc func(context.Context, *ent.OpenAIEvalRunMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f OpenAIEvalRunFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.OpenAIEvalRunMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.OpenAIEvalRunMutation", m)
+}
+
 // The PaymentAuditLogFunc type is an adapter to allow the use of ordinary
 // function as PaymentAuditLog mutator.
 type PaymentAuditLogFunc func(context.Context, *ent.PaymentAuditLogMutation) (ent.Value, error)

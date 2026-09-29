@@ -1097,6 +1097,55 @@ var (
 			},
 		},
 	}
+	// OpenaiEvalRunsColumns holds the columns for the "openai_eval_runs" table.
+	OpenaiEvalRunsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeInt64, Increment: true},
+		{Name: "account_id", Type: field.TypeInt64},
+		{Name: "test_type", Type: field.TypeString, Size: 24},
+		{Name: "requested_model", Type: field.TypeString, Size: 200},
+		{Name: "upstream_model", Type: field.TypeString, Size: 200, Default: ""},
+		{Name: "reasoning_effort", Type: field.TypeString, Size: 24, Default: ""},
+		{Name: "data_version", Type: field.TypeString, Size: 100},
+		{Name: "baseline_version", Type: field.TypeString, Size: 120, Default: ""},
+		{Name: "status", Type: field.TypeString, Size: 24},
+		{Name: "outcome", Type: field.TypeJSON},
+		{Name: "samples", Type: field.TypeJSON},
+		{Name: "request_count", Type: field.TypeInt, Default: 0},
+		{Name: "input_tokens", Type: field.TypeInt64, Default: 0},
+		{Name: "output_tokens", Type: field.TypeInt64, Default: 0},
+		{Name: "cost_estimate_usd", Type: field.TypeFloat64, Nullable: true},
+		{Name: "duration_ms", Type: field.TypeInt64, Default: 0},
+		{Name: "started_at", Type: field.TypeTime},
+		{Name: "finished_at", Type: field.TypeTime, Nullable: true},
+		{Name: "triggered_by", Type: field.TypeInt64, Default: 0},
+		{Name: "trigger_source", Type: field.TypeString, Size: 24},
+		{Name: "error_code", Type: field.TypeString, Size: 80, Default: ""},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "retention_until", Type: field.TypeTime, SchemaType: map[string]string{"postgres": "timestamptz"}},
+	}
+	// OpenaiEvalRunsTable holds the schema information for the "openai_eval_runs" table.
+	OpenaiEvalRunsTable = &schema.Table{
+		Name:       "openai_eval_runs",
+		Columns:    OpenaiEvalRunsColumns,
+		PrimaryKey: []*schema.Column{OpenaiEvalRunsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "openaievalrun_account_id_requested_model_reasoning_effort_test_type_created_at",
+				Unique:  false,
+				Columns: []*schema.Column{OpenaiEvalRunsColumns[1], OpenaiEvalRunsColumns[3], OpenaiEvalRunsColumns[5], OpenaiEvalRunsColumns[2], OpenaiEvalRunsColumns[21]},
+			},
+			{
+				Name:    "openaievalrun_created_at",
+				Unique:  false,
+				Columns: []*schema.Column{OpenaiEvalRunsColumns[21]},
+			},
+			{
+				Name:    "openaievalrun_retention_until",
+				Unique:  false,
+				Columns: []*schema.Column{OpenaiEvalRunsColumns[22]},
+			},
+		},
+	}
 	// PaymentAuditLogsColumns holds the columns for the "payment_audit_logs" table.
 	PaymentAuditLogsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeInt64, Increment: true},
@@ -2107,6 +2156,7 @@ var (
 		GroupsTable,
 		IdempotencyRecordsTable,
 		IdentityAdoptionDecisionsTable,
+		OpenaiEvalRunsTable,
 		PaymentAuditLogsTable,
 		PaymentOrdersTable,
 		PaymentProviderInstancesTable,
@@ -2203,6 +2253,9 @@ func init() {
 	IdentityAdoptionDecisionsTable.ForeignKeys[1].RefTable = PendingAuthSessionsTable
 	IdentityAdoptionDecisionsTable.Annotation = &entsql.Annotation{
 		Table: "identity_adoption_decisions",
+	}
+	OpenaiEvalRunsTable.Annotation = &entsql.Annotation{
+		Table: "openai_eval_runs",
 	}
 	PaymentAuditLogsTable.Annotation = &entsql.Annotation{
 		Table: "payment_audit_logs",

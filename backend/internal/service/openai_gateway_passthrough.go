@@ -1776,6 +1776,15 @@ func (s *OpenAIGatewayService) newOpenAIStreamFailoverErrorWithModel(
 		classificationHeaders = nil
 	}
 	failoverErr := s.newOpenAIAccountFailoverErrorWithClassificationHeaders(account, statusCode, headers, classificationHeaders, payload, message, shouldDisable, retryableOnSameAccount)
+	// A native OpenAI Responses transport/EOF failure is attributable to the
+	// selected channel, not to the request's model-capacity demand.  Mark it as
+	// a session escape before the handler considers the bounded same-account
+	// retry budget.  This makes the next sampling leave a failed 0.06 channel
+	// instead of spending all retries on the same account.  Explicit capacity
+	// shedding remains request-scoped and keeps its existing same-account retry.
+	if openAIStreamFailureRequiresSessionEscape(account, payload, message, failoverErr) {
+		failoverErr.SessionAccountEscape = true
+	}
 	if failoverErr.IsCredentialFailure() || failoverErr.RequestScopedTransient {
 		return failoverErr
 	}
@@ -1783,6 +1792,45 @@ func (s *OpenAIGatewayService) newOpenAIStreamFailoverErrorWithModel(
 	// only typed access/capacity failures need the original payload downstream.
 	failoverErr.ResponseBody = body
 	return failoverErr
+}
+
+// openAIStreamFailureRequiresSessionEscape distinguishes an account/channel
+// transport failure from a request-scoped capacity signal.  The latter is
+// intentionally retried on the same account because changing accounts does
+// not change the client/model load that caused the provider to shed this
+// request.  Empty-payload EOF/read/timeout failures and retryable 5xx stream
+// terminals, on the other hand, should not pin the next sampling to the same
+// channel.
+func openAIStreamFailureRequiresSessionEscape(
+	account *Account,
+	payload []byte,
+	message string,
+	failoverErr *UpstreamFailoverError,
+) bool {
+	if account == nil || account.Platform != PlatformOpenAI || failoverErr == nil {
+		return false
+	}
+	if failoverErr.RequestScopedTransient || failoverErr.IsCredentialFailure() || failoverErr.Scope == GatewayFailureScopeRequest {
+		return false
+	}
+	if isOpenAIUpstreamCapacityShedEvent(payload) {
+		return false
+	}
+	if len(payload) == 0 {
+		lower := strings.ToLower(strings.TrimSpace(message))
+		for _, marker := range []string{
+			"stream disconnected",
+			"stream ended before",
+			"stream read error",
+			"stream data interval timeout",
+			"sse line exceeds",
+		} {
+			if strings.Contains(lower, marker) {
+				return true
+			}
+		}
+	}
+	return failoverErr.RetryableOnSameAccount && failoverErr.StatusCode >= http.StatusInternalServerError
 }
 
 // nonStreamingTerminalFailureFailover applies the streaming path's terminal-event

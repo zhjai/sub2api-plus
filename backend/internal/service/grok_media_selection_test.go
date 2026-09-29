@@ -92,11 +92,11 @@ func TestGrokVideoStickySelectionIgnoresHealthEscape(t *testing.T) {
 	}
 	stats := newOpenAIAccountRuntimeStats()
 	for range 20 {
-		stats.report(1, false, nil)
+		stats.reportForRequest(1, "grok-video", "", false, nil)
 	}
 	scheduler := &defaultOpenAIAccountScheduler{service: svc, stats: stats}
 	req := OpenAIAccountScheduleRequest{GroupID: &groupID, Platform: PlatformGrok,
-		SessionHash: "task", StickyAccountID: 1, PreserveStickyBinding: true}
+		SessionHash: "task", StickyAccountID: 1, PreserveStickyBinding: true, ClientRequestedModel: "grok-video"}
 	selection, escaped, err := scheduler.selectBySessionHash(context.Background(), req)
 	require.NoError(t, err)
 	require.Nil(t, selection)

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,7 @@ import (
 
 const stickySessionPrefix = "sticky_session:"
 const openAISessionEscapePrefix = "openai_session_escape:"
+const openAISessionEscapeRoutePrefix = "openai_session_escape_route:"
 const openAIResponsesSessionWindowPrefix = "openai_responses_session_window:"
 const liveCallPrefix = "live:call:"
 
@@ -106,6 +108,65 @@ func (c *gatewayCache) GetOpenAISessionEscapedAccountIDs(ctx context.Context, gr
 		}
 	}
 	return ids, nil
+}
+
+func buildOpenAISessionEscapeRouteKey(groupID int64, sessionHash, requestedModel, requestedEffort string) string {
+	dimensions := strings.ToLower(strings.TrimSpace(requestedModel)) + "\x00" + strings.ToLower(strings.TrimSpace(requestedEffort))
+	digest := sha256.Sum256([]byte(dimensions))
+	return fmt.Sprintf("%s%d:%s:%s", openAISessionEscapeRoutePrefix, groupID, sessionHash, hex.EncodeToString(digest[:8]))
+}
+
+var addOpenAISessionEscapeRouteScript = redis.NewScript(`
+local current = redis.call('HGET', KEYS[1], 'failed_rate')
+if current == false or tonumber(ARGV[2]) > tonumber(current) then
+  redis.call('HSET', KEYS[1], 'failed_rate', ARGV[2])
+end
+redis.call('HSET', KEYS[1], 'account:' .. ARGV[1], ARGV[2])
+redis.call('PEXPIRE', KEYS[1], ARGV[3])
+return 1
+`)
+
+func (c *gatewayCache) AddOpenAISessionEscapedRoute(ctx context.Context, groupID int64, sessionHash, requestedModel, requestedEffort string, accountID int64, failedRateMultiplier float64, ttl time.Duration) error {
+	if c == nil || c.rdb == nil || strings.TrimSpace(sessionHash) == "" || strings.TrimSpace(requestedModel) == "" || accountID <= 0 || failedRateMultiplier < 0 || ttl <= 0 {
+		return nil
+	}
+	key := buildOpenAISessionEscapeRouteKey(groupID, sessionHash, requestedModel, requestedEffort)
+	_, err := addOpenAISessionEscapeRouteScript.Run(ctx, c.rdb, []string{key},
+		strconv.FormatInt(accountID, 10),
+		strconv.FormatFloat(failedRateMultiplier, 'f', -1, 64),
+		strconv.FormatInt(ttl.Milliseconds(), 10),
+	).Result()
+	return err
+}
+
+func (c *gatewayCache) GetOpenAISessionEscapedRoute(ctx context.Context, groupID int64, sessionHash, requestedModel, requestedEffort string) (service.OpenAISessionEscapeRouteState, error) {
+	if c == nil || c.rdb == nil || strings.TrimSpace(sessionHash) == "" || strings.TrimSpace(requestedModel) == "" {
+		return service.OpenAISessionEscapeRouteState{}, nil
+	}
+	values, err := c.rdb.HGetAll(ctx, buildOpenAISessionEscapeRouteKey(groupID, sessionHash, requestedModel, requestedEffort)).Result()
+	if err != nil {
+		return service.OpenAISessionEscapeRouteState{}, err
+	}
+	state := service.OpenAISessionEscapeRouteState{}
+	for field, value := range values {
+		if field == "failed_rate" {
+			rate, parseErr := strconv.ParseFloat(value, 64)
+			if parseErr == nil && rate >= 0 {
+				state.FailedRateMultiplier = rate
+				state.HasFailedRate = true
+			}
+			continue
+		}
+		if !strings.HasPrefix(field, "account:") {
+			continue
+		}
+		id, parseErr := strconv.ParseInt(strings.TrimPrefix(field, "account:"), 10, 64)
+		if parseErr == nil && id > 0 {
+			state.AccountIDs = append(state.AccountIDs, id)
+		}
+	}
+	sort.Slice(state.AccountIDs, func(i, j int) bool { return state.AccountIDs[i] < state.AccountIDs[j] })
+	return state, nil
 }
 
 var claimOpenAIResponsesSessionWindowScript = redis.NewScript(`

@@ -86,6 +86,42 @@ func TestSameAccountRetryAllowedRequiresOptInAndDefaultsToCountLimit(t *testing.
 	require.False(t, sameAccountRetryAllowed(err, maxSameAccountRetries, maxSameAccountRetries))
 }
 
+func TestSameAccountRetryAllowedRejectsSessionEscape(t *testing.T) {
+	err := &service.UpstreamFailoverError{
+		RetryableOnSameAccount: true,
+		SessionAccountEscape:   true,
+		RequestScopedTransient: true,
+	}
+
+	require.False(t, sameAccountRetryAllowed(err, 0, maxSameAccountRetries),
+		"an explicit session escape must switch accounts before any same-account retry")
+
+	capacityErr := &service.UpstreamFailoverError{
+		RetryableOnSameAccount: true,
+		RequestScopedTransient: true,
+	}
+	require.True(t, sameAccountRetryAllowed(capacityErr, 0, maxSameAccountRetries),
+		"request-scoped capacity errors retain bounded same-account retry")
+}
+
+func TestHandleFailoverError_SessionEscapeSwitchesWithoutGlobalUnschedule(t *testing.T) {
+	mock := &mockTempUnscheduler{}
+	state := NewFailoverState(2, false)
+	err := &service.UpstreamFailoverError{
+		StatusCode:             http.StatusBadGateway,
+		RetryableOnSameAccount: true,
+		SessionAccountEscape:   true,
+	}
+
+	action := state.HandleFailoverError(context.Background(), mock, 100, "openai", maxSameAccountRetries, err)
+
+	require.Equal(t, FailoverContinue, action)
+	require.Equal(t, 1, state.SwitchCount)
+	require.Contains(t, state.FailedAccountIDs, int64(100))
+	require.Empty(t, state.SameAccountRetryCount)
+	require.Empty(t, mock.calls, "a single-session escape must not trigger the account-global breaker")
+}
+
 func TestSameAccountRetryAllowedHonorsErrorMaxBeforeDeadline(t *testing.T) {
 	err := &service.UpstreamFailoverError{
 		RetryableOnSameAccount:   true,

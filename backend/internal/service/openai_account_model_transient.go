@@ -49,10 +49,11 @@ type openAIAccountModelKey struct {
 }
 
 type openAIAccountModelTransientEntry struct {
-	failureStreak int
-	lastFailure   time.Time
-	blockUntil    time.Time
-	lastTouched   time.Time
+	failureStreak   int
+	lastFailure     time.Time
+	blockUntil      time.Time
+	lastTouched     time.Time
+	failureSessions map[string]time.Time
 }
 
 type openAIAccountModelTransientDecision struct {
@@ -98,8 +99,16 @@ func openAIAccountModelTransientKey(accountID int64, model string, capability ..
 }
 
 func (s *openAIAccountModelTransientState) recordFailure(accountID int64, model string, now time.Time, capability ...string) openAIAccountModelTransientDecision {
+	return s.recordFailureForSession(accountID, model, now, "", false, capability...)
+}
+
+func (s *openAIAccountModelTransientState) recordDistinctSessionFailure(accountID int64, model string, now time.Time, sessionHash string, capability ...string) openAIAccountModelTransientDecision {
+	return s.recordFailureForSession(accountID, model, now, strings.TrimSpace(sessionHash), true, capability...)
+}
+
+func (s *openAIAccountModelTransientState) recordFailureForSession(accountID int64, model string, now time.Time, sessionHash string, requireDistinct bool, capability ...string) openAIAccountModelTransientDecision {
 	key, ok := openAIAccountModelTransientKey(accountID, model, capability...)
-	if s == nil || !ok {
+	if s == nil || !ok || (requireDistinct && sessionHash == "") {
 		return openAIAccountModelTransientDecision{}
 	}
 	if now.IsZero() {
@@ -124,6 +133,29 @@ func (s *openAIAccountModelTransientState) recordFailure(accountID int64, model 
 	if !exists || entry.lastFailure.IsZero() || now.Sub(entry.lastFailure) > openAIModelTransientStreakTTL || now.Before(entry.lastFailure) {
 		entry.failureStreak = 0
 		entry.blockUntil = time.Time{}
+		entry.failureSessions = nil
+	}
+	if requireDistinct {
+		if _, seen := entry.failureSessions[sessionHash]; seen {
+			return openAIAccountModelTransientDecision{
+				FailureStreak: entry.failureStreak,
+				BlockUntil:    entry.blockUntil,
+			}
+		}
+		if entry.failureSessions == nil {
+			entry.failureSessions = make(map[string]time.Time)
+		}
+		if len(entry.failureSessions) >= 8 {
+			oldestKey := ""
+			var oldestAt time.Time
+			for hash, seenAt := range entry.failureSessions {
+				if oldestKey == "" || seenAt.Before(oldestAt) {
+					oldestKey, oldestAt = hash, seenAt
+				}
+			}
+			delete(entry.failureSessions, oldestKey)
+		}
+		entry.failureSessions[sessionHash] = now
 	}
 	entry.failureStreak++
 	entry.lastFailure = now

@@ -225,6 +225,12 @@
                 <span class="truncate text-gray-700 dark:text-gray-200" :title="trace.reason_text">
                   {{ t('admin.accounts.schedulerTrace.reason') }}: {{ trace.reason_code }}<span v-if="trace.reason_text"> · {{ trace.reason_text }}</span>
                 </span>
+                <span v-if="trace.requested_model" class="col-span-full truncate text-[11px] text-slate-600 dark:text-slate-300">
+                  {{ t('admin.accounts.schedulerTrace.route') }}: {{ trace.requested_model }}<span v-if="trace.requested_reasoning_effort"> · effort={{ trace.requested_reasoning_effort }}</span>
+                </span>
+                <span v-if="trace.route_migration_active" class="col-span-full w-fit rounded border border-sky-200 bg-sky-50 px-1.5 py-0.5 font-mono text-[11px] text-sky-800 dark:border-sky-800 dark:bg-sky-950/30 dark:text-sky-200">
+                  {{ t('admin.accounts.schedulerTrace.migration') }}: {{ trace.migration_from_rate_multiplier ?? '—' }}x → {{ trace.selected_rate_multiplier ?? '—' }}x
+                </span>
                 <span class="font-mono text-gray-600 dark:text-dark-300">
                   {{ t('admin.accounts.schedulerTrace.selected') }} #{{ trace.selected_account_id || '-' }}
                   <span v-if="trace.excluded_account_ids?.length" class="text-amber-700 dark:text-amber-300"> · {{ t('admin.accounts.schedulerTrace.excluded') }} #{{ trace.excluded_account_ids.join(', #') }}</span>
@@ -232,6 +238,7 @@
                 <div v-if="trace.candidates?.length" class="col-span-full mt-1 grid gap-1 text-[11px] text-gray-500 dark:text-dark-400 md:grid-cols-2">
                   <div v-for="candidate in trace.candidates" :key="candidate.account_id" class="flex flex-wrap items-center gap-1 rounded border border-gray-100 px-1.5 py-1 dark:border-dark-700">
                     <span class="font-mono">#{{ candidate.account_id }}</span>
+                    <span v-if="candidate.rate_multiplier != null" class="font-mono text-sky-700 dark:text-sky-300">{{ candidate.rate_multiplier }}x</span>
                     <span v-if="candidate.selected" class="text-emerald-700 dark:text-emerald-300">{{ t('admin.accounts.schedulerTrace.selectedShort') }}</span>
                     <span v-else-if="candidate.exclusion_reason" class="text-amber-700 dark:text-amber-300">{{ candidate.exclusion_reason }}</span>
                     <span v-else-if="candidate.in_top_k">{{ t('admin.accounts.schedulerTrace.scoreTopK') }}</span>
@@ -605,6 +612,12 @@
                   <span class="truncate font-medium text-gray-800 dark:text-gray-100" :title="trace.reason_text">
                     {{ t('admin.accounts.schedulerTrace.reason') }}: {{ trace.reason_code }}<span v-if="trace.reason_text"> · {{ trace.reason_text }}</span>
                   </span>
+                  <span v-if="trace.requested_model" class="col-span-full truncate text-[11px] text-slate-600 dark:text-slate-300">
+                    {{ t('admin.accounts.schedulerTrace.route') }}: {{ trace.requested_model }}<span v-if="trace.requested_reasoning_effort"> · effort={{ trace.requested_reasoning_effort }}</span>
+                  </span>
+                  <span v-if="trace.route_migration_active" class="col-span-full w-fit rounded border border-sky-200 bg-sky-50 px-1.5 py-0.5 font-mono text-[11px] text-sky-800 dark:border-sky-800 dark:bg-sky-950/30 dark:text-sky-200">
+                    {{ t('admin.accounts.schedulerTrace.migration') }}: {{ trace.migration_from_rate_multiplier ?? '—' }}x → {{ trace.selected_rate_multiplier ?? '—' }}x
+                  </span>
                   <span class="font-mono text-gray-600 dark:text-dark-300">
                     {{ t('admin.accounts.schedulerTrace.selected') }} #{{ trace.selected_account_id || '-' }}
                   </span>
@@ -614,6 +627,7 @@
                 <div v-if="trace.candidates?.length" class="mt-2 grid gap-1 text-[11px] text-gray-600 dark:text-dark-300 sm:grid-cols-2">
                   <div v-for="candidate in trace.candidates" :key="candidate.account_id" class="flex flex-wrap items-center gap-1 rounded border border-gray-200 px-2 py-1.5 dark:border-dark-700">
                     <span class="font-mono">#{{ candidate.account_id }}</span>
+                    <span v-if="candidate.rate_multiplier != null" class="font-mono text-sky-700 dark:text-sky-300">{{ t('admin.accounts.schedulerTrace.candidateRate') }} {{ candidate.rate_multiplier }}x</span>
                     <span v-if="candidate.selected" class="text-emerald-700 dark:text-emerald-300">{{ t('admin.accounts.schedulerTrace.selectedShort') }}</span>
                     <span v-else-if="candidate.exclusion_reason" class="text-amber-700 dark:text-amber-300">{{ candidate.exclusion_reason }}</span>
                     <span v-else-if="candidate.in_top_k">{{ t('admin.accounts.schedulerTrace.scoreTopK') }}</span>

@@ -24,6 +24,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/group"
 	"github.com/Wei-Shaw/sub2api/ent/idempotencyrecord"
 	"github.com/Wei-Shaw/sub2api/ent/identityadoptiondecision"
+	"github.com/Wei-Shaw/sub2api/ent/openaievalrun"
 	"github.com/Wei-Shaw/sub2api/ent/paymentauditlog"
 	"github.com/Wei-Shaw/sub2api/ent/paymentorder"
 	"github.com/Wei-Shaw/sub2api/ent/paymentproviderinstance"
@@ -1285,6 +1286,154 @@ func init() {
 	identityadoptiondecisionDescDecidedAt := identityadoptiondecisionFields[4].Descriptor()
 	// identityadoptiondecision.DefaultDecidedAt holds the default value on creation for the decided_at field.
 	identityadoptiondecision.DefaultDecidedAt = identityadoptiondecisionDescDecidedAt.Default.(func() time.Time)
+	openaievalrunFields := schema.OpenAIEvalRun{}.Fields()
+	_ = openaievalrunFields
+	// openaievalrunDescTestType is the schema descriptor for test_type field.
+	openaievalrunDescTestType := openaievalrunFields[1].Descriptor()
+	// openaievalrun.TestTypeValidator is a validator for the "test_type" field. It is called by the builders before save.
+	openaievalrun.TestTypeValidator = func() func(string) error {
+		validators := openaievalrunDescTestType.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(test_type string) error {
+			for _, fn := range fns {
+				if err := fn(test_type); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// openaievalrunDescRequestedModel is the schema descriptor for requested_model field.
+	openaievalrunDescRequestedModel := openaievalrunFields[2].Descriptor()
+	// openaievalrun.RequestedModelValidator is a validator for the "requested_model" field. It is called by the builders before save.
+	openaievalrun.RequestedModelValidator = func() func(string) error {
+		validators := openaievalrunDescRequestedModel.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(requested_model string) error {
+			for _, fn := range fns {
+				if err := fn(requested_model); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// openaievalrunDescUpstreamModel is the schema descriptor for upstream_model field.
+	openaievalrunDescUpstreamModel := openaievalrunFields[3].Descriptor()
+	// openaievalrun.DefaultUpstreamModel holds the default value on creation for the upstream_model field.
+	openaievalrun.DefaultUpstreamModel = openaievalrunDescUpstreamModel.Default.(string)
+	// openaievalrun.UpstreamModelValidator is a validator for the "upstream_model" field. It is called by the builders before save.
+	openaievalrun.UpstreamModelValidator = openaievalrunDescUpstreamModel.Validators[0].(func(string) error)
+	// openaievalrunDescReasoningEffort is the schema descriptor for reasoning_effort field.
+	openaievalrunDescReasoningEffort := openaievalrunFields[4].Descriptor()
+	// openaievalrun.DefaultReasoningEffort holds the default value on creation for the reasoning_effort field.
+	openaievalrun.DefaultReasoningEffort = openaievalrunDescReasoningEffort.Default.(string)
+	// openaievalrun.ReasoningEffortValidator is a validator for the "reasoning_effort" field. It is called by the builders before save.
+	openaievalrun.ReasoningEffortValidator = openaievalrunDescReasoningEffort.Validators[0].(func(string) error)
+	// openaievalrunDescDataVersion is the schema descriptor for data_version field.
+	openaievalrunDescDataVersion := openaievalrunFields[5].Descriptor()
+	// openaievalrun.DataVersionValidator is a validator for the "data_version" field. It is called by the builders before save.
+	openaievalrun.DataVersionValidator = func() func(string) error {
+		validators := openaievalrunDescDataVersion.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(data_version string) error {
+			for _, fn := range fns {
+				if err := fn(data_version); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// openaievalrunDescBaselineVersion is the schema descriptor for baseline_version field.
+	openaievalrunDescBaselineVersion := openaievalrunFields[6].Descriptor()
+	// openaievalrun.DefaultBaselineVersion holds the default value on creation for the baseline_version field.
+	openaievalrun.DefaultBaselineVersion = openaievalrunDescBaselineVersion.Default.(string)
+	// openaievalrun.BaselineVersionValidator is a validator for the "baseline_version" field. It is called by the builders before save.
+	openaievalrun.BaselineVersionValidator = openaievalrunDescBaselineVersion.Validators[0].(func(string) error)
+	// openaievalrunDescStatus is the schema descriptor for status field.
+	openaievalrunDescStatus := openaievalrunFields[7].Descriptor()
+	// openaievalrun.StatusValidator is a validator for the "status" field. It is called by the builders before save.
+	openaievalrun.StatusValidator = func() func(string) error {
+		validators := openaievalrunDescStatus.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(status string) error {
+			for _, fn := range fns {
+				if err := fn(status); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// openaievalrunDescOutcome is the schema descriptor for outcome field.
+	openaievalrunDescOutcome := openaievalrunFields[8].Descriptor()
+	// openaievalrun.DefaultOutcome holds the default value on creation for the outcome field.
+	openaievalrun.DefaultOutcome = openaievalrunDescOutcome.Default.(map[string]interface{})
+	// openaievalrunDescSamples is the schema descriptor for samples field.
+	openaievalrunDescSamples := openaievalrunFields[9].Descriptor()
+	// openaievalrun.DefaultSamples holds the default value on creation for the samples field.
+	openaievalrun.DefaultSamples = openaievalrunDescSamples.Default.([]map[string]interface{})
+	// openaievalrunDescRequestCount is the schema descriptor for request_count field.
+	openaievalrunDescRequestCount := openaievalrunFields[10].Descriptor()
+	// openaievalrun.DefaultRequestCount holds the default value on creation for the request_count field.
+	openaievalrun.DefaultRequestCount = openaievalrunDescRequestCount.Default.(int)
+	// openaievalrunDescInputTokens is the schema descriptor for input_tokens field.
+	openaievalrunDescInputTokens := openaievalrunFields[11].Descriptor()
+	// openaievalrun.DefaultInputTokens holds the default value on creation for the input_tokens field.
+	openaievalrun.DefaultInputTokens = openaievalrunDescInputTokens.Default.(int64)
+	// openaievalrunDescOutputTokens is the schema descriptor for output_tokens field.
+	openaievalrunDescOutputTokens := openaievalrunFields[12].Descriptor()
+	// openaievalrun.DefaultOutputTokens holds the default value on creation for the output_tokens field.
+	openaievalrun.DefaultOutputTokens = openaievalrunDescOutputTokens.Default.(int64)
+	// openaievalrunDescDurationMs is the schema descriptor for duration_ms field.
+	openaievalrunDescDurationMs := openaievalrunFields[14].Descriptor()
+	// openaievalrun.DefaultDurationMs holds the default value on creation for the duration_ms field.
+	openaievalrun.DefaultDurationMs = openaievalrunDescDurationMs.Default.(int64)
+	// openaievalrunDescTriggeredBy is the schema descriptor for triggered_by field.
+	openaievalrunDescTriggeredBy := openaievalrunFields[17].Descriptor()
+	// openaievalrun.DefaultTriggeredBy holds the default value on creation for the triggered_by field.
+	openaievalrun.DefaultTriggeredBy = openaievalrunDescTriggeredBy.Default.(int64)
+	// openaievalrunDescTriggerSource is the schema descriptor for trigger_source field.
+	openaievalrunDescTriggerSource := openaievalrunFields[18].Descriptor()
+	// openaievalrun.TriggerSourceValidator is a validator for the "trigger_source" field. It is called by the builders before save.
+	openaievalrun.TriggerSourceValidator = func() func(string) error {
+		validators := openaievalrunDescTriggerSource.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(trigger_source string) error {
+			for _, fn := range fns {
+				if err := fn(trigger_source); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// openaievalrunDescErrorCode is the schema descriptor for error_code field.
+	openaievalrunDescErrorCode := openaievalrunFields[19].Descriptor()
+	// openaievalrun.DefaultErrorCode holds the default value on creation for the error_code field.
+	openaievalrun.DefaultErrorCode = openaievalrunDescErrorCode.Default.(string)
+	// openaievalrun.ErrorCodeValidator is a validator for the "error_code" field. It is called by the builders before save.
+	openaievalrun.ErrorCodeValidator = openaievalrunDescErrorCode.Validators[0].(func(string) error)
+	// openaievalrunDescCreatedAt is the schema descriptor for created_at field.
+	openaievalrunDescCreatedAt := openaievalrunFields[20].Descriptor()
+	// openaievalrun.DefaultCreatedAt holds the default value on creation for the created_at field.
+	openaievalrun.DefaultCreatedAt = openaievalrunDescCreatedAt.Default.(func() time.Time)
 	paymentauditlogFields := schema.PaymentAuditLog{}.Fields()
 	_ = paymentauditlogFields
 	// paymentauditlogDescOrderID is the schema descriptor for order_id field.

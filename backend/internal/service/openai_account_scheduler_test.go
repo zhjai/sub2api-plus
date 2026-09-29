@@ -2431,9 +2431,9 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SessionStickyEscapeByTT
 		openaiAccountStats: newOpenAIAccountRuntimeStats(),
 	}
 	fastTTFT := 14999
-	svc.openaiAccountStats.report(21101, true, &fastTTFT)
+	svc.openaiAccountStats.reportForRequest(21101, "gpt-5.1", "", true, &fastTTFT)
 	stableTTFT := 14999
-	svc.openaiAccountStats.report(21101, true, &stableTTFT)
+	svc.openaiAccountStats.reportForRequest(21101, "gpt-5.1", "", true, &stableTTFT)
 
 	selection, decision, err := svc.SelectAccountWithScheduler(ctx, &groupID, "", "session_hash_sticky_ttft", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
 	require.NoError(t, err)
@@ -2448,7 +2448,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SessionStickyEscapeByTT
 
 	slowTTFT := 20000
 	for i := 0; i < 3; i++ {
-		svc.openaiAccountStats.report(21101, true, &slowTTFT)
+		svc.openaiAccountStats.reportForRequest(21101, "gpt-5.1", "", true, &slowTTFT)
 	}
 
 	selection, decision, err = svc.SelectAccountWithScheduler(ctx, &groupID, "", "session_hash_sticky_ttft", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
@@ -2485,7 +2485,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SessionStickyEscapeByEr
 		openaiAccountStats: newOpenAIAccountRuntimeStats(),
 	}
 	for i := 0; i < 3; i++ {
-		svc.openaiAccountStats.report(21201, false, nil)
+		svc.openaiAccountStats.reportForRequest(21201, "gpt-5.1", "", false, nil)
 	}
 	selection, decision, err := svc.SelectAccountWithScheduler(ctx, &groupID, "", "session_hash_sticky_error_rate", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
 	require.NoError(t, err)
@@ -2498,7 +2498,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_SessionStickyEscapeByEr
 		selection.ReleaseFunc()
 	}
 	for i := 0; i < 2; i++ {
-		svc.openaiAccountStats.report(21201, false, nil)
+		svc.openaiAccountStats.reportForRequest(21201, "gpt-5.1", "", false, nil)
 	}
 
 	selection, decision, err = svc.SelectAccountWithScheduler(ctx, &groupID, "", "session_hash_sticky_error_rate", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)

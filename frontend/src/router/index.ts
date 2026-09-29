@@ -526,6 +526,18 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/admin/accounts/evaluations',
+    name: 'AdminOpenAIEvaluations',
+    component: () => import('@/views/admin/OpenAIEvaluationsView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: '降智测试',
+      titleKey: 'admin.accounts.evaluations.title',
+      descriptionKey: 'admin.accounts.evaluations.description'
+    }
+  },
+  {
     path: '/admin/plugins',
     name: 'AdminPlugins',
     component: () => import('@/views/admin/PluginsView.vue'),

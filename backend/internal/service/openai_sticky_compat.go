@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -25,6 +26,12 @@ var (
 )
 
 const openAISessionEscapeTTL = 30 * time.Minute
+
+func openAISessionEscapeRouteLocalKey(groupID int64, sessionHash, requestedModel, requestedEffort string) string {
+	dimensions := strings.ToLower(strings.TrimSpace(requestedModel)) + "\x00" + strings.ToLower(strings.TrimSpace(requestedEffort))
+	digest := sha256.Sum256([]byte(dimensions))
+	return fmt.Sprintf("%d:%s:%s", groupID, strings.TrimSpace(sessionHash), hex.EncodeToString(digest[:8]))
+}
 
 func openAIStickyCompatStats() (legacyReadFallbackTotal, legacyReadFallbackHit, legacyDualWriteTotal int64) {
 	return openAIStickyLegacyReadFallbackTotal.Load(),
@@ -229,23 +236,51 @@ func (s *OpenAIGatewayService) deleteStickySessionAccountID(ctx context.Context,
 // to another account.  The compare-before-delete guard prevents an older
 // in-flight request from clearing a newer healthy binding.
 func (s *OpenAIGatewayService) EscapeOpenAISessionAccount(ctx context.Context, groupID *int64, sessionHash string, failedAccountID int64) error {
+	return s.escapeOpenAISessionAccount(ctx, groupID, sessionHash, "", "", failedAccountID, 0, false)
+}
+
+// EscapeOpenAISessionAccountForRequest records a session escape scoped to the
+// client-requested model and reasoning effort. The next sampling can therefore
+// move along that route's billing-rate ladder without excluding the account
+// from unrelated model/effort traffic in the same conversation.
+func (s *OpenAIGatewayService) EscapeOpenAISessionAccountForRequest(ctx context.Context, groupID *int64, sessionHash, requestedModel, requestedEffort string, failedAccountID int64, failedRateMultiplier float64) error {
+	if strings.TrimSpace(requestedModel) == "" || math.IsNaN(failedRateMultiplier) || math.IsInf(failedRateMultiplier, 0) || failedRateMultiplier < 0 {
+		return s.EscapeOpenAISessionAccount(ctx, groupID, sessionHash, failedAccountID)
+	}
+	return s.escapeOpenAISessionAccount(ctx, groupID, sessionHash, requestedModel, requestedEffort, failedAccountID, failedRateMultiplier, true)
+}
+
+func (s *OpenAIGatewayService) escapeOpenAISessionAccount(ctx context.Context, groupID *int64, sessionHash, requestedModel, requestedEffort string, failedAccountID int64, failedRateMultiplier float64, scoped bool) error {
 	if s == nil || s.cache == nil || strings.TrimSpace(sessionHash) == "" || failedAccountID <= 0 {
 		return nil
 	}
 	lookupCtx := context.WithoutCancel(ctx)
-	bound, err := s.getStickySessionAccountID(lookupCtx, groupID, sessionHash)
-	lookupErr := err
-	if err != nil || bound != failedAccountID {
-		// A missing sticky binding can occur when a scheduler path deliberately
-		// avoids eager binding. Still record the escape so a movable
-		// previous_response_id cannot immediately route back to this account.
-	} else if deleteErr := s.deleteStickySessionAccountID(lookupCtx, groupID, sessionHash); deleteErr != nil {
-		lookupErr = deleteErr
+	var lookupErr error
+	if !scoped {
+		bound, err := s.getStickySessionAccountID(lookupCtx, groupID, sessionHash)
+		if err != nil {
+			if !errors.Is(err, ErrStickySessionNotFound) {
+				lookupErr = err
+			}
+		} else if bound == failedAccountID {
+			if deleteErr := s.deleteStickySessionAccountID(lookupCtx, groupID, sessionHash); deleteErr != nil {
+				lookupErr = deleteErr
+			}
+		}
 	}
 
-	key := fmt.Sprintf("%d:%s", derefGroupID(groupID), strings.TrimSpace(sessionHash))
-	if escapeCache, ok := s.cache.(OpenAISessionEscapeCache); ok {
-		if err := escapeCache.AddOpenAISessionEscapedAccount(lookupCtx, derefGroupID(groupID), strings.TrimSpace(sessionHash), failedAccountID, openAISessionEscapeTTL); err != nil {
+	group := derefGroupID(groupID)
+	session := strings.TrimSpace(sessionHash)
+	key := fmt.Sprintf("%d:%s", group, session)
+	if scoped {
+		key = openAISessionEscapeRouteLocalKey(group, session, requestedModel, requestedEffort)
+		if escapeCache, ok := s.cache.(OpenAISessionEscapeRouteCache); ok {
+			if err := escapeCache.AddOpenAISessionEscapedRoute(lookupCtx, group, session, requestedModel, requestedEffort, failedAccountID, failedRateMultiplier, openAISessionEscapeTTL); err != nil {
+				lookupErr = errors.Join(lookupErr, err)
+			}
+		}
+	} else if escapeCache, ok := s.cache.(OpenAISessionEscapeCache); ok {
+		if err := escapeCache.AddOpenAISessionEscapedAccount(lookupCtx, group, session, failedAccountID, openAISessionEscapeTTL); err != nil {
 			lookupErr = errors.Join(lookupErr, err)
 		}
 	}
@@ -257,6 +292,14 @@ func (s *OpenAIGatewayService) EscapeOpenAISessionAccount(ctx context.Context, g
 		s.openaiSessionEscapes[key] = make(map[int64]time.Time)
 	}
 	s.openaiSessionEscapes[key][failedAccountID] = time.Now().Add(openAISessionEscapeTTL)
+	if scoped {
+		if s.openaiSessionEscapeRates == nil {
+			s.openaiSessionEscapeRates = make(map[string]float64)
+		}
+		if current, ok := s.openaiSessionEscapeRates[key]; !ok || failedRateMultiplier > current {
+			s.openaiSessionEscapeRates[key] = failedRateMultiplier
+		}
+	}
 	s.openaiSessionEscapeMu.Unlock()
 	return lookupErr
 }
@@ -294,4 +337,61 @@ func (s *OpenAIGatewayService) OpenAISessionEscapedAccountIDs(groupID *int64, se
 		}
 	}
 	return result
+}
+
+// OpenAISessionEscapeRouteStateForRequest returns the model/effort-scoped
+// exclusion set and the highest failed billing rate remembered for the route.
+func (s *OpenAIGatewayService) OpenAISessionEscapeRouteStateForRequest(groupID *int64, sessionHash, requestedModel, requestedEffort string) OpenAISessionEscapeRouteState {
+	if s == nil || strings.TrimSpace(sessionHash) == "" || strings.TrimSpace(requestedModel) == "" {
+		return OpenAISessionEscapeRouteState{}
+	}
+	group := derefGroupID(groupID)
+	session := strings.TrimSpace(sessionHash)
+	key := openAISessionEscapeRouteLocalKey(group, session, requestedModel, requestedEffort)
+	now := time.Now()
+	state := OpenAISessionEscapeRouteState{}
+	s.openaiSessionEscapeMu.Lock()
+	entries := s.openaiSessionEscapes[key]
+	for accountID, until := range entries {
+		if !until.After(now) {
+			delete(entries, accountID)
+			continue
+		}
+		state.AccountIDs = append(state.AccountIDs, accountID)
+	}
+	if len(entries) == 0 {
+		delete(s.openaiSessionEscapes, key)
+		delete(s.openaiSessionEscapeRates, key)
+	}
+	if rate, ok := s.openaiSessionEscapeRates[key]; ok {
+		state.FailedRateMultiplier = rate
+		state.HasFailedRate = true
+	}
+	s.openaiSessionEscapeMu.Unlock()
+
+	if escapeCache, ok := s.cache.(OpenAISessionEscapeRouteCache); ok {
+		if cached, err := escapeCache.GetOpenAISessionEscapedRoute(context.Background(), group, session, requestedModel, requestedEffort); err == nil {
+			state.AccountIDs = append(state.AccountIDs, cached.AccountIDs...)
+			if cached.HasFailedRate && (!state.HasFailedRate || cached.FailedRateMultiplier > state.FailedRateMultiplier) {
+				state.FailedRateMultiplier = cached.FailedRateMultiplier
+				state.HasFailedRate = true
+			}
+		}
+	}
+	if len(state.AccountIDs) > 1 {
+		seen := make(map[int64]struct{}, len(state.AccountIDs))
+		unique := state.AccountIDs[:0]
+		for _, accountID := range state.AccountIDs {
+			if accountID <= 0 {
+				continue
+			}
+			if _, ok := seen[accountID]; ok {
+				continue
+			}
+			seen[accountID] = struct{}{}
+			unique = append(unique, accountID)
+		}
+		state.AccountIDs = unique
+	}
+	return state
 }

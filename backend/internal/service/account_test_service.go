@@ -159,6 +159,260 @@ type AccountTestService struct {
 	grokWSDialer openAIWSClientDialer
 }
 
+// ResolveOpenAIEvalTarget validates a Responses-evaluation route without
+// mutating account health or support metadata.
+func (s *AccountTestService) ResolveOpenAIEvalTarget(ctx context.Context, accountID int64, requestedModel string) (*OpenAIEvalTarget, error) {
+	if s == nil || s.accountRepo == nil || s.openaiGatewayService == nil {
+		return nil, errors.New("OpenAI evaluation dependencies are unavailable")
+	}
+	requestedModel = strings.TrimSpace(requestedModel)
+	if !isOpenAIEvalSupportedModel(requestedModel) {
+		return nil, fmt.Errorf("model %q is not in the supported OpenAI text-model catalog", requestedModel)
+	}
+	account, err := s.accountRepo.GetByID(ctx, accountID)
+	if err != nil {
+		return nil, fmt.Errorf("load evaluation account: %w", err)
+	}
+	if account == nil || !account.IsOpenAI() {
+		return nil, errors.New("evaluation supports OpenAI accounts only")
+	}
+	if !account.IsModelSupported(requestedModel) {
+		return nil, fmt.Errorf("account does not declare support for requested model %q", requestedModel)
+	}
+	credential, err := resolveCredentialAccount(ctx, s.accountRepo, account)
+	if err != nil {
+		return nil, fmt.Errorf("resolve evaluation credentials: %w", err)
+	}
+	if credential == nil || !credential.IsOpenAI() {
+		return nil, errors.New("resolved credentials are not an OpenAI account")
+	}
+	if credential.Type != AccountTypeAPIKey && !credential.IsOpenAIOAuthLike() {
+		return nil, fmt.Errorf("unsupported OpenAI evaluation credential type %q", credential.Type)
+	}
+	if credential.Type == AccountTypeAPIKey && !openai_compat.ShouldUseResponsesAPI(credential.Extra) {
+		return nil, errors.New("account is configured for Chat Completions and cannot run Responses evaluation")
+	}
+
+	models, err := s.openaiGatewayService.FetchOpenAIModelsList(ctx, account)
+	if err != nil {
+		return nil, fmt.Errorf("discover account models: %w", err)
+	}
+	var catalog struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(models.Body, &catalog); err != nil {
+		return nil, fmt.Errorf("decode account model catalog: %w", err)
+	}
+	upstreamModel := normalizeOpenAIModelForUpstream(credential, account.GetMappedModel(requestedModel))
+	available := false
+	for _, model := range catalog.Data {
+		if strings.EqualFold(strings.TrimSpace(model.ID), requestedModel) || strings.EqualFold(strings.TrimSpace(model.ID), upstreamModel) {
+			available = true
+			break
+		}
+	}
+	if !available {
+		return nil, fmt.Errorf("requested model %q is not available in the account catalog", requestedModel)
+	}
+
+	return &OpenAIEvalTarget{
+		Account:        account,
+		Credential:     credential,
+		RequestedModel: requestedModel,
+		UpstreamModel:  upstreamModel,
+	}, nil
+}
+
+// RunOpenAIEvalSample performs a bounded, non-streaming Responses request.
+// It deliberately never writes account health, rate-limit, or probe metadata.
+func (s *AccountTestService) RunOpenAIEvalSample(ctx context.Context, target *OpenAIEvalTarget, prompt, reasoningEffort string) (*OpenAIEvalSampleResponse, error) {
+	if s == nil || target == nil || target.Account == nil || target.Credential == nil {
+		return nil, errors.New("OpenAI evaluation target is required")
+	}
+	if strings.TrimSpace(prompt) == "" {
+		return nil, errors.New("OpenAI evaluation prompt is required")
+	}
+	account, credential := target.Account, target.Credential
+	if s.httpUpstream == nil {
+		return nil, errors.New("HTTP upstream is unavailable")
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	upstreamModel := strings.TrimSpace(target.UpstreamModel)
+	if upstreamModel == "" {
+		return nil, errors.New("OpenAI evaluation upstream model is empty")
+	}
+	isOAuth := credential.IsOpenAIOAuthLike()
+	apiURL := chatgptCodexAPIURL
+	if !isOAuth {
+		apiKey := strings.TrimSpace(credential.GetOpenAIProtocolAPIKey())
+		if apiKey == "" {
+			return nil, errors.New("OpenAI API key is unavailable")
+		}
+		baseURL := credential.GetOpenAIBaseURL()
+		if baseURL == "" {
+			baseURL = "https://api.openai.com"
+		}
+		normalized, err := s.validateUpstreamBaseURL(baseURL)
+		if err != nil {
+			return nil, fmt.Errorf("validate OpenAI base URL: %w", err)
+		}
+		apiURL = buildOpenAIResponsesURLForPlatform(credential.Platform, normalized)
+	}
+
+	payload := map[string]any{
+		"model":             upstreamModel,
+		"input":             prompt,
+		"instructions":      "Follow the user's request exactly. Do not use tools.",
+		"stream":            false,
+		"store":             false,
+		"max_output_tokens": 2048,
+		"truncation":        "disabled",
+	}
+	if effort := strings.ToLower(strings.TrimSpace(reasoningEffort)); effort != "" {
+		if !isAllowedOpenAIEvalReasoningEffort(effort) {
+			return nil, fmt.Errorf("unsupported reasoning effort %q", reasoningEffort)
+		}
+		payload["reasoning"] = map[string]string{"effort": effort}
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("encode OpenAI evaluation request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, apiURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("build OpenAI evaluation request: %w", err)
+	}
+	req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	if isOAuth {
+		req.Host = "chatgpt.com"
+		req.Header.Set("OpenAI-Beta", "responses=experimental")
+		canonical := resolveCodexOutboundIdentity("")
+		req.Header.Set("Originator", canonical.originator)
+		if customUA := strings.TrimSpace(credential.GetOpenAIUserAgent()); customUA != "" {
+			req.Header.Set("User-Agent", customUA)
+		} else {
+			req.Header.Set("User-Agent", canonical.userAgent)
+		}
+		setOpenAIChatGPTAccountHeaders(req.Header, credential)
+		enforceCodexIdentityHeadersWithUA(req.Header, credential.GetOpenAIUserAgent())
+	} else {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(credential.GetOpenAIProtocolAPIKey()))
+		applyOpenAICodexProbeHeaders(req.Header)
+	}
+	if credential.IsOpenAIAgentIdentity() {
+		authHeaders, authErr := buildAgentIdentityAuthenticationHeaders(requestCtx, s.accountRepo, s.agentIdentityWS, &s.agentIdentityTaskMu, credential)
+		if authErr != nil {
+			return nil, errors.New("failed to build OpenAI Agent Identity authentication")
+		}
+		for key, values := range authHeaders {
+			req.Header.Del(key)
+			for _, value := range values {
+				req.Header.Add(key, value)
+			}
+		}
+	}
+	credential.ApplyHeaderOverrides(req.Header)
+
+	proxyURL := ""
+	if account.ProxyID != nil && account.Proxy != nil {
+		proxyURL = account.Proxy.URL()
+	}
+	resp, err := s.doOpenAIEvalUpstream(req, proxyURL, account, credential)
+	if err != nil {
+		return nil, fmt.Errorf("OpenAI evaluation request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read OpenAI evaluation response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("OpenAI evaluation upstream returned HTTP %d", resp.StatusCode)
+	}
+	var response struct {
+		Status string `json:"status"`
+		Output []struct {
+			Type    string `json:"type"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+		Usage struct {
+			InputTokens  int64 `json:"input_tokens"`
+			OutputTokens int64 `json:"output_tokens"`
+		} `json:"usage"`
+		Error *struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(responseBody, &response); err != nil {
+		return nil, fmt.Errorf("decode OpenAI evaluation response: %w", err)
+	}
+	if response.Status != "completed" {
+		code := "unknown"
+		if response.Error != nil && strings.TrimSpace(response.Error.Code) != "" {
+			code = response.Error.Code
+		}
+		return nil, fmt.Errorf("OpenAI evaluation response did not complete (status=%q, code=%q)", response.Status, code)
+	}
+	var output strings.Builder
+	for _, item := range response.Output {
+		if item.Type != "message" {
+			continue
+		}
+		for _, content := range item.Content {
+			if content.Type == "output_text" {
+				output.WriteString(content.Text)
+			}
+		}
+	}
+	if strings.TrimSpace(output.String()) == "" {
+		return nil, errors.New("OpenAI evaluation completed without output text")
+	}
+	return &OpenAIEvalSampleResponse{
+		Text:         output.String(),
+		InputTokens:  response.Usage.InputTokens,
+		OutputTokens: response.Usage.OutputTokens,
+		CompletedAt:  time.Now().UTC(),
+	}, nil
+}
+
+func (s *AccountTestService) doOpenAIEvalUpstream(req *http.Request, proxyURL string, account, credential *Account) (*http.Response, error) {
+	if credential.IsOpenAIOAuthLike() && s.pluginManager != nil {
+		response, handled, err := s.pluginManager.RoundTripOpenAIOAuth(req.Context(), req, proxyURL, credential)
+		if handled {
+			return response, err
+		}
+	}
+	return s.httpUpstream.DoWithTLS(
+		req,
+		proxyURL,
+		account.ID,
+		account.Concurrency,
+		s.tlsFPProfileService.ResolveTLSProfile(account),
+	)
+}
+
+func isAllowedOpenAIEvalReasoningEffort(effort string) bool {
+	if strings.EqualFold(strings.TrimSpace(effort), "none") {
+		return true
+	}
+	normalized := NormalizeMaxReasoningEffort(effort)
+	for _, candidate := range openAIReasoningEffortValues {
+		if normalized == candidate {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *AccountTestService) SetSettingService(settingService *SettingService) {
 	if s != nil {
 		s.settingService = settingService

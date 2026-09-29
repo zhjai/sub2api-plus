@@ -72,6 +72,26 @@ func TestOpenAIModelTransient_BlockIsIsolatedByCapability(t *testing.T) {
 	assert.False(t, state.isBlocked(35, "gpt-5.5", now.Add(3*time.Second), openAITransientCapabilityExec))
 }
 
+func TestOpenAIExecTransientRequiresDistinctSessions(t *testing.T) {
+	state := newOpenAIAccountModelTransientState(128)
+	now := time.Date(2026, 7, 10, 10, 0, 0, 0, time.UTC)
+	require.Zero(t, state.recordDistinctSessionFailure(35, "gpt-5.5", now, "", openAITransientCapabilityExec).FailureStreak)
+	first := state.recordDistinctSessionFailure(35, "gpt-5.5", now, "session-a", openAITransientCapabilityExec)
+	repeat := state.recordDistinctSessionFailure(35, "gpt-5.5", now.Add(time.Second), "session-a", openAITransientCapabilityExec)
+	require.Equal(t, 1, first.FailureStreak)
+	require.Equal(t, 1, repeat.FailureStreak)
+	require.False(t, state.isBlocked(35, "gpt-5.5", now.Add(2*time.Second), openAITransientCapabilityExec))
+
+	second := state.recordDistinctSessionFailure(35, "gpt-5.5", now.Add(2*time.Second), "session-b", openAITransientCapabilityExec)
+	require.Equal(t, 2, second.FailureStreak)
+	require.True(t, state.isBlocked(35, "gpt-5.5", now.Add(3*time.Second), openAITransientCapabilityExec))
+	require.False(t, state.isBlocked(35, "gpt-5.6", now.Add(3*time.Second), openAITransientCapabilityExec))
+
+	state.recordSuccess(35, "gpt-5.5", openAITransientCapabilityExec)
+	require.False(t, state.isBlocked(35, "gpt-5.5", now.Add(4*time.Second), openAITransientCapabilityExec))
+	require.Equal(t, 1, state.recordDistinctSessionFailure(35, "gpt-5.5", now.Add(5*time.Second), "session-a", openAITransientCapabilityExec).FailureStreak)
+}
+
 func TestOpenAIModelTransient_SuccessClearsStreakAndBlock(t *testing.T) {
 	state := newOpenAIAccountModelTransientState(128)
 	now := time.Date(2026, 7, 10, 10, 0, 0, 0, time.UTC)

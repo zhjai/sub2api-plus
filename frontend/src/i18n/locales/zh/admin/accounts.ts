@@ -141,7 +141,11 @@ export default {
         truncated: '候选解释已截断，最多显示 64 个账号。',
         excluded: '本次排除账号',
         reason: '原因',
-        error: '错误'
+        error: '错误',
+        route: '请求路由',
+        migration: '倍率迁移',
+        candidateRate: '倍率',
+        coldRoute: '该模型/推理强度暂无运行样本，按中性分处理'
       },
       usageWindowsHint: '“5h / 7d”是上游账号（如 OpenAI ChatGPT、Claude）官方的滚动用量窗口限制，由上游对账号设定，并非 sub2api 配置，也与你映射的模型无关。窗口滚动到期后用量会自动重置，无法在 sub2api 端解除该限制。',
       ollamaCloud: {
@@ -1680,7 +1684,48 @@ export default {
         todayCost: '今日费用',
         usageTrend: '30天费用与请求趋势',
         noData: '该账号暂无使用数据'
-      }
+      },
+      evaluations: {
+        eyebrow: '路线质量 / 证据',
+        title: '降智测试',
+      description: '按账号、请求模型和推理强度运行 CPA 糖果测试与指纹采样。',
+      effectsEnabled: '允许明确的硬失败影响路线资格',
+      notice: '糖果测试是低置信度 canary；指纹测试只提示行为或路由身份，二者都不是智力结论。不确定或样本不足只告警。',
+      routeTitle: '测试路线',
+      routeHint: '只能选择本地 OpenAI 文本模型目录中的模型；每条路线按账号、模型和推理强度隔离。',
+      selectAccount: '选择账号',
+      selectModel: '选择请求模型',
+      defaultEffort: '默认推理强度',
+      addRoute: '添加路线',
+      removeRoute: '移除路线',
+      candy: '糖果测试',
+      candyHint: 'CPA canary 重复 5 次 · 只提供答案证据',
+      fingerprint: '指纹测试',
+      fingerprintHint: '与锁定基线比较行为分布',
+      automatic: '自动运行',
+      runNow: '立即运行',
+      runStarted: '评测已启动',
+      jitter: '抖动（秒）',
+      fingerprintMinimum: '最短间隔：24 小时 · quick 60 / standard 200 / strict 400 次请求',
+      emptyTitle: '还没有测试路线',
+      emptyHint: '添加账号、请求模型和推理强度后开始。',
+      historyTitle: '最近运行',
+      historyHint: '运行记录限期保留，不保存原始提示词或凭据。',
+      noHistory: '暂无评测记录',
+      route: '路线',
+      type: '测试',
+      result: '结果',
+      samples: '样本',
+      cost: '预估成本',
+      costPending: '不可用',
+      time: '完成时间',
+      baselineNote: '指纹基线：{version}。刷新基线必须手动执行并留有审计记录。',
+      saveSuccess: '评测设置已保存',
+      saveFailed: '评测设置保存失败',
+      runFailed: '评测启动失败',
+      loadFailed: '评测设置加载失败'
+      },
+
     },
 
     // Scheduled Tests

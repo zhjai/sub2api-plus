@@ -80,6 +80,14 @@ func sameAccountRetryAllowed(failoverErr *service.UpstreamFailoverError, retryCo
 	if failoverErr == nil || !failoverErr.RetryableOnSameAccount {
 		return false
 	}
+	// A session escape is an account-attributable hard signal.  Retrying the
+	// same account would defeat the escape marker and make the next sampling
+	// collide with the account that just failed.  Request-scoped capacity
+	// failures do not set this marker and retain their bounded same-account
+	// retry budget.
+	if failoverErr.SessionAccountEscape {
+		return false
+	}
 	if !sameAccountRetryDeadlineAllows(failoverErr) {
 		return false
 	}
@@ -233,8 +241,11 @@ func (s *FailoverState) HandleFailoverError(
 		return FailoverContinue
 	}
 
-	// 同账号重试用尽，执行临时封禁
-	if failoverErr.RetryableOnSameAccount {
+	// Same-account retry exhaustion normally feeds the account-level temporary
+	// breaker.  A session escape is deliberately different: it is already an
+	// account-attributable signal for this conversation, and must not globally
+	// quarantine the account after one session observes it.
+	if failoverErr.RetryableOnSameAccount && !failoverErr.SessionAccountEscape {
 		gatewayService.TempUnscheduleRetryableError(ctx, accountID, failoverErr)
 	}
 

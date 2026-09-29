@@ -563,6 +563,25 @@ type OpenAISessionEscapeCache interface {
 	GetOpenAISessionEscapedAccountIDs(ctx context.Context, groupID int64, sessionHash string) ([]int64, error)
 }
 
+// OpenAISessionEscapeRouteState is the model/effort-scoped negative-affinity
+// state used by the OpenAI rate ladder. The legacy account-ID set above stays
+// available for older, unscoped callers; new OpenAI sampling paths use this
+// scoped state so a failure for one public route cannot poison another.
+type OpenAISessionEscapeRouteState struct {
+	AccountIDs           []int64
+	FailedRateMultiplier float64
+	HasFailedRate        bool
+}
+
+// OpenAISessionEscapeRouteCache is optional so existing cache test doubles and
+// deployments can continue to use the legacy exclusion set while they upgrade.
+// Implementations must keep the route dimensions in the key and retain them
+// for at least ttl.
+type OpenAISessionEscapeRouteCache interface {
+	AddOpenAISessionEscapedRoute(ctx context.Context, groupID int64, sessionHash, requestedModel, requestedEffort string, accountID int64, failedRateMultiplier float64, ttl time.Duration) error
+	GetOpenAISessionEscapedRoute(ctx context.Context, groupID int64, sessionHash, requestedModel, requestedEffort string) (OpenAISessionEscapeRouteState, error)
+}
+
 // derefGroupID safely dereferences *int64 to int64, returning 0 if nil
 func derefGroupID(groupID *int64) int64 {
 	if groupID == nil {
@@ -818,6 +837,9 @@ func (e *UpstreamFailoverError) IsCredentialFailure() bool {
 // and inference failures retain their existing scheduler-health behavior.
 func (e *UpstreamFailoverError) ShouldReportAccountScheduleFailure() bool {
 	if e == nil {
+		return false
+	}
+	if e.Reason == OpenAIExecProtocolLeakReason {
 		return false
 	}
 	return !e.IsCredentialFailure() || e.Scope == GatewayFailureScopeAccount

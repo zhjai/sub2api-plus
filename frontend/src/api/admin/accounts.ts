@@ -29,9 +29,7 @@ import type {
   OllamaCloudUsageSettings,
   OllamaCloudUsageState,
   GrokMediaEligibilityMode,
-  GrokMediaEligibilityState,
-  OpenCodeGoUsageSettings,
-  OpenCodeGoUsageState
+  GrokMediaEligibilityState
 } from '@/types'
 
 export interface SchedulerDecisionTrace {
@@ -39,6 +37,8 @@ export interface SchedulerDecisionTrace {
   layer: string
   reason_code: string
   reason_text: string
+  requested_model?: string
+  requested_reasoning_effort?: string
   sticky_previous_hit: boolean
   sticky_session_hit: boolean
   candidate_count: number
@@ -47,6 +47,9 @@ export interface SchedulerDecisionTrace {
   load_skew: number
   selected_account_id: number
   selected_account_type: string
+  selected_rate_multiplier?: number
+  route_migration_active?: boolean
+  migration_from_rate_multiplier?: number
   excluded_account_count: number
   excluded_account_ids?: number[]
   previous_response_given: boolean
@@ -58,6 +61,7 @@ export interface SchedulerDecisionTrace {
 
 export interface SchedulerDecisionCandidate {
   account_id: number
+  rate_multiplier?: number
   eligible: boolean
   selected: boolean
   in_top_k: boolean
@@ -69,6 +73,122 @@ export interface SchedulerDecisionCandidate {
   ttft_ms?: number
   exclusion_reason?: string
   decision_reason?: string
+}
+
+export interface OpenAIEvalSchedule {
+  enabled: boolean
+  interval_seconds: number
+  jitter_seconds: number
+  sample_mode?: string
+  last_run_at?: string | null
+  next_run_at?: string | null
+}
+
+export interface OpenAIEvalRouteConfig {
+  account_id: number
+  requested_model: string
+  reasoning_effort: string
+  candy_schedule: OpenAIEvalSchedule
+  fingerprint_schedule: OpenAIEvalSchedule
+}
+
+export interface OpenAIEvalConfig {
+  effects_enabled: boolean
+  accounts: OpenAIEvalRouteConfig[]
+}
+
+export interface OpenAIEvalFingerprintResult {
+  status: string
+  nearest_model?: string
+  mean_jsd?: number
+  self_jsd?: number
+  p_value?: number
+  valid_samples: number
+  required_samples: number
+  cell_count: number
+  reason?: string
+  evaluated_at: string
+}
+
+export interface OpenAIEvalRun {
+  id: number
+  account_id: number
+  test_type: 'candy' | 'fingerprint'
+  requested_model: string
+  upstream_model?: string
+  reasoning_effort: string
+  baseline_version?: string
+  status: string
+  outcome: {
+    status: string
+    reason?: string
+    sample_count: number
+    expected_count: number
+    confidence: string
+    scheduling: string
+    fingerprint?: OpenAIEvalFingerprintResult
+  }
+  request_count: number
+  input_tokens: number
+  output_tokens: number
+  cost_estimate_usd?: number | null
+  duration_ms: number
+  started_at: string
+  finished_at?: string
+  trigger_source: string
+  error?: string
+}
+
+export interface OpenAIEvalModelCatalog {
+  items: Array<{ id: string; display_name?: string }>
+  baseline_version: string
+  baseline_models: string[]
+  candy: { expected_answer: number; confidence: string; scheduling: string }
+  evaluation_notice: string
+  reasoning_efforts: string[]
+  fingerprint_modes: Array<{ id: string; samples: number }>
+}
+
+export async function getOpenAIEvalModels(): Promise<OpenAIEvalModelCatalog> {
+  const { data } = await apiClient.get<OpenAIEvalModelCatalog>('/admin/accounts/evaluations/models')
+  return data
+}
+
+export async function getOpenAIEvalConfig(): Promise<OpenAIEvalConfig> {
+  const { data } = await apiClient.get<OpenAIEvalConfig>('/admin/accounts/evaluations/config')
+  return data
+}
+
+export async function saveOpenAIEvalConfig(config: OpenAIEvalConfig): Promise<OpenAIEvalConfig> {
+  const { data } = await apiClient.put<OpenAIEvalConfig>('/admin/accounts/evaluations/config', config)
+  return data
+}
+
+export async function runOpenAIEval(request: {
+  account_id: number
+  test_type: 'candy' | 'fingerprint'
+  requested_model: string
+  reasoning_effort: string
+  sample_mode?: string
+}): Promise<OpenAIEvalRun> {
+  const { data } = await apiClient.post<OpenAIEvalRun>('/admin/accounts/evaluations/run', request)
+  return data
+}
+
+export async function listOpenAIEvalRuns(params?: {
+  account_id?: number
+  requested_model?: string
+  reasoning_effort?: string
+  test_type?: string
+  limit?: number
+}): Promise<{ items: OpenAIEvalRun[] }> {
+  const { data } = await apiClient.get<{ items: OpenAIEvalRun[] }>('/admin/accounts/evaluations/runs', { params })
+  return data
+}
+
+export async function listOpenAIEvalAudit(): Promise<{ items: Array<{ id: number; actor_id: number; action: string; payload: Record<string, unknown>; created_at: string }> }> {
+  const { data } = await apiClient.get<{ items: Array<{ id: number; actor_id: number; action: string; payload: Record<string, unknown>; created_at: string }> }>('/admin/accounts/evaluations/audit')
+  return data
 }
 
 export async function listSchedulerDecisions(limit = 50): Promise<{ items: SchedulerDecisionTrace[]; limit: number }> {
@@ -1144,38 +1264,6 @@ export async function refreshOllamaCloudUsage(id: number): Promise<OllamaCloudUs
   return data
 }
 
-export async function getOpenCodeGoUsageSettings(): Promise<OpenCodeGoUsageSettings> {
-  const { data } = await apiClient.get<OpenCodeGoUsageSettings>('/admin/accounts/opencode-go-usage/settings')
-  return data
-}
-
-export async function updateOpenCodeGoUsageSettings(
-  settings: OpenCodeGoUsageSettings
-): Promise<OpenCodeGoUsageSettings> {
-  const { data } = await apiClient.put<OpenCodeGoUsageSettings>(
-    '/admin/accounts/opencode-go-usage/settings',
-    settings
-  )
-  return data
-}
-
-export async function getOpenCodeGoUsage(id: number): Promise<OpenCodeGoUsageState> {
-  const { data } = await apiClient.get<OpenCodeGoUsageState>(`/admin/accounts/${id}/opencode-go-usage`)
-  return data
-}
-
-export async function setOpenCodeGoUsageAutoRefresh(id: number, enabled: boolean): Promise<OpenCodeGoUsageState> {
-  const { data } = await apiClient.put<OpenCodeGoUsageState>(`/admin/accounts/${id}/opencode-go-usage/auto-refresh`, {
-    enabled
-  })
-  return data
-}
-
-export async function refreshOpenCodeGoUsage(id: number): Promise<OpenCodeGoUsageState> {
-  const { data } = await apiClient.post<OpenCodeGoUsageState>(`/admin/accounts/${id}/opencode-go-usage/refresh`)
-  return data
-}
-
 export const accountsAPI = {
   list,
   listWithEtag,
@@ -1239,12 +1327,13 @@ export const accountsAPI = {
   saveOllamaCloudUsageSession,
   deleteOllamaCloudUsageSession,
   setOllamaCloudUsageAutoRefresh,
-  refreshOllamaCloudUsage,
-  getOpenCodeGoUsageSettings,
-  updateOpenCodeGoUsageSettings,
-  getOpenCodeGoUsage,
-  setOpenCodeGoUsageAutoRefresh,
-  refreshOpenCodeGoUsage
+  refreshOllamaCloudUsage
+  ,getOpenAIEvalModels
+  ,getOpenAIEvalConfig
+  ,saveOpenAIEvalConfig
+  ,runOpenAIEval
+  ,listOpenAIEvalRuns
+  ,listOpenAIEvalAudit
 }
 
 export default accountsAPI

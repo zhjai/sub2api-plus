@@ -142,13 +142,12 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	nativeDeepSeekResponses := account.Platform == PlatformDeepseek && nativeCNResponses
 	if nativeDeepSeekResponses && account.Type == AccountTypeAPIKey && !compactPath &&
 		needsOpenAIResponsesClientToolAdaptation(body) {
-		originalToolBody := body
 		adaptedBody, mapping, adaptErr := adaptOpenAIResponsesClientTools(body)
 		if adaptErr != nil {
 			return nil, fmt.Errorf("adapt DeepSeek Responses client tools: %w", adaptErr)
 		}
 		body = adaptedBody
-		logOpenAIResponsesToolAdaptation(ctx, account, gjson.GetBytes(originalToolBody, "model").String(), openAIResponsesEndpoint, originalToolBody, body, mapping)
+		_ = mapping // mapping is persisted on the request context below
 		setOpenAIResponsesClientToolMapping(c, mapping)
 	}
 
@@ -1344,6 +1343,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			forwardResult.ResponsesMeaningfulOutput = streamOutcome.responsesMeaningfulOutput
 			forwardResult.ResponsesToolCallForwarded = streamOutcome.responsesToolCallForwarded
 			forwardResult.ToolCapabilityFailure = streamOutcome.toolCapabilityFailure
+			forwardResult.ExecCallObserved = streamOutcome.execCallObserved
 			forwardResult.UpstreamTerminalEvent = streamOutcome.responsesTerminalEvent
 		}
 		if imageCount > 0 {

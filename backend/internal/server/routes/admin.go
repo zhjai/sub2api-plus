@@ -359,6 +359,12 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 	{
 		accounts.GET("", h.Admin.Account.List)
 		accounts.GET("/scheduler-decisions", h.Admin.Account.GetSchedulerDecisions)
+		accounts.GET("/evaluations/models", h.Admin.Account.ListOpenAIEvalModels)
+		accounts.GET("/evaluations/config", h.Admin.Account.GetOpenAIEvalConfig)
+		accounts.PUT("/evaluations/config", h.Admin.Account.UpdateOpenAIEvalConfig)
+		accounts.POST("/evaluations/run", h.Admin.Account.RunOpenAIEval)
+		accounts.GET("/evaluations/runs", h.Admin.Account.ListOpenAIEvalRuns)
+		accounts.GET("/evaluations/audit", h.Admin.Account.ListOpenAIEvalAudit)
 		accounts.GET("/upstream-billing-rates", h.Admin.Account.GetUpstreamBillingRates)
 		accounts.GET("/upstream-billing-probe/settings", h.Admin.Account.GetUpstreamBillingProbeSettings)
 		accounts.PUT("/upstream-billing-probe/settings", h.Admin.Account.UpdateUpstreamBillingProbeSettings)

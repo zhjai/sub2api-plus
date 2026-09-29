@@ -37,6 +37,18 @@ func TestOpenAIFirstOutputFailoverStopsAfterOneAccountSwitch(t *testing.T) {
 	require.Equal(t, 1, count)
 }
 
+func TestOpenAIExecProtocolLeakHasIndependentSwitchBudget(t *testing.T) {
+	firstOutputCount := 1
+	execLeakCount := 0
+	require.False(t, openAIExecProtocolLeakFailoverExhausted(&execLeakCount))
+	require.Equal(t, 1, firstOutputCount)
+	require.Equal(t, 1, execLeakCount)
+	require.False(t, openAIExecProtocolLeakFailoverExhausted(&execLeakCount))
+	require.False(t, openAIExecProtocolLeakFailoverExhausted(&execLeakCount))
+	require.True(t, openAIExecProtocolLeakFailoverExhausted(&execLeakCount))
+	require.Equal(t, maxOpenAIExecProtocolLeakSwitches, execLeakCount)
+}
+
 func TestOpenAIRequestAllowsFailoverReplayStopsCanceledClient(t *testing.T) {
 	require.False(t, openAIRequestAllowsFailoverReplay(nil))
 

@@ -109,6 +109,7 @@ func bindRequestedReasoningEffort(c *gin.Context, body []byte, model string) {
 	if c == nil || c.Request == nil {
 		return
 	}
+	c.Request = c.Request.WithContext(service.WithOpenAIClientRequestedModel(c.Request.Context(), model))
 	effort := service.CanonicalRequestedReasoningEffort(body, model)
 	if effort == nil {
 		return
@@ -131,6 +132,23 @@ func stampForwardRequestedReasoningEffort(result *service.ForwardResult, request
 		return
 	}
 	result.RequestedReasoningEffort = requested
+}
+
+// markOpenAIRouteMigration carries the failed account's billing-rate channel
+// into the next sampling attempt. The scheduler consumes this request-local
+// marker to try the same model/effort route at the same rate first, then move
+// up the configured account-rate ladder.
+func markOpenAIRouteMigration(c *gin.Context, account *service.Account, requestedModel string) {
+	if c == nil || c.Request == nil || account == nil {
+		return
+	}
+	effort := ""
+	if requested := service.RequestedReasoningEffortFromContext(c.Request.Context()); requested != nil {
+		effort = *requested
+	}
+	c.Request = c.Request.WithContext(service.WithOpenAIRouteMigration(
+		c.Request.Context(), account.BillingRateMultiplier(), requestedModel, effort,
+	))
 }
 
 func applyOpenAIReasoningEffortPolicyForRequest(c *gin.Context, apiKey *service.APIKey, body []byte) ([]byte, bool, error) {

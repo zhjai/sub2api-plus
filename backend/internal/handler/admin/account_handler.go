@@ -65,8 +65,10 @@ type AccountHandler struct {
 	grokImportProber        grokImportProber
 	upstreamBillingProbe    *service.UpstreamBillingProbeService
 	ollamaCloudUsage        *service.OllamaCloudUsageService
-	cfg                     *config.Config
+	openAIGatewayService    *service.OpenAIGatewayService
+	openAIEvalService       *service.OpenAIEvalService
 	opencodeGoUsage         *service.OpenCodeGoUsageService
+	cfg                     *config.Config
 }
 
 // SetUpstreamBillingProbeService attaches the optional remote billing probe service.
@@ -78,8 +80,41 @@ func (h *AccountHandler) SetOllamaCloudUsageService(usage *service.OllamaCloudUs
 	h.ollamaCloudUsage = usage
 }
 
+// SetOpenAIGatewayService attaches the optional scheduler trace reader without
+// changing the long-standing constructor used by focused admin tests.
+func (h *AccountHandler) SetOpenAIGatewayService(gateway *service.OpenAIGatewayService) {
+	h.openAIGatewayService = gateway
+}
+
+func (h *AccountHandler) SetOpenAIEvalService(eval *service.OpenAIEvalService) {
+	h.openAIEvalService = eval
+}
+
 func (h *AccountHandler) SetOpenCodeGoUsageService(usage *service.OpenCodeGoUsageService) {
 	h.opencodeGoUsage = usage
+}
+
+// GetSchedulerDecisions returns bounded, redacted request-level scheduler
+// traces. It never accepts or returns session hashes, response IDs, bodies, or
+// credentials.
+func (h *AccountHandler) GetSchedulerDecisions(c *gin.Context) {
+	limit := 50
+	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil {
+			limit = parsed
+		}
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 256 {
+		limit = 256
+	}
+	var traces []service.OpenAIAccountScheduleTrace
+	if h.openAIGatewayService != nil {
+		traces = h.openAIGatewayService.RecentOpenAIAccountScheduleTraces(limit)
+	}
+	c.JSON(http.StatusOK, gin.H{"items": traces, "limit": limit})
 }
 
 // NewAccountHandler creates a new admin account handler
@@ -679,22 +714,14 @@ func (h *AccountHandler) List(c *gin.Context) {
 		response.ErrorFrom(c, err)
 		return
 	}
-	if len(accounts) > 0 {
+	if h.ollamaCloudUsage != nil && len(accounts) > 0 {
 		accountPointers := make([]*service.Account, len(accounts))
 		for index := range accounts {
 			accountPointers[index] = &accounts[index]
 		}
-		if h.ollamaCloudUsage != nil {
-			if err := h.ollamaCloudUsage.ResolveAccounts(c.Request.Context(), accountPointers); err != nil {
-				response.ErrorFrom(c, err)
-				return
-			}
-		}
-		if h.opencodeGoUsage != nil {
-			if err := h.opencodeGoUsage.ResolveOpenCodeGoUsageAccounts(c.Request.Context(), accountPointers); err != nil {
-				response.ErrorFrom(c, err)
-				return
-			}
+		if err := h.ollamaCloudUsage.ResolveAccounts(c.Request.Context(), accountPointers); err != nil {
+			response.ErrorFrom(c, err)
+			return
 		}
 	}
 
@@ -951,12 +978,6 @@ func (h *AccountHandler) GetByID(c *gin.Context) {
 	}
 	if h.ollamaCloudUsage != nil {
 		if err := h.ollamaCloudUsage.ResolveAccounts(c.Request.Context(), []*service.Account{account}); err != nil {
-			response.ErrorFrom(c, err)
-			return
-		}
-	}
-	if h.opencodeGoUsage != nil {
-		if err := h.opencodeGoUsage.ResolveOpenCodeGoUsageAccounts(c.Request.Context(), []*service.Account{account}); err != nil {
 			response.ErrorFrom(c, err)
 			return
 		}
@@ -1628,10 +1649,6 @@ func (h *AccountHandler) ApplyOAuthCredentials(c *gin.Context) {
 		return
 	}
 
-	// Re-auth only returns authentication fields. Preserve account configuration
-	// stored alongside them (for example model_mapping), while allowing the new
-	// OAuth values to replace their existing counterparts.
-	req.Credentials = service.MergeCredentials(existing.Credentials, req.Credentials)
 	// Drop SSO/password residue; re-auth must leave only OAuth tokens on disk.
 	req.Credentials = service.SanitizeStoredCredentials(existing.Platform, req.Credentials)
 
