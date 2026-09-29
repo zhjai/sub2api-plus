@@ -222,6 +222,7 @@ export default {
       accountSchedulingThresholdOverrideDisabledHint:
         'Use 1-100. The account becomes temporarily unschedulable after reaching this usage percent; 100 disables it for this account.',
       status: {
+        attributed: 'Attributed',
         active: 'Active',
         inactive: 'Inactive',
         expired: 'Expired',
@@ -1795,6 +1796,8 @@ export default {
         running: 'Running'
       },
       reason: {
+        modeltrace_behavioral_attribution: 'Behavioral attribution only; this does not prove model identity.',
+        modeltrace_insufficient_outputs: 'Not enough valid numeric outputs were collected for attribution.',
         running: 'The test is still running. Refresh the history shortly.',
         noDetail: 'No conclusion details were returned.',
         unknown: 'No conclusion was formed ({code}).',

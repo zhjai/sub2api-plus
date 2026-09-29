@@ -274,10 +274,10 @@ type OpenAIEvalModelTraceDiagnostic struct {
 }
 
 type OpenAIEvalModelTraceSample struct {
-	Prompt        string `json:"prompt"`
+	Prompt        string `json:"-"`
 	ExpectedCount int    `json:"expected_count"`
 	Attempts      int    `json:"attempts,omitempty"`
-	Text          string `json:"text,omitempty"`
+	Text          string `json:"-"`
 	Error         string `json:"error,omitempty"`
 	Parsed        int    `json:"parsed_numbers"`
 	Valid         bool   `json:"accepted"`
@@ -783,7 +783,7 @@ func OpenAIEvalSchedulingDisposition(testType string, outcome OpenAIEvalOutcome,
 	if !globalEnabled {
 		return "disabled"
 	}
-	if strings.EqualFold(testType, OpenAIEvalTypeFingerprint) || strings.EqualFold(testType, OpenAIEvalTypeCandy) {
+	if strings.EqualFold(testType, OpenAIEvalTypeFingerprint) || strings.EqualFold(testType, OpenAIEvalTypeCandy) || strings.EqualFold(testType, OpenAIEvalTypeModelTrace) {
 		return "alert_only"
 	}
 	if outcome.Status == "fail" && outcome.Confidence == "high" {
@@ -797,7 +797,7 @@ func OpenAIEvalSchedulingDisposition(testType string, outcome OpenAIEvalOutcome,
 // and Fingerprint outcomes are intentionally excluded because they are low
 // confidence and/or identity evidence, not a capability verdict.
 func OpenAIEvalRoutePenalty(testType string, outcome OpenAIEvalOutcome, globalEnabled bool) float64 {
-	if !globalEnabled || strings.EqualFold(testType, OpenAIEvalTypeCandy) || strings.EqualFold(testType, OpenAIEvalTypeFingerprint) {
+	if !globalEnabled || strings.EqualFold(testType, OpenAIEvalTypeCandy) || strings.EqualFold(testType, OpenAIEvalTypeFingerprint) || strings.EqualFold(testType, OpenAIEvalTypeModelTrace) {
 		return 0
 	}
 	if outcome.Status == "fail" && strings.EqualFold(outcome.Confidence, "high") && outcome.SampleCount >= outcome.ExpectedCount && outcome.ExpectedCount > 0 {

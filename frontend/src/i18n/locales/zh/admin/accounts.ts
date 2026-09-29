@@ -447,6 +447,7 @@ export default {
       accountSchedulingThresholdOverrideDisabledHint:
         '1-100，达到该用量百分比后临时不可调度；100 表示禁用当前账号自动停调。',
       status: {
+        attributed: '已完成归因',
         active: '正常',
         inactive: '停用',
         expired: '已过期',
@@ -1765,6 +1766,8 @@ export default {
         running: '检测中'
       },
       reason: {
+        modeltrace_behavioral_attribution: '仅表示行为归因结果，不证明真实模型身份。',
+        modeltrace_insufficient_outputs: '有效数字输出不足，无法完成归因。',
         running: '检测仍在进行，请稍后刷新记录。',
         noDetail: '没有可用的结论说明。',
         unknown: '本次未能形成结论（{code}）。',

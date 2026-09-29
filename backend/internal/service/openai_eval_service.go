@@ -248,7 +248,10 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 			}
 			return run, saveErr
 		}
-		s.recordRouteHealth(finishCtx, target.Account.ID, request.RequestedModel, request.ReasoningEffort, hardFailure, hardFailureCode)
+		// ModelTrace is attribution-only and must never mutate route health.
+		if request.TestType != OpenAIEvalTypeModelTrace {
+			s.recordRouteHealth(finishCtx, target.Account.ID, request.RequestedModel, request.ReasoningEffort, hardFailure, hardFailureCode)
+		}
 		return run, runErr
 	}
 
@@ -310,6 +313,9 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 			// An incomplete collection is a neutral result, not a route health
 			// failure. It should be retried or inspected manually.
 			run.Error = safeOpenAIEvalErrorCode(traceErr)
+		}
+		if ctxErr := runCtx.Err(); ctxErr != nil {
+			return finish(ctxErr)
 		}
 		return finish(nil)
 	}
