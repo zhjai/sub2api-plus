@@ -127,6 +127,20 @@
             <small class="schedule-note">{{ t('admin.accounts.evaluations.fingerprintMinimum') }} · {{ t('admin.accounts.evaluations.jitter') }}: {{ route.fingerprint_schedule.jitter_seconds }}s</small>
             <small v-if="route.fingerprint_schedule.enabled && route.fingerprint_schedule.interval_seconds <= 86400" class="schedule-note">{{ t('admin.accounts.evaluations.jitterMinimum') }}</small>
           </div>
+          <div class="test-column">
+            <div class="test-heading"><div><strong>{{ t('admin.accounts.evaluations.modelTrace') }}</strong><small>{{ t('admin.accounts.evaluations.modelTraceHint') }}</small></div></div>
+            <div class="test-controls">
+              <div class="switch-row"><Toggle v-model="route.modeltrace_schedule.enabled" /><span>{{ t('admin.accounts.evaluations.automatic') }}</span></div>
+              <select v-model.number="route.modeltrace_schedule.interval_seconds" class="input min-h-9" :disabled="!route.modeltrace_schedule.enabled" @change="normalizeSchedule(route.modeltrace_schedule, 'modeltrace')">
+                <option v-if="!modelTraceIntervals.includes(route.modeltrace_schedule.interval_seconds)" :value="route.modeltrace_schedule.interval_seconds">{{ customIntervalLabel(route.modeltrace_schedule.interval_seconds) }}</option>
+                <option :value="86400">{{ t('admin.accounts.evaluations.interval24h') }}</option><option :value="259200">{{ t('admin.accounts.evaluations.interval3d') }}</option><option :value="604800">{{ t('admin.accounts.evaluations.interval7d') }}</option>
+              </select>
+              <input v-model.number="route.modeltrace_schedule.jitter_seconds" class="input jitter-input" type="number" min="0" :max="Math.max(0, route.modeltrace_schedule.interval_seconds - 86400)" :disabled="!route.modeltrace_schedule.enabled" :aria-label="t('admin.accounts.evaluations.jitter')" @blur="normalizeSchedule(route.modeltrace_schedule, 'modeltrace')" />
+              <button class="icon-button" :disabled="dirty || isRunning(route, 'modeltrace')" :title="t('admin.accounts.evaluations.runNow')" @click="requestRun(route, 'modeltrace')"><Icon name="play" size="sm" /></button>
+            </div>
+            <small class="schedule-note">{{ t('admin.accounts.evaluations.modelTraceAlertOnly') }}</small>
+            <div v-if="latestRun(route, 'modeltrace')" class="mt-2 text-xs"><span class="status" :class="statusClass(latestRun(route, 'modeltrace')!.status)">{{ statusLabel(latestRun(route, 'modeltrace')!.status) }}</span><span class="result-explanation ml-1">{{ modelTraceSummary(latestRun(route, 'modeltrace')!) }}</span></div>
+          </div>
           <button class="icon-button remove-button" :title="t('admin.accounts.evaluations.removeRoute')" @click="config.accounts.splice(index, 1)"><Icon name="trash" size="sm" /></button>
         </article>
       </section>
@@ -145,7 +159,7 @@
             <tbody>
               <tr v-for="run in runs" :key="run.id">
                 <td>#{{ run.account_id }} · {{ run.requested_model }} · {{ run.reasoning_effort || '-' }}</td>
-                <td>{{ run.test_type === 'candy' ? t('admin.accounts.evaluations.candy') : t('admin.accounts.evaluations.fingerprint') }}</td>
+                <td>{{ run.test_type === 'candy' ? t('admin.accounts.evaluations.candy') : run.test_type === 'fingerprint' ? t('admin.accounts.evaluations.fingerprint') : t('admin.accounts.evaluations.modelTrace') }}</td>
                 <td>
                   <span class="status" :class="statusClass(run.status)">{{ statusLabel(run.status) }}</span>
                   <small class="result-explanation">{{ reasonLabel(run.outcome.reason, run.status, run) }}</small>
@@ -237,9 +251,10 @@ const newRoute = reactive({ account_id: 0, requested_model: '', reasoning_effort
 const canAddRoute = computed(() => newRoute.account_id > 0 && newRoute.requested_model.length > 0)
 const dirty = computed(() => savedSnapshot.value !== JSON.stringify(config))
 const routeKey = (route: OpenAIEvalRouteConfig) => `${route.account_id}:${route.requested_model}:${route.reasoning_effort}`
-const emptySchedule = (type: 'candy' | 'fingerprint') => ({ enabled: false, interval_seconds: type === 'candy' ? 900 : 86400, jitter_seconds: 0, ...(type === 'fingerprint' ? { sample_mode: 'quick' } : {}) })
+const emptySchedule = (type: 'candy' | 'fingerprint' | 'modeltrace') => ({ enabled: false, interval_seconds: type === 'candy' ? 900 : 86400, jitter_seconds: 0, ...(type === 'fingerprint' ? { sample_mode: 'quick' } : {}) })
 const candyIntervals = [900, 3600, 21600, 86400]
 const fingerprintIntervals = [86400, 259200, 604800]
+const modelTraceIntervals = [86400, 259200, 604800]
 const fingerprintModes = ['quick', 'standard', 'strict']
 
 function fingerprintModeLabel(mode: string) {
@@ -256,7 +271,7 @@ function customIntervalLabel(seconds: number) {
   return t('admin.accounts.evaluations.customInterval', { value: seconds >= 86400 ? `${(seconds / 86400).toFixed(1)} d` : `${Math.round(seconds / 3600)} h` })
 }
 
-function normalizeSchedule(schedule: OpenAIEvalRouteConfig['candy_schedule'], type: 'candy' | 'fingerprint') {
+function normalizeSchedule(schedule: OpenAIEvalRouteConfig['candy_schedule'], type: 'candy' | 'fingerprint' | 'modeltrace') {
   const minimum = type === 'candy' ? 15 * 60 : 24 * 60 * 60
   const rawInterval = Number(schedule.interval_seconds)
   const interval = Number.isFinite(rawInterval) ? Math.trunc(rawInterval) : minimum
@@ -268,14 +283,16 @@ function normalizeSchedule(schedule: OpenAIEvalRouteConfig['candy_schedule'], ty
 
 function normalizeConfig() {
   for (const route of config.accounts) {
+    route.modeltrace_schedule ||= emptySchedule('modeltrace')
     normalizeSchedule(route.candy_schedule, 'candy')
     normalizeSchedule(route.fingerprint_schedule, 'fingerprint')
+    normalizeSchedule(route.modeltrace_schedule, 'modeltrace')
   }
 }
 
 function addRoute() {
   if (!canAddRoute.value || config.accounts.some(route => route.account_id === newRoute.account_id && route.requested_model === newRoute.requested_model && route.reasoning_effort === newRoute.reasoning_effort)) return
-  config.accounts.push({ account_id: newRoute.account_id, requested_model: newRoute.requested_model, reasoning_effort: newRoute.reasoning_effort, candy_schedule: emptySchedule('candy'), fingerprint_schedule: emptySchedule('fingerprint') })
+  config.accounts.push({ account_id: newRoute.account_id, requested_model: newRoute.requested_model, reasoning_effort: newRoute.reasoning_effort, candy_schedule: emptySchedule('candy'), fingerprint_schedule: emptySchedule('fingerprint'), modeltrace_schedule: emptySchedule('modeltrace') })
 }
 
 function accountName(accountID: number) {
@@ -283,7 +300,7 @@ function accountName(accountID: number) {
   return account ? `${account.name} · #${account.id}` : `#${accountID}`
 }
 
-function latestRun(route: OpenAIEvalRouteConfig, testType: 'candy' | 'fingerprint') {
+function latestRun(route: OpenAIEvalRouteConfig, testType: 'candy' | 'fingerprint' | 'modeltrace') {
   return runs.value.find(run => run.account_id === route.account_id && run.requested_model === route.requested_model && run.reasoning_effort === route.reasoning_effort && run.test_type === testType)
 }
 
@@ -296,6 +313,7 @@ async function load() {
     openaiAccounts.value = accountPage.items
     config.effects_enabled = saved.effects_enabled
     config.accounts = saved.accounts
+    normalizeConfig()
     savedSnapshot.value = JSON.stringify(config)
     configLoaded.value = true
     newRoute.reasoning_effort = meta.reasoning_efforts[0] || ''
@@ -320,7 +338,7 @@ async function save() {
   } finally { saving.value = false }
 }
 
-async function runNow(route: OpenAIEvalRouteConfig, testType: 'candy' | 'fingerprint', sampleMode?: string) {
+async function runNow(route: OpenAIEvalRouteConfig, testType: 'candy' | 'fingerprint' | 'modeltrace', sampleMode?: string) {
   const key = `${routeKey(route)}:${testType}`
   if (runningKeys.has(key)) return
   runningKeys.add(key)
@@ -336,7 +354,7 @@ async function runNow(route: OpenAIEvalRouteConfig, testType: 'candy' | 'fingerp
   } finally { runningKeys.delete(key) }
 }
 
-function requestRun(route: OpenAIEvalRouteConfig, testType: 'candy' | 'fingerprint') {
+function requestRun(route: OpenAIEvalRouteConfig, testType: 'candy' | 'fingerprint' | 'modeltrace') {
   if (!configLoaded.value || dirty.value || isRunning(route, testType)) return
   if (testType === 'fingerprint') {
     manualSampleMode.value = route.fingerprint_schedule.sample_mode || 'quick'
@@ -359,7 +377,13 @@ function confirmRun() {
   void runNow(request.route, request.testType, manualSampleMode.value)
 }
 
-const isRunning = (route: OpenAIEvalRouteConfig, testType: 'candy' | 'fingerprint') => runningKeys.has(`${routeKey(route)}:${testType}`)
+const isRunning = (route: OpenAIEvalRouteConfig, testType: 'candy' | 'fingerprint' | 'modeltrace') => runningKeys.has(`${routeKey(route)}:${testType}`)
+
+function modelTraceSummary(run: OpenAIEvalRun) {
+  const trace = run.outcome.modeltrace
+  if (!trace) return t('admin.accounts.evaluations.modelTraceInsufficient')
+  return `${trace.prediction || '-'} · ${(trace.probability || 0).toFixed(2)}`
+}
 
 async function loadHistory() {
   historyLoading.value = true
@@ -399,7 +423,7 @@ onMounted(() => { load().catch((error) => { loading.value = false; appStore.show
 .tab-count { @apply rounded-full bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-500 dark:bg-dark-700 dark:text-gray-300; }
 .jitter-input { @apply w-20; }
 .route-list { @apply divide-y divide-gray-100 overflow-hidden rounded-3xl bg-white shadow-sm ring-1 ring-gray-900/5 dark:divide-dark-700 dark:bg-dark-800 dark:ring-dark-700; }
-.route-row { @apply grid gap-4 px-5 py-5 lg:grid-cols-[190px_minmax(0,1fr)_minmax(0,1fr)_32px] lg:items-center; }
+.route-row { @apply grid gap-4 px-5 py-5 lg:grid-cols-[190px_repeat(3,minmax(0,1fr))_32px] lg:items-center; }
 .route-identity { @apply flex items-center gap-3; }
 .route-id { @apply text-xs font-semibold text-gray-500 dark:text-gray-400; }
 .route-model { @apply flex min-w-0 flex-col; }

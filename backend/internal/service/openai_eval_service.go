@@ -101,6 +101,9 @@ func (s *OpenAIEvalService) SaveConfig(ctx context.Context, config *OpenAIEvalCo
 		if err := validateOpenAIEvalSchedule(&item.FingerprintSchedule, OpenAIEvalTypeFingerprint); err != nil {
 			return fmt.Errorf("route %d Fingerprint schedule: %w", i, err)
 		}
+		if err := validateOpenAIEvalSchedule(&item.ModelTraceSchedule, OpenAIEvalTypeModelTrace); err != nil {
+			return fmt.Errorf("route %d ModelTrace schedule: %w", i, err)
+		}
 	}
 	if err := s.repo.SaveConfig(ctx, config, actorID); err != nil {
 		return err
@@ -119,6 +122,9 @@ func validateOpenAIEvalSchedule(schedule *OpenAIEvalSchedule, testType string) e
 		if _, err := OpenAIEvalFingerprintSampleCount(schedule.SampleMode); err != nil {
 			return err
 		}
+	}
+	if testType == OpenAIEvalTypeModelTrace {
+		minimum = int(OpenAIEvalModelTraceMinInterval.Seconds())
 	}
 	if schedule.IntervalSeconds < minimum || schedule.IntervalSeconds > 30*24*3600 {
 		return fmt.Errorf("interval must be between %d seconds and 30 days", minimum)
@@ -142,7 +148,7 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 	if request.ReasoningEffort != "" && !isAllowedOpenAIEvalReasoningEffort(request.ReasoningEffort) {
 		return nil, fmt.Errorf("unsupported reasoning effort %q", request.ReasoningEffort)
 	}
-	if request.TestType != OpenAIEvalTypeCandy && request.TestType != OpenAIEvalTypeFingerprint {
+	if request.TestType != OpenAIEvalTypeCandy && request.TestType != OpenAIEvalTypeFingerprint && request.TestType != OpenAIEvalTypeModelTrace {
 		return nil, fmt.Errorf("unsupported OpenAI evaluation type %q", request.TestType)
 	}
 	if source != "manual" && source != "scheduled" {
@@ -280,6 +286,30 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 		} else {
 			run.Outcome = OpenAIEvalOutcome{Status: "warning", Reason: "one_or_more_public_candy_variants_failed", Score: 0, SampleCount: run.RequestCount, ExpectedCount: run.RequestCount, Confidence: "low", Scheduling: "alert_only"}
 			run.Status = "warning"
+		}
+		return finish(nil)
+	}
+
+	if request.TestType == OpenAIEvalTypeModelTrace {
+		trace, count, inputTokens, outputTokens, traceErr := s.runModelTrace(runCtx, target, request.ReasoningEffort)
+		run.RequestCount = count
+		run.InputTokens = inputTokens
+		run.OutputTokens = outputTokens
+		if trace != nil {
+			// Do not persist prompts or model output text. The result remains
+			// useful for attribution while respecting the evaluation repository's
+			// no-raw-content retention contract.
+			for i := range trace.Samples {
+				trace.Samples[i].Prompt = ""
+				trace.Samples[i].Text = ""
+			}
+			run.Outcome = modelTraceSchedulingOutcome(trace, traceErr)
+			run.Status = run.Outcome.Status
+		}
+		if traceErr != nil && (trace == nil || trace.UsedOutputs == 0) {
+			// An incomplete collection is a neutral result, not a route health
+			// failure. It should be retried or inspected manually.
+			run.Error = safeOpenAIEvalErrorCode(traceErr)
 		}
 		return finish(nil)
 	}

@@ -92,6 +92,7 @@ export interface OpenAIEvalRouteConfig {
   reasoning_effort: string
   candy_schedule: OpenAIEvalSchedule
   fingerprint_schedule: OpenAIEvalSchedule
+  modeltrace_schedule: OpenAIEvalSchedule
 }
 
 export interface OpenAIEvalConfig {
@@ -115,7 +116,7 @@ export interface OpenAIEvalFingerprintResult {
 export interface OpenAIEvalRun {
   id: number
   account_id: number
-  test_type: 'candy' | 'fingerprint'
+  test_type: 'candy' | 'fingerprint' | 'modeltrace'
   requested_model: string
   upstream_model?: string
   reasoning_effort: string
@@ -129,6 +130,7 @@ export interface OpenAIEvalRun {
     confidence: string
     scheduling: string
     fingerprint?: OpenAIEvalFingerprintResult
+    modeltrace?: OpenAIEvalModelTraceResult
   }
   request_count: number
   input_tokens: number
@@ -141,6 +143,17 @@ export interface OpenAIEvalRun {
   error?: string
 }
 
+export interface OpenAIEvalModelTraceResult {
+  bank_revision: string
+  prediction?: string
+  probability?: number
+  family_prediction_name?: string
+  family_probability?: number
+  used_outputs: number
+  requests: number
+  candidates?: Array<{ model: string; display_name: string; family: string; family_name: string; probability: number; profile_similarity: number; score: number }>
+}
+
 export interface OpenAIEvalModelCatalog {
   items: Array<{ id: string; display_name?: string }>
   baseline_version: string
@@ -149,6 +162,7 @@ export interface OpenAIEvalModelCatalog {
   evaluation_notice: string
   reasoning_efforts: string[]
   fingerprint_modes: Array<{ id: string; samples: number }>
+  modeltrace: { requests: number; bank_revision: string; candidate_count: number; scheduling: string }
 }
 
 export async function getOpenAIEvalModels(): Promise<OpenAIEvalModelCatalog> {
@@ -168,7 +182,7 @@ export async function saveOpenAIEvalConfig(config: OpenAIEvalConfig): Promise<Op
 
 export async function runOpenAIEval(request: {
   account_id: number
-  test_type: 'candy' | 'fingerprint'
+  test_type: 'candy' | 'fingerprint' | 'modeltrace'
   requested_model: string
   reasoning_effort: string
   sample_mode?: string

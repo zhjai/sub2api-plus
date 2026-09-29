@@ -23,6 +23,7 @@ import (
 const (
 	OpenAIEvalTypeCandy                  = "candy"
 	OpenAIEvalTypeFingerprint            = "fingerprint"
+	OpenAIEvalTypeModelTrace             = "modeltrace"
 	OpenAIEvalDataVersion                = "cpa-codex-candy-eval-5654020c-v1"
 	OpenAIEvalBaselineVersion            = "cpa-codex-candy-eval-5654020c-v1"
 	OpenAIEvalMinFingerprintInterval     = 24 * time.Hour
@@ -36,6 +37,8 @@ const (
 	openAIEvalFingerprintStandardRepeats = 25
 	openAIEvalFingerprintStrictRepeats   = 25
 	openAIEvalFingerprintPermutationN    = 1000
+	OpenAIEvalModelTraceRequests         = 3
+	OpenAIEvalModelTraceMinInterval      = 24 * time.Hour
 )
 
 // Keep the Candy canary compatible with the upstream CPA plugin contract.
@@ -74,6 +77,7 @@ type OpenAIEvalOutcome struct {
 	Confidence    string                       `json:"confidence"`
 	Scheduling    string                       `json:"scheduling"`
 	Fingerprint   *OpenAIEvalFingerprintResult `json:"fingerprint,omitempty"`
+	ModelTrace    *OpenAIEvalModelTraceResult  `json:"modeltrace,omitempty"`
 }
 
 // OpenAIEvalRouteHealth is scoped to account + public requested model +
@@ -211,6 +215,7 @@ type OpenAIEvalAccountConfig struct {
 	ReasoningEffort     string             `json:"reasoning_effort"`
 	CandySchedule       OpenAIEvalSchedule `json:"candy_schedule"`
 	FingerprintSchedule OpenAIEvalSchedule `json:"fingerprint_schedule"`
+	ModelTraceSchedule  OpenAIEvalSchedule `json:"modeltrace_schedule"`
 }
 
 type OpenAIEvalConfig struct {
@@ -243,6 +248,53 @@ type OpenAIEvalFingerprintResult struct {
 	CellCount       int       `json:"cell_count"`
 	Reason          string    `json:"reason,omitempty"`
 	EvaluatedAt     time.Time `json:"evaluated_at"`
+}
+
+type OpenAIEvalModelTraceCandidate struct {
+	Model       string  `json:"model"`
+	DisplayName string  `json:"display_name"`
+	Family      string  `json:"family"`
+	FamilyName  string  `json:"family_name"`
+	Probability float64 `json:"probability"`
+	Similarity  float64 `json:"profile_similarity"`
+	Score       float64 `json:"score"`
+}
+
+type OpenAIEvalModelTraceFamily struct {
+	Family      string  `json:"family"`
+	DisplayName string  `json:"display_name"`
+	Probability float64 `json:"probability"`
+}
+
+type OpenAIEvalModelTraceDiagnostic struct {
+	Index   int  `json:"index"`
+	Parsed  int  `json:"parsed_numbers"`
+	Minimum int  `json:"minimum_numbers"`
+	Valid   bool `json:"accepted"`
+}
+
+type OpenAIEvalModelTraceSample struct {
+	Prompt        string `json:"prompt"`
+	ExpectedCount int    `json:"expected_count"`
+	Attempts      int    `json:"attempts,omitempty"`
+	Text          string `json:"text,omitempty"`
+	Error         string `json:"error,omitempty"`
+	Parsed        int    `json:"parsed_numbers"`
+	Valid         bool   `json:"accepted"`
+}
+
+type OpenAIEvalModelTraceResult struct {
+	BankRevision      string                           `json:"bank_revision"`
+	Prediction        string                           `json:"prediction,omitempty"`
+	Probability       float64                          `json:"probability,omitempty"`
+	FamilyPrediction  string                           `json:"family_prediction_name,omitempty"`
+	FamilyProbability float64                          `json:"family_probability,omitempty"`
+	UsedOutputs       int                              `json:"used_outputs"`
+	Requests          int                              `json:"requests"`
+	Candidates        []OpenAIEvalModelTraceCandidate  `json:"candidates,omitempty"`
+	Families          []OpenAIEvalModelTraceFamily     `json:"families,omitempty"`
+	Diagnostics       []OpenAIEvalModelTraceDiagnostic `json:"diagnostics,omitempty"`
+	Samples           []OpenAIEvalModelTraceSample     `json:"samples,omitempty"`
 }
 
 type OpenAIEvalSample struct {
