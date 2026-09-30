@@ -289,6 +289,9 @@ func ProvideOpenAIEvalService(
 	pricingService *PricingService,
 ) *OpenAIEvalService {
 	service := NewOpenAIEvalService(repo, accountRepo, accountTestService)
+	if accountTestService != nil && accountTestService.openaiGatewayService != nil {
+		accountTestService.openaiGatewayService.openAIEvalRepo = repo
+	}
 	service.SetPricingService(pricingService)
 	initCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	if err := service.Initialize(initCtx); err != nil {

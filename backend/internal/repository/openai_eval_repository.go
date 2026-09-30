@@ -56,6 +56,8 @@ func (r *openAIEvalRepository) GetConfig(ctx context.Context) (*service.OpenAIEv
 				schedule = &route.FingerprintSchedule
 			} else if testType == service.OpenAIEvalTypeModelTrace {
 				schedule = &route.ModelTraceSchedule
+			} else if testType == service.OpenAIEvalTypeStateProbe {
+				schedule = &route.StateProbeSchedule
 			}
 			schedule.LastRunAt, schedule.NextRunAt = nil, nil
 			if lastRun.Valid {
@@ -102,7 +104,7 @@ func (r *openAIEvalRepository) SaveConfig(ctx context.Context, cfg *service.Open
 		for _, item := range []struct {
 			testType string
 			schedule service.OpenAIEvalSchedule
-		}{{service.OpenAIEvalTypeCandy, route.CandySchedule}, {service.OpenAIEvalTypeFingerprint, route.FingerprintSchedule}, {service.OpenAIEvalTypeModelTrace, route.ModelTraceSchedule}} {
+		}{{service.OpenAIEvalTypeCandy, route.CandySchedule}, {service.OpenAIEvalTypeFingerprint, route.FingerprintSchedule}, {service.OpenAIEvalTypeModelTrace, route.ModelTraceSchedule}, {service.OpenAIEvalTypeStateProbe, route.StateProbeSchedule}} {
 			nextRun := any(nil)
 			if item.schedule.Enabled {
 				nextRun = time.Now().UTC().Add(time.Duration(item.schedule.IntervalSeconds) * time.Second)

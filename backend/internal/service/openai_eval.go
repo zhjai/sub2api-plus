@@ -24,6 +24,7 @@ const (
 	OpenAIEvalTypeCandy                  = "candy"
 	OpenAIEvalTypeFingerprint            = "fingerprint"
 	OpenAIEvalTypeModelTrace             = "modeltrace"
+	OpenAIEvalTypeStateProbe             = "state_probe"
 	OpenAIEvalDataVersion                = "cpa-codex-candy-eval-5654020c-v1"
 	OpenAIEvalBaselineVersion            = "cpa-codex-candy-eval-5654020c-v1"
 	OpenAIEvalMinFingerprintInterval     = 24 * time.Hour
@@ -78,6 +79,7 @@ type OpenAIEvalOutcome struct {
 	Scheduling    string                       `json:"scheduling"`
 	Fingerprint   *OpenAIEvalFingerprintResult `json:"fingerprint,omitempty"`
 	ModelTrace    *OpenAIEvalModelTraceResult  `json:"modeltrace,omitempty"`
+	StateProbe    *OpenAIStateProbeResult      `json:"state_probe,omitempty"`
 }
 
 // OpenAIEvalRouteHealth is scoped to account + public requested model +
@@ -210,16 +212,21 @@ type OpenAIEvalSchedule struct {
 }
 
 type OpenAIEvalAccountConfig struct {
-	AccountID           int64              `json:"account_id"`
-	RequestedModel      string             `json:"requested_model"`
-	ReasoningEffort     string             `json:"reasoning_effort"`
-	CandySchedule       OpenAIEvalSchedule `json:"candy_schedule"`
-	FingerprintSchedule OpenAIEvalSchedule `json:"fingerprint_schedule"`
-	ModelTraceSchedule  OpenAIEvalSchedule `json:"modeltrace_schedule"`
+	AccountID           int64                `json:"account_id"`
+	RequestedModel      string               `json:"requested_model"`
+	ReasoningEffort     string               `json:"reasoning_effort"`
+	CandySchedule       OpenAIEvalSchedule   `json:"candy_schedule"`
+	FingerprintSchedule OpenAIEvalSchedule   `json:"fingerprint_schedule"`
+	ModelTraceSchedule  OpenAIEvalSchedule   `json:"modeltrace_schedule"`
+	StateProbeSchedule  OpenAIEvalSchedule   `json:"state_probe_schedule"`
+	BPSAuto             bool                 `json:"bps_auto"`
+	BPSState            *OpenAIBPSModelState `json:"bps_state,omitempty"`
+	DirectOAuthEligible bool                 `json:"direct_oauth_eligible"`
 }
 
 type OpenAIEvalConfig struct {
 	EffectsEnabled bool                      `json:"effects_enabled"`
+	BPSAutoEnabled bool                      `json:"bps_auto_enabled"`
 	Accounts       []OpenAIEvalAccountConfig `json:"accounts"`
 }
 
@@ -783,7 +790,7 @@ func OpenAIEvalSchedulingDisposition(testType string, outcome OpenAIEvalOutcome,
 	if !globalEnabled {
 		return "disabled"
 	}
-	if strings.EqualFold(testType, OpenAIEvalTypeFingerprint) || strings.EqualFold(testType, OpenAIEvalTypeCandy) || strings.EqualFold(testType, OpenAIEvalTypeModelTrace) {
+	if strings.EqualFold(testType, OpenAIEvalTypeFingerprint) || strings.EqualFold(testType, OpenAIEvalTypeCandy) || strings.EqualFold(testType, OpenAIEvalTypeModelTrace) || strings.EqualFold(testType, OpenAIEvalTypeStateProbe) {
 		return "alert_only"
 	}
 	if outcome.Status == "fail" && outcome.Confidence == "high" {
@@ -797,7 +804,7 @@ func OpenAIEvalSchedulingDisposition(testType string, outcome OpenAIEvalOutcome,
 // and Fingerprint outcomes are intentionally excluded because they are low
 // confidence and/or identity evidence, not a capability verdict.
 func OpenAIEvalRoutePenalty(testType string, outcome OpenAIEvalOutcome, globalEnabled bool) float64 {
-	if !globalEnabled || strings.EqualFold(testType, OpenAIEvalTypeCandy) || strings.EqualFold(testType, OpenAIEvalTypeFingerprint) || strings.EqualFold(testType, OpenAIEvalTypeModelTrace) {
+	if !globalEnabled || strings.EqualFold(testType, OpenAIEvalTypeCandy) || strings.EqualFold(testType, OpenAIEvalTypeFingerprint) || strings.EqualFold(testType, OpenAIEvalTypeModelTrace) || strings.EqualFold(testType, OpenAIEvalTypeStateProbe) {
 		return 0
 	}
 	if outcome.Status == "fail" && strings.EqualFold(outcome.Confidence, "high") && outcome.SampleCount >= outcome.ExpectedCount && outcome.ExpectedCount > 0 {

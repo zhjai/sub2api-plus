@@ -38,7 +38,15 @@ func (h *AccountHandler) UpdateOpenAIEvalConfig(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, config)
+	// SaveConfig strips runtime fields before persistence. Return a fresh
+	// projection so BPS state and current account eligibility remain visible
+	// immediately after saving.
+	saved, err := h.openAIEvalService.GetConfig(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to reload evaluation config"})
+		return
+	}
+	c.JSON(http.StatusOK, saved)
 }
 
 func (h *AccountHandler) RunOpenAIEval(c *gin.Context) {

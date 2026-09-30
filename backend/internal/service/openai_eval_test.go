@@ -329,6 +329,8 @@ func TestOpenAIEvalSchedulesHaveBoundedIntervalsAndFingerprintSampleModes(t *tes
 		{name: "fingerprint minimum", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 86399, SampleMode: "quick"}, testType: OpenAIEvalTypeFingerprint, wantErr: true},
 		{name: "fingerprint missing mode", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 86400}, testType: OpenAIEvalTypeFingerprint, wantErr: true},
 		{name: "fingerprint accepted", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 86400, SampleMode: "strict"}, testType: OpenAIEvalTypeFingerprint},
+		{name: "state probe minimum", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 6 * 60 * 60}, testType: OpenAIEvalTypeStateProbe},
+		{name: "state probe too frequent", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 6*60*60 - 1}, testType: OpenAIEvalTypeStateProbe, wantErr: true},
 		{name: "jitter violates minimum", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 900, JitterSeconds: 1}, testType: OpenAIEvalTypeCandy, wantErr: true},
 	}
 	for _, tc := range cases {

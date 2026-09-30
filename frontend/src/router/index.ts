@@ -526,7 +526,7 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
-    path: '/admin/accounts/evaluations',
+    path: '/admin/evaluations',
     name: 'AdminOpenAIEvaluations',
     component: () => import('@/views/admin/OpenAIEvaluationsView.vue'),
     meta: {
@@ -536,6 +536,10 @@ const routes: RouteRecordRaw[] = [
       titleKey: 'admin.accounts.evaluations.title',
       descriptionKey: 'admin.accounts.evaluations.description'
     }
+  },
+  {
+    path: '/admin/accounts/evaluations',
+    redirect: '/admin/evaluations'
   },
   {
     path: '/admin/plugins',

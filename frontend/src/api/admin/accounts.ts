@@ -93,11 +93,24 @@ export interface OpenAIEvalRouteConfig {
   candy_schedule: OpenAIEvalSchedule
   fingerprint_schedule: OpenAIEvalSchedule
   modeltrace_schedule: OpenAIEvalSchedule
+  state_probe_schedule: OpenAIEvalSchedule
+  bps_auto: boolean
+  bps_state?: OpenAIBPSModelState | null
+  direct_oauth_eligible?: boolean
 }
 
 export interface OpenAIEvalConfig {
   effects_enabled: boolean
+  bps_auto_enabled: boolean
   accounts: OpenAIEvalRouteConfig[]
+}
+
+export interface OpenAIBPSModelState {
+  active: boolean
+  degraded_streak: number
+  healthy_streak: number
+  disabled_reason?: string
+  updated_at?: string
 }
 
 export interface OpenAIEvalFingerprintResult {
@@ -116,7 +129,7 @@ export interface OpenAIEvalFingerprintResult {
 export interface OpenAIEvalRun {
   id: number
   account_id: number
-  test_type: 'candy' | 'fingerprint' | 'modeltrace'
+  test_type: 'candy' | 'fingerprint' | 'modeltrace' | 'state_probe'
   requested_model: string
   upstream_model?: string
   reasoning_effort: string
@@ -131,6 +144,7 @@ export interface OpenAIEvalRun {
     scheduling: string
     fingerprint?: OpenAIEvalFingerprintResult
     modeltrace?: OpenAIEvalModelTraceResult
+    state_probe?: OpenAIStateProbeResult
   }
   request_count: number
   input_tokens: number
@@ -141,6 +155,18 @@ export interface OpenAIEvalRun {
   finished_at?: string
   trigger_source: string
   error?: string
+}
+
+export interface OpenAIStateProbeResult {
+  version: string
+  verdict: 'healthy' | 'degraded' | 'inconclusive' | string
+  failure?: string
+  request_count: number
+  mint_status?: number
+  continue_status?: number
+  new_ticket: boolean
+  reported_model?: string
+  latency_ms: number
 }
 
 export interface OpenAIEvalModelTraceResult {
@@ -182,7 +208,7 @@ export async function saveOpenAIEvalConfig(config: OpenAIEvalConfig): Promise<Op
 
 export async function runOpenAIEval(request: {
   account_id: number
-  test_type: 'candy' | 'fingerprint' | 'modeltrace'
+  test_type: 'candy' | 'fingerprint' | 'modeltrace' | 'state_probe'
   requested_model: string
   reasoning_effort: string
   sample_mode?: string

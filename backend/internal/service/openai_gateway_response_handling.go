@@ -935,6 +935,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			}
 		}
 	}
+	terminalEventReady := func(line string) bool {
+		return line == "" && sawTerminalEvent && (!codexFailureTerminal || !sawBareError || sawResponseFailed)
+	}
 
 	// 无超时/无 keepalive 的常见路径走同步扫描，减少 goroutine 与 channel 开销。
 	if streamInterval <= 0 && keepaliveInterval <= 0 && firstOutputTimeout <= 0 {
@@ -943,6 +946,10 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			processSSELine(documentScanner.Text(), true)
 			if streamEarlyErr != nil {
 				return resultWithUsage(), streamEarlyErr
+			}
+			if terminalEventReady(documentScanner.Text()) {
+				_ = resp.Body.Close()
+				return finalizeStream()
 			}
 		}
 		if result, err, done := handleScanErr(documentScanner.Err()); done {
@@ -1022,6 +1029,10 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			markEventProcessed(ev)
 			if streamEarlyErr != nil {
 				return resultWithUsage(), streamEarlyErr
+			}
+			if terminalEventReady(ev.line) {
+				_ = resp.Body.Close()
+				return finalizeStream()
 			}
 
 		case <-intervalCh:

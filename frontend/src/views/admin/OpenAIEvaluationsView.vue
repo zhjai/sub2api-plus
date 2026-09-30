@@ -37,9 +37,11 @@
             <h2 id="effects-title" class="text-sm font-semibold text-gray-900 dark:text-white">{{ t('admin.accounts.evaluations.effectsTitle') }}</h2>
             <p class="mt-0.5 text-xs text-gray-500 dark:text-dark-400">{{ t('admin.accounts.evaluations.effectsHint') }}</p>
           </div>
-          <div class="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-300">
+          <div class="flex flex-wrap items-center gap-3 text-xs text-gray-600 dark:text-gray-300">
             <span>{{ t('admin.accounts.evaluations.effectsEnabled') }}</span>
             <Toggle v-model="config.effects_enabled" />
+            <span>{{ t('admin.accounts.evaluations.bpsAutoEnabled') }}</span>
+            <Toggle v-model="config.bps_auto_enabled" />
           </div>
         </div>
       </section>
@@ -107,6 +109,21 @@
             <div v-if="latestRun(route, 'candy')" class="mt-2 flex items-center gap-1 text-xs"><span class="status" :class="statusClass(latestRun(route, 'candy')!.status)"><Icon :name="statusIcon(latestRun(route, 'candy')!.status)" size="xs" /> {{ statusLabel(latestRun(route, 'candy')!.status) }}</span><span class="result-explanation">{{ reasonLabel(latestRun(route, 'candy')!.outcome.reason, latestRun(route, 'candy')!.status, latestRun(route, 'candy')!) }}</span></div>
           </div>
           <div class="test-column">
+            <div class="test-heading"><div><strong>{{ t('admin.accounts.evaluations.stateProbe') }}</strong><small>{{ t('admin.accounts.evaluations.stateProbeHint') }}</small></div></div>
+            <div class="test-controls">
+              <div class="switch-row"><Toggle v-model="route.state_probe_schedule.enabled" :disabled="!isDirectOAuth(route) && !route.state_probe_schedule.enabled" /><span>{{ t('admin.accounts.evaluations.automatic') }}</span></div>
+              <select v-model.number="route.state_probe_schedule.interval_seconds" class="input min-h-9" :disabled="!route.state_probe_schedule.enabled || !isDirectOAuth(route)" @change="normalizeSchedule(route.state_probe_schedule, 'state_probe')">
+                <option :value="21600">{{ t('admin.accounts.evaluations.interval6h') }}</option><option :value="86400">{{ t('admin.accounts.evaluations.interval24h') }}</option><option :value="604800">{{ t('admin.accounts.evaluations.interval7d') }}</option>
+              </select>
+              <button class="icon-button" :disabled="dirty || !isDirectOAuth(route) || isRunning(route, 'state_probe')" :title="t('admin.accounts.evaluations.runNow')" @click="requestRun(route, 'state_probe')"><Icon name="play" size="sm" /></button>
+            </div>
+            <small class="schedule-note">{{ t('admin.accounts.evaluations.stateProbeEvidence') }}</small>
+            <div v-if="latestRun(route, 'state_probe')" class="mt-2 text-xs"><span class="status" :class="statusClass(latestRun(route, 'state_probe')!.status)">{{ statusLabel(latestRun(route, 'state_probe')!.status) }}</span><span class="result-explanation ml-1">{{ reasonLabel(latestRun(route, 'state_probe')!.outcome.reason, latestRun(route, 'state_probe')!.status, latestRun(route, 'state_probe')!) }}</span></div>
+            <div class="mt-2 flex items-center gap-2 text-xs"><Toggle v-model="route.bps_auto" :disabled="(!isDirectOAuth(route) && !route.bps_auto) || (!config.bps_auto_enabled && !route.bps_auto)" /><span>{{ t('admin.accounts.evaluations.bpsAuto') }}</span><span v-if="route.bps_state?.active" class="status status-warn">{{ t('admin.accounts.evaluations.bpsActive') }}</span></div>
+            <small v-if="route.bps_state?.disabled_reason" class="schedule-note">{{ t('admin.accounts.evaluations.bpsDisabled') }}: {{ route.bps_state.disabled_reason }}</small>
+            <small v-else-if="route.bps_state && route.bps_auto" class="schedule-note">{{ t('admin.accounts.evaluations.bpsStreak', { degraded: route.bps_state.degraded_streak, healthy: route.bps_state.healthy_streak }) }}</small>
+          </div>
+          <div class="test-column">
             <div class="test-heading">
               <div><strong>{{ t('admin.accounts.evaluations.fingerprint') }}</strong><small>{{ t('admin.accounts.evaluations.fingerprintHint') }}</small></div>
             </div>
@@ -159,7 +176,7 @@
             <tbody>
               <tr v-for="run in runs" :key="run.id">
                 <td>#{{ run.account_id }} · {{ run.requested_model }} · {{ run.reasoning_effort || '-' }}</td>
-                <td>{{ run.test_type === 'candy' ? t('admin.accounts.evaluations.candy') : run.test_type === 'fingerprint' ? t('admin.accounts.evaluations.fingerprint') : t('admin.accounts.evaluations.modelTrace') }}</td>
+                <td>{{ run.test_type === 'candy' ? t('admin.accounts.evaluations.candy') : run.test_type === 'fingerprint' ? t('admin.accounts.evaluations.fingerprint') : run.test_type === 'state_probe' ? t('admin.accounts.evaluations.stateProbe') : t('admin.accounts.evaluations.modelTrace') }}</td>
                 <td>
                   <span class="status" :class="statusClass(run.status)">{{ statusLabel(run.status) }}</span>
                   <small class="result-explanation">{{ reasonLabel(run.outcome.reason, run.status, run) }}</small>
@@ -239,19 +256,19 @@ const catalog = ref<OpenAIEvalModelCatalog | null>(null)
 const openaiAccounts = ref<AccountListItem[]>([])
 const runs = ref<OpenAIEvalRun[]>([])
 const runningKeys = reactive(new Set<string>())
-const config = reactive<OpenAIEvalConfig>({ effects_enabled: false, accounts: [] })
+const config = reactive<OpenAIEvalConfig>({ effects_enabled: false, bps_auto_enabled: false, accounts: [] })
 const savedSnapshot = ref('')
 const lastRun = ref<OpenAIEvalRun | null>(null)
 const showRunResult = ref(false)
 const showRunSetup = ref(false)
 const manualSampleMode = ref('quick')
-const pendingRun = ref<{ route: OpenAIEvalRouteConfig; testType: 'candy' | 'fingerprint' } | null>(null)
+const pendingRun = ref<{ route: OpenAIEvalRouteConfig; testType: 'candy' | 'fingerprint' | 'modeltrace' | 'state_probe' } | null>(null)
 const newRoute = reactive({ account_id: 0, requested_model: '', reasoning_effort: '' })
 
 const canAddRoute = computed(() => newRoute.account_id > 0 && newRoute.requested_model.length > 0)
 const dirty = computed(() => savedSnapshot.value !== JSON.stringify(config))
 const routeKey = (route: OpenAIEvalRouteConfig) => `${route.account_id}:${route.requested_model}:${route.reasoning_effort}`
-const emptySchedule = (type: 'candy' | 'fingerprint' | 'modeltrace') => ({ enabled: false, interval_seconds: type === 'candy' ? 900 : 86400, jitter_seconds: 0, ...(type === 'fingerprint' ? { sample_mode: 'quick' } : {}) })
+const emptySchedule = (type: 'candy' | 'fingerprint' | 'modeltrace' | 'state_probe') => ({ enabled: false, interval_seconds: type === 'candy' ? 900 : type === 'state_probe' ? 21600 : 86400, jitter_seconds: 0, ...(type === 'fingerprint' ? { sample_mode: 'quick' } : {}) })
 const candyIntervals = [900, 3600, 21600, 86400]
 const fingerprintIntervals = [86400, 259200, 604800]
 const modelTraceIntervals = [86400, 259200, 604800]
@@ -271,8 +288,8 @@ function customIntervalLabel(seconds: number) {
   return t('admin.accounts.evaluations.customInterval', { value: seconds >= 86400 ? `${(seconds / 86400).toFixed(1)} d` : `${Math.round(seconds / 3600)} h` })
 }
 
-function normalizeSchedule(schedule: OpenAIEvalRouteConfig['candy_schedule'], type: 'candy' | 'fingerprint' | 'modeltrace') {
-  const minimum = type === 'candy' ? 15 * 60 : 24 * 60 * 60
+function normalizeSchedule(schedule: OpenAIEvalRouteConfig['candy_schedule'], type: 'candy' | 'fingerprint' | 'modeltrace' | 'state_probe') {
+  const minimum = type === 'candy' ? 15 * 60 : type === 'state_probe' ? 6 * 60 * 60 : 24 * 60 * 60
   const rawInterval = Number(schedule.interval_seconds)
   const interval = Number.isFinite(rawInterval) ? Math.trunc(rawInterval) : minimum
   schedule.interval_seconds = Math.min(Math.max(interval, minimum), 30 * 24 * 60 * 60)
@@ -284,15 +301,18 @@ function normalizeSchedule(schedule: OpenAIEvalRouteConfig['candy_schedule'], ty
 function normalizeConfig() {
   for (const route of config.accounts) {
     route.modeltrace_schedule ||= emptySchedule('modeltrace')
+    route.state_probe_schedule ||= emptySchedule('state_probe')
+    route.bps_auto = Boolean(route.bps_auto)
     normalizeSchedule(route.candy_schedule, 'candy')
     normalizeSchedule(route.fingerprint_schedule, 'fingerprint')
     normalizeSchedule(route.modeltrace_schedule, 'modeltrace')
+    normalizeSchedule(route.state_probe_schedule, 'state_probe')
   }
 }
 
 function addRoute() {
   if (!canAddRoute.value || config.accounts.some(route => route.account_id === newRoute.account_id && route.requested_model === newRoute.requested_model && route.reasoning_effort === newRoute.reasoning_effort)) return
-  config.accounts.push({ account_id: newRoute.account_id, requested_model: newRoute.requested_model, reasoning_effort: newRoute.reasoning_effort, candy_schedule: emptySchedule('candy'), fingerprint_schedule: emptySchedule('fingerprint'), modeltrace_schedule: emptySchedule('modeltrace') })
+  config.accounts.push({ account_id: newRoute.account_id, requested_model: newRoute.requested_model, reasoning_effort: newRoute.reasoning_effort, candy_schedule: emptySchedule('candy'), fingerprint_schedule: emptySchedule('fingerprint'), modeltrace_schedule: emptySchedule('modeltrace'), state_probe_schedule: emptySchedule('state_probe'), bps_auto: false })
 }
 
 function accountName(accountID: number) {
@@ -300,7 +320,7 @@ function accountName(accountID: number) {
   return account ? `${account.name} · #${account.id}` : `#${accountID}`
 }
 
-function latestRun(route: OpenAIEvalRouteConfig, testType: 'candy' | 'fingerprint' | 'modeltrace') {
+function latestRun(route: OpenAIEvalRouteConfig, testType: 'candy' | 'fingerprint' | 'modeltrace' | 'state_probe') {
   return runs.value.find(run => run.account_id === route.account_id && run.requested_model === route.requested_model && run.reasoning_effort === route.reasoning_effort && run.test_type === testType)
 }
 
@@ -312,6 +332,7 @@ async function load() {
     catalog.value = meta
     openaiAccounts.value = accountPage.items
     config.effects_enabled = saved.effects_enabled
+    config.bps_auto_enabled = Boolean(saved.bps_auto_enabled)
     config.accounts = saved.accounts
     normalizeConfig()
     savedSnapshot.value = JSON.stringify(config)
@@ -328,8 +349,9 @@ async function save() {
   normalizeConfig()
   saving.value = true
   try {
-    const saved = await accountsAPI.saveOpenAIEvalConfig({ effects_enabled: config.effects_enabled, accounts: config.accounts })
+    const saved = await accountsAPI.saveOpenAIEvalConfig({ effects_enabled: config.effects_enabled, bps_auto_enabled: config.bps_auto_enabled, accounts: config.accounts })
     config.effects_enabled = saved.effects_enabled
+    config.bps_auto_enabled = Boolean(saved.bps_auto_enabled)
     config.accounts = saved.accounts
     savedSnapshot.value = JSON.stringify(config)
     appStore.showSuccess(t('admin.accounts.evaluations.saveSuccess'))
@@ -338,7 +360,15 @@ async function save() {
   } finally { saving.value = false }
 }
 
-async function runNow(route: OpenAIEvalRouteConfig, testType: 'candy' | 'fingerprint' | 'modeltrace', sampleMode?: string) {
+function isDirectOAuth(route: OpenAIEvalRouteConfig) {
+  if (route.direct_oauth_eligible !== undefined) return route.direct_oauth_eligible
+  const account = openaiAccounts.value.find(item => item.id === route.account_id)
+  const extra = account?.extra as Record<string, unknown> | undefined
+  const authMode = String(extra?.auth_mode ?? extra?.openai_auth_mode ?? '').toLowerCase()
+  return route.reasoning_effort === '' && account?.platform === 'openai' && account.type === 'oauth' && account.parent_account_id == null && extra?.synthetic_ui_test !== true && authMode !== 'agentidentity' && authMode !== 'agent_identity'
+}
+
+async function runNow(route: OpenAIEvalRouteConfig, testType: 'candy' | 'fingerprint' | 'modeltrace' | 'state_probe', sampleMode?: string) {
   const key = `${routeKey(route)}:${testType}`
   if (runningKeys.has(key)) return
   runningKeys.add(key)
@@ -354,7 +384,7 @@ async function runNow(route: OpenAIEvalRouteConfig, testType: 'candy' | 'fingerp
   } finally { runningKeys.delete(key) }
 }
 
-function requestRun(route: OpenAIEvalRouteConfig, testType: 'candy' | 'fingerprint' | 'modeltrace') {
+function requestRun(route: OpenAIEvalRouteConfig, testType: 'candy' | 'fingerprint' | 'modeltrace' | 'state_probe') {
   if (!configLoaded.value || dirty.value || isRunning(route, testType)) return
   if (testType === 'fingerprint') {
     manualSampleMode.value = route.fingerprint_schedule.sample_mode || 'quick'
@@ -377,7 +407,7 @@ function confirmRun() {
   void runNow(request.route, request.testType, manualSampleMode.value)
 }
 
-const isRunning = (route: OpenAIEvalRouteConfig, testType: 'candy' | 'fingerprint' | 'modeltrace') => runningKeys.has(`${routeKey(route)}:${testType}`)
+const isRunning = (route: OpenAIEvalRouteConfig, testType: 'candy' | 'fingerprint' | 'modeltrace' | 'state_probe') => runningKeys.has(`${routeKey(route)}:${testType}`)
 
 function modelTraceSummary(run: OpenAIEvalRun) {
   const trace = run.outcome.modeltrace
@@ -423,7 +453,7 @@ onMounted(() => { load().catch((error) => { loading.value = false; appStore.show
 .tab-count { @apply rounded-full bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-500 dark:bg-dark-700 dark:text-gray-300; }
 .jitter-input { @apply w-20; }
 .route-list { @apply divide-y divide-gray-100 overflow-hidden rounded-3xl bg-white shadow-sm ring-1 ring-gray-900/5 dark:divide-dark-700 dark:bg-dark-800 dark:ring-dark-700; }
-.route-row { @apply grid gap-4 px-5 py-5 lg:grid-cols-[190px_repeat(3,minmax(0,1fr))_32px] lg:items-center; }
+.route-row { @apply grid gap-4 px-5 py-5 lg:grid-cols-[190px_repeat(4,minmax(0,1fr))_32px] lg:items-center; }
 .route-identity { @apply flex items-center gap-3; }
 .route-id { @apply text-xs font-semibold text-gray-500 dark:text-gray-400; }
 .route-model { @apply flex min-w-0 flex-col; }

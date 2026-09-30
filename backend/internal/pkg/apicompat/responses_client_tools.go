@@ -78,9 +78,32 @@ func AdaptResponsesClientTools(req map[string]any) (ResponsesClientToolMapping, 
 	if req == nil {
 		return ResponsesClientToolMapping{}, false, nil
 	}
-	tools, ok := req["tools"].([]any)
-	if !ok || len(tools) == 0 {
-		return ResponsesClientToolMapping{}, false, nil
+	// Responses Lite may carry the declarations in an input item rather than
+	// the top-level tools field. Promote that carrier before deciding whether
+	// there is anything to lower. This also removes an explicitly empty carrier
+	// while preserving a top-level tools: [] reset.
+	promoted, err := PromoteResponsesAdditionalTools(req)
+	if err != nil {
+		return ResponsesClientToolMapping{}, false, err
+	}
+	toolsValue, toolsPresent := req["tools"]
+	tools, toolsOK := toolsValue.([]any)
+	if toolsPresent && !toolsOK {
+		return ResponsesClientToolMapping{}, promoted, nil
+	}
+	if !toolsPresent {
+		// A continuation can omit declarations and carry only a previous custom
+		// call. Recreate generic custom declarations from unambiguous history.
+		if inferred, ok := InferResponsesClientToolMapping(req); ok {
+			tools = inferredLoweredResponsesClientToolDeclarations(inferred)
+			req["tools"] = tools
+			toolsPresent = true
+		}
+	}
+	if !toolsPresent || len(tools) == 0 {
+		// An explicit empty tools declaration is authoritative: do not infer a
+		// stale custom mapping from the input history.
+		return ResponsesClientToolMapping{}, promoted, nil
 	}
 	discovered, err := promoteResponsesToolSearchDiscoveries(req)
 	if err != nil {
@@ -135,7 +158,7 @@ func AdaptResponsesClientTools(req map[string]any) (ResponsesClientToolMapping, 
 
 	tools, _ = req["tools"].([]any)
 	lowered := make([]any, 0, len(tools))
-	changed := discovered || flattened
+	changed := promoted || discovered || flattened
 	seenSearch := false
 	for _, raw := range tools {
 		tool, ok := raw.(map[string]any)

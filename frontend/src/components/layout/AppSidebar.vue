@@ -802,10 +802,10 @@ const adminNavItems = computed((): NavItem[] => {
       icon: GlobeIcon,
       expandOnly: true,
       children: [
-        { path: '/admin/accounts', label: t('nav.accounts'), icon: GlobeIcon },
-        { path: '/admin/accounts/evaluations', label: t('nav.evaluations'), icon: EvaluationIcon }
+        { path: '/admin/accounts', label: t('nav.accounts'), icon: GlobeIcon }
       ]
     },
+    { path: '/admin/evaluations', label: t('nav.evaluations'), icon: EvaluationIcon },
     { path: '/admin/plugins', label: t('nav.plugins'), icon: PluginIcon, featureFlag: flagPluginManagement },
     { path: '/admin/announcements', label: t('nav.announcements'), icon: BellIcon },
     { path: '/admin/proxies', label: t('nav.proxies'), icon: ServerIcon },

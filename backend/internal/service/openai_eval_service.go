@@ -20,6 +20,7 @@ const (
 	OpenAIEvalRunRenewInterval       = 10 * time.Minute
 	OpenAIEvalRunMaxDuration         = 24 * time.Hour
 	OpenAIEvalMaxFingerprintRequests = 400
+	OpenAIEvalMinStateProbeInterval  = 6 * time.Hour
 )
 
 type OpenAIEvalRunRequest struct {
@@ -70,6 +71,27 @@ func (s *OpenAIEvalService) GetConfig(ctx context.Context) (*OpenAIEvalConfig, e
 	config, err := s.repo.GetConfig(ctx)
 	if err == nil && config != nil {
 		SetOpenAIEvalEffectsEnabled(config.EffectsEnabled)
+		if s.accounts != nil {
+			accountCache := make(map[int64]*Account)
+			for i := range config.Accounts {
+				route := &config.Accounts[i]
+				if route.ReasoningEffort != "" {
+					continue
+				}
+				account, ok := accountCache[route.AccountID]
+				if !ok {
+					account, _ = s.accounts.GetByID(ctx, route.AccountID)
+					accountCache[route.AccountID] = account
+				}
+				if account != nil && account.IsOpenAIOAuth() {
+					state := readOpenAIBPSModelState(account, route.RequestedModel)
+					route.BPSState = &state
+				}
+				if account != nil {
+					route.DirectOAuthEligible = account.IsOpenAIOAuth() && !account.IsShadow() && !account.IsSyntheticUITest() && !account.IsOpenAIAgentIdentity() && route.ReasoningEffort == ""
+				}
+			}
+		}
 	}
 	return config, err
 }
@@ -84,6 +106,8 @@ func (s *OpenAIEvalService) SaveConfig(ctx context.Context, config *OpenAIEvalCo
 	seen := make(map[string]struct{}, len(config.Accounts))
 	for i := range config.Accounts {
 		item := &config.Accounts[i]
+		item.BPSState = nil              // runtime status is read-only, never persisted in route config
+		item.DirectOAuthEligible = false // derived from the current account, never persisted
 		if item.AccountID <= 0 || !isOpenAIEvalSupportedModel(item.RequestedModel) {
 			return fmt.Errorf("invalid evaluation route at index %d", i)
 		}
@@ -103,6 +127,21 @@ func (s *OpenAIEvalService) SaveConfig(ctx context.Context, config *OpenAIEvalCo
 		}
 		if err := validateOpenAIEvalSchedule(&item.ModelTraceSchedule, OpenAIEvalTypeModelTrace); err != nil {
 			return fmt.Errorf("route %d ModelTrace schedule: %w", i, err)
+		}
+		if err := validateOpenAIEvalSchedule(&item.StateProbeSchedule, OpenAIEvalTypeStateProbe); err != nil {
+			return fmt.Errorf("route %d State Probe schedule: %w", i, err)
+		}
+		if (item.StateProbeSchedule.Enabled || item.BPSAuto) && item.ReasoningEffort != "" {
+			return fmt.Errorf("route %d State Probe and BPS auto policy require the default reasoning-effort route", i)
+		}
+		if item.StateProbeSchedule.Enabled || item.BPSAuto {
+			if s.accounts == nil {
+				return errors.New("account lookup is unavailable for direct OAuth route validation")
+			}
+			account, accountErr := s.accounts.GetByID(ctx, item.AccountID)
+			if accountErr != nil || account == nil || !account.IsOpenAIOAuth() || account.IsShadow() || account.IsSyntheticUITest() || account.IsOpenAIAgentIdentity() {
+				return fmt.Errorf("route %d State Probe and BPS require a direct OpenAI OAuth account", i)
+			}
 		}
 	}
 	if err := s.repo.SaveConfig(ctx, config, actorID); err != nil {
@@ -126,6 +165,9 @@ func validateOpenAIEvalSchedule(schedule *OpenAIEvalSchedule, testType string) e
 	if testType == OpenAIEvalTypeModelTrace {
 		minimum = int(OpenAIEvalModelTraceMinInterval.Seconds())
 	}
+	if testType == OpenAIEvalTypeStateProbe {
+		minimum = int(OpenAIEvalMinStateProbeInterval.Seconds())
+	}
 	if schedule.IntervalSeconds < minimum || schedule.IntervalSeconds > 30*24*3600 {
 		return fmt.Errorf("interval must be between %d seconds and 30 days", minimum)
 	}
@@ -148,7 +190,7 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 	if request.ReasoningEffort != "" && !isAllowedOpenAIEvalReasoningEffort(request.ReasoningEffort) {
 		return nil, fmt.Errorf("unsupported reasoning effort %q", request.ReasoningEffort)
 	}
-	if request.TestType != OpenAIEvalTypeCandy && request.TestType != OpenAIEvalTypeFingerprint && request.TestType != OpenAIEvalTypeModelTrace {
+	if request.TestType != OpenAIEvalTypeCandy && request.TestType != OpenAIEvalTypeFingerprint && request.TestType != OpenAIEvalTypeModelTrace && request.TestType != OpenAIEvalTypeStateProbe {
 		return nil, fmt.Errorf("unsupported OpenAI evaluation type %q", request.TestType)
 	}
 	if source != "manual" && source != "scheduled" {
@@ -160,6 +202,10 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 		}
 	}
 
+	if request.TestType == OpenAIEvalTypeStateProbe {
+		// Ticket identity belongs to the OAuth account and model, not effort.
+		request.ReasoningEffort = ""
+	}
 	leaseKey := openAIEvalRouteKey(request.AccountID, request.RequestedModel, request.ReasoningEffort) + ":" + request.TestType
 	owner, err := newOpenAIEvalLeaseOwner()
 	if err != nil {
@@ -195,6 +241,9 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 	target, err := s.accountTest.ResolveOpenAIEvalTarget(runCtx, request.AccountID, request.RequestedModel)
 	if err != nil {
 		return nil, err
+	}
+	if request.TestType == OpenAIEvalTypeStateProbe && !isOpenAIStateProbeTarget(target) {
+		return nil, errors.New("State Probe requires a direct OpenAI OAuth account")
 	}
 	start := time.Now().UTC()
 	run := &OpenAIEvalRun{
@@ -249,10 +298,21 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 			return run, saveErr
 		}
 		// ModelTrace is attribution-only and must never mutate route health.
-		if request.TestType != OpenAIEvalTypeModelTrace {
+		if request.TestType != OpenAIEvalTypeModelTrace && request.TestType != OpenAIEvalTypeStateProbe {
 			s.recordRouteHealth(finishCtx, target.Account.ID, request.RequestedModel, request.ReasoningEffort, hardFailure, hardFailureCode)
 		}
 		return run, runErr
+	}
+	if request.TestType == OpenAIEvalTypeStateProbe {
+		probe := s.accountTest.RunOpenAIStateProbe(runCtx, target)
+		run.RequestCount = probe.RequestCount
+		run.Outcome = OpenAIEvalOutcome{Status: probe.Verdict, Reason: probe.Failure, SampleCount: probe.RequestCount, ExpectedCount: 2, Confidence: "low", Scheduling: "alert_only", StateProbe: probe}
+		run.Status = probe.Verdict
+		completed, finishErr := finish(nil)
+		if finishErr == nil {
+			s.applyOpenAIStateProbeBPS(ctx, target, probe)
+		}
+		return completed, finishErr
 	}
 
 	if request.TestType == OpenAIEvalTypeCandy {

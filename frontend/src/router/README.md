@@ -38,6 +38,7 @@ This directory contains the Vue Router configuration for the Sub2API frontend ap
 | `/admin/users`     | AdminUsersView     | User management                 |
 | `/admin/groups`    | AdminGroupsView    | Group management                |
 | `/admin/accounts`  | AdminAccountsView  | Account management              |
+| `/admin/evaluations` | OpenAIEvaluationsView | OpenAI degradation evaluations |
 | `/admin/proxies`   | AdminProxiesView   | Proxy management                |
 | `/admin/redeem`    | AdminRedeemView    | Redeem code management          |
 
