@@ -119,6 +119,7 @@ func TestOpenAIEvalInsufficientAndFingerprintIdentityAreAlertOnly(t *testing.T) 
 
 type openAIEvalUpstreamStub struct {
 	response *http.Response
+	err      error
 	request  *http.Request
 	profile  *tlsfingerprint.Profile
 }
@@ -130,7 +131,7 @@ func (s *openAIEvalUpstreamStub) Do(*http.Request, string, int64, int) (*http.Re
 func (s *openAIEvalUpstreamStub) DoWithTLS(req *http.Request, _ string, _ int64, _ int, profile *tlsfingerprint.Profile) (*http.Response, error) {
 	s.request = req
 	s.profile = profile
-	return s.response, nil
+	return s.response, s.err
 }
 
 type openAIEvalModelGatewayStub struct {
@@ -256,6 +257,7 @@ func TestRunOpenAIEvalSampleRejectsHTTPErrorAndIncompleteWithoutHealthMutation(t
 type openAIEvalRepoFake struct {
 	config       *OpenAIEvalConfig
 	runs         []*OpenAIEvalRun
+	audit        []OpenAIEvalAuditEvent
 	leaseHeld    bool
 	leaseAcquire int
 	leaseRelease int
@@ -296,7 +298,12 @@ func (r *openAIEvalRepoFake) ListRuns(context.Context, OpenAIEvalRunFilter) ([]O
 }
 
 func (r *openAIEvalRepoFake) ListAuditEvents(context.Context, int) ([]OpenAIEvalAuditEvent, error) {
-	return nil, nil
+	return append([]OpenAIEvalAuditEvent(nil), r.audit...), nil
+}
+
+func (r *openAIEvalRepoFake) RecordAuditEvent(_ context.Context, actorID int64, action string, payload map[string]any) error {
+	r.audit = append(r.audit, OpenAIEvalAuditEvent{ActorID: actorID, Action: action, Payload: payload})
+	return nil
 }
 
 func (r *openAIEvalRepoFake) ClaimDueSchedules(context.Context, time.Time, int) ([]OpenAIEvalScheduledRun, error) {
@@ -382,6 +389,9 @@ func TestOpenAIEvalRouteHealthIsScopedAndExpires(t *testing.T) {
 	require.Zero(t, health.Penalty)
 	_, active := ReadOpenAIEvalRouteHealthFromAccount(&Account{Extra: map[string]any{OpenAIEvalRouteHealthExtraKeyFor("gpt-6-astra", "high"): health}}, "gpt-6-astra", "high", now)
 	require.False(t, active)
+	raw, stored := readOpenAIEvalRouteHealthStateFromAccount(&Account{Extra: map[string]any{OpenAIEvalRouteHealthExtraKeyFor("gpt-6-astra", "high"): health}}, "gpt-6-astra", "high")
+	require.True(t, stored)
+	require.Equal(t, 1, raw.HardFailureStreak)
 
 	health = updateOpenAIEvalRouteHealth(health, 7, "gpt-6-astra", "high", now.Add(time.Minute), true, "response_incomplete")
 	require.Equal(t, 2, health.HardFailureStreak)
@@ -442,6 +452,7 @@ func TestOpenAIEvalRunCandyAndFingerprintUseSafeRouteOutcomes(t *testing.T) {
 		require.Equal(t, 1, evalRepo.leaseRelease)
 		require.Zero(t, healthRepo.setErrorID)
 		require.Zero(t, healthRepo.rateLimitedID)
+		require.Nil(t, healthRepo.updatedExtra, "Candy probes are alert-only and must not mutate route health")
 	})
 
 	t.Run("fingerprint uses pinned baseline but remains alert only", func(t *testing.T) {
@@ -457,6 +468,7 @@ func TestOpenAIEvalRunCandyAndFingerprintUseSafeRouteOutcomes(t *testing.T) {
 		require.NotNil(t, run.Outcome.Fingerprint)
 		require.Zero(t, healthRepo.setErrorID)
 		require.Zero(t, healthRepo.rateLimitedID)
+		require.Nil(t, healthRepo.updatedExtra, "Fingerprint probes are alert-only and must not mutate route health")
 		for _, stored := range evalRepo.runs[0].Samples {
 			require.NotContains(t, stored.NormalizedAnswer, "Bearer")
 			require.NotContains(t, stored.NormalizedAnswer, "sk-")
@@ -470,4 +482,51 @@ func TestOpenAIEvalRunCandyAndFingerprintUseSafeRouteOutcomes(t *testing.T) {
 		require.ErrorContains(t, err, "already running")
 		require.Empty(t, evalRepo.runs)
 	})
+
+	t.Run("Candy transport failures remain alert only when effects are enabled", func(t *testing.T) {
+		t.Cleanup(func() { SetOpenAIEvalEffectsEnabled(false) })
+		SetOpenAIEvalEffectsEnabled(true)
+		svc, _, healthRepo, upstream := newHarness("21")
+		upstream.response = nil
+		upstream.err = errors.New("timeout while contacting evaluation upstream")
+		run, err := svc.Run(context.Background(), OpenAIEvalRunRequest{AccountID: 51, TestType: OpenAIEvalTypeCandy, RequestedModel: "gpt-5.4", ReasoningEffort: "high"}, 8, "scheduled")
+		require.NoError(t, err)
+		require.Equal(t, "insufficient", run.Status)
+		require.Equal(t, "alert_only", run.Outcome.Scheduling)
+		require.Nil(t, healthRepo.updatedExtra, "diagnostic probe transport failures must not change production route eligibility")
+	})
+}
+
+func TestResetOpenAIBPSStateIsExplicitAndAudited(t *testing.T) {
+	account := &Account{
+		ID:       77,
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Extra: map[string]any{
+			openAIBPSModelStateKey("gpt-6-astra"): OpenAIBPSModelState{
+				Active:         false,
+				DegradedStreak: 3,
+				DisabledReason: "upstream_403",
+				UpdatedAt:      time.Now().UTC().Add(-time.Hour),
+			},
+		},
+	}
+	accounts := &openAIAccountTestRepo{mockAccountRepoForGemini: mockAccountRepoForGemini{accountsByID: map[int64]*Account{account.ID: account}}}
+	repo := &openAIEvalRepoFake{}
+	svc := NewOpenAIEvalService(repo, accounts, nil)
+
+	state, err := svc.ResetOpenAIBPSState(context.Background(), account.ID, "gpt-6-astra", 9)
+	require.NoError(t, err)
+	require.False(t, state.Active)
+	require.Empty(t, state.DisabledReason)
+	require.Zero(t, state.DegradedStreak)
+	require.NotZero(t, state.UpdatedAt)
+
+	stored, ok := accounts.updatedExtra[openAIBPSModelStateKey("gpt-6-astra")].(OpenAIBPSModelState)
+	require.True(t, ok)
+	require.Empty(t, stored.DisabledReason)
+	require.Len(t, repo.audit, 1)
+	require.Equal(t, "bps_state_reset", repo.audit[0].Action)
+	require.Equal(t, int64(77), repo.audit[0].Payload["account_id"])
+	require.Equal(t, "gpt-6-astra", repo.audit[0].Payload["requested_model"])
 }

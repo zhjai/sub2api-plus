@@ -297,8 +297,12 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 			}
 			return run, saveErr
 		}
-		// ModelTrace is attribution-only and must never mutate route health.
-		if request.TestType != OpenAIEvalTypeModelTrace && request.TestType != OpenAIEvalTypeStateProbe {
+		// Evaluation probes are diagnostic signals.  Candy/Fingerprint can be
+		// affected by sampling variance, provider-specific behavior, or a
+		// temporary transport failure, so they remain alert-only and must not
+		// silently remove a route from production scheduling.  ModelTrace and
+		// State Probe have the same non-mutating contract.
+		if shouldRecordOpenAIEvalRouteHealth(request.TestType) {
 			s.recordRouteHealth(finishCtx, target.Account.ID, request.RequestedModel, request.ReasoningEffort, hardFailure, hardFailureCode)
 		}
 		return run, runErr
@@ -419,6 +423,15 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 	return finish(nil)
 }
 
+func shouldRecordOpenAIEvalRouteHealth(testType string) bool {
+	switch testType {
+	case OpenAIEvalTypeCandy, OpenAIEvalTypeFingerprint, OpenAIEvalTypeModelTrace, OpenAIEvalTypeStateProbe:
+		return false
+	default:
+		return true
+	}
+}
+
 func isHardOpenAIEvalFailure(code string) bool {
 	switch strings.ToLower(strings.TrimSpace(code)) {
 	case "rate_limit", "invalid_api_key", "model_not_found", "previous_response_not_found", "timeout", "context_deadline_exceeded", "response_incomplete", "response_failed", "http_401", "http_403", "http_429", "http_5xx", "upstream_error":
@@ -439,7 +452,7 @@ func (s *OpenAIEvalService) recordRouteHealth(ctx context.Context, accountID int
 		return
 	}
 	now := time.Now().UTC()
-	health, _ := ReadOpenAIEvalRouteHealthFromAccount(account, model, effort, now)
+	health, _ := readOpenAIEvalRouteHealthStateFromAccount(account, model, effort)
 	health = updateOpenAIEvalRouteHealth(health, accountID, model, effort, now, hardFailure, failureCode)
 	payload, err := json.Marshal(health)
 	if err != nil {

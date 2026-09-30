@@ -112,7 +112,11 @@ func OpenAIEvalRouteHealthExtraKeyFor(model, effort string) string {
 	return "openai_eval_route_health_" + hex.EncodeToString(digest[:8])
 }
 
-func ReadOpenAIEvalRouteHealthFromAccount(account *Account, model, effort string, now time.Time) (OpenAIEvalRouteHealth, bool) {
+// readOpenAIEvalRouteHealthStateFromAccount returns the persisted state even
+// while its penalty is still below the scheduler activation threshold.  The
+// writer must use this raw view so a first hard failure is not lost when the
+// active-only reader quite correctly returns "not active".
+func readOpenAIEvalRouteHealthStateFromAccount(account *Account, model, effort string) (OpenAIEvalRouteHealth, bool) {
 	if account == nil || account.Extra == nil {
 		return OpenAIEvalRouteHealth{}, false
 	}
@@ -125,7 +129,15 @@ func ReadOpenAIEvalRouteHealthFromAccount(account *Account, model, effort string
 		return OpenAIEvalRouteHealth{}, false
 	}
 	var health OpenAIEvalRouteHealth
-	if json.Unmarshal(encoded, &health) != nil || health.Penalty <= 0 || health.UpdatedAt.IsZero() {
+	if json.Unmarshal(encoded, &health) != nil || health.UpdatedAt.IsZero() {
+		return OpenAIEvalRouteHealth{}, false
+	}
+	return health, true
+}
+
+func ReadOpenAIEvalRouteHealthFromAccount(account *Account, model, effort string, now time.Time) (OpenAIEvalRouteHealth, bool) {
+	health, ok := readOpenAIEvalRouteHealthStateFromAccount(account, model, effort)
+	if !ok || health.Penalty <= 0 {
 		return OpenAIEvalRouteHealth{}, false
 	}
 	if !health.PenaltyUntil.IsZero() && now.After(health.PenaltyUntil) {
@@ -196,6 +208,7 @@ type OpenAIEvalRepository interface {
 	FinishRun(context.Context, int64, *OpenAIEvalRun) error
 	ListRuns(context.Context, OpenAIEvalRunFilter) ([]OpenAIEvalRun, error)
 	ListAuditEvents(context.Context, int) ([]OpenAIEvalAuditEvent, error)
+	RecordAuditEvent(context.Context, int64, string, map[string]any) error
 	ClaimDueSchedules(context.Context, time.Time, int) ([]OpenAIEvalScheduledRun, error)
 	AcquireLease(context.Context, string, string, time.Duration) (bool, error)
 	RenewLease(context.Context, string, string, time.Duration) (bool, error)

@@ -126,6 +126,14 @@ type AccountRepository interface {
 	ListShadowsByParent(ctx context.Context, parentID int64) ([]*Account, error)
 }
 
+// OpenAIBPSModelStateRepository is an optional atomic persistence contract.
+// Implementations must lock the account row, read the current model state,
+// apply transition, and merge only that JSON key before committing. Keeping it
+// optional preserves small test doubles and older repository adapters.
+type OpenAIBPSModelStateRepository interface {
+	UpdateOpenAIBPSModelState(ctx context.Context, accountID int64, model string, transition func(OpenAIBPSModelState) (OpenAIBPSModelState, bool)) error
+}
+
 type AccountDuplicateRepository interface {
 	// CreateWithAccountGroups atomically persists an account, its exact group priorities,
 	// and the scheduler outbox event for the new routing snapshot.

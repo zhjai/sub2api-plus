@@ -72,6 +72,28 @@ func (h *AccountHandler) RunOpenAIEval(c *gin.Context) {
 	c.JSON(http.StatusOK, run)
 }
 
+func (h *AccountHandler) ResetOpenAIEvalBPSState(c *gin.Context) {
+	if h.openAIEvalService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "OpenAI evaluation service is unavailable"})
+		return
+	}
+	var request struct {
+		AccountID      int64  `json:"account_id"`
+		RequestedModel string `json:"requested_model"`
+	}
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid BPS reset request"})
+		return
+	}
+	actorID, _ := c.Request.Context().Value(ctxkey.UserID).(int64)
+	state, err := h.openAIEvalService.ResetOpenAIBPSState(c.Request.Context(), request.AccountID, request.RequestedModel, actorID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"state": state})
+}
+
 func (h *AccountHandler) ListOpenAIEvalRuns(c *gin.Context) {
 	if h.openAIEvalService == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "OpenAI evaluation service is unavailable"})

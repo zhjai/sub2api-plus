@@ -165,15 +165,14 @@ func (s *OpenAIGatewayService) disableOpenAIBPSAfter403(ctx context.Context, acc
 	if s == nil || s.accountRepo == nil || account == nil {
 		return
 	}
-	openAIBPSStateMu.Lock()
-	defer openAIBPSStateMu.Unlock()
-	state := readOpenAIBPSModelState(account, model)
-	state.Active = false
-	state.DisabledReason = "upstream_403"
-	state.UpdatedAt = time.Now().UTC()
 	stateCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	if err := s.accountRepo.UpdateExtra(stateCtx, account.ID, map[string]any{openAIBPSModelStateKey(model): state}); err != nil {
+	if err := updateOpenAIBPSModelState(stateCtx, s.accountRepo, account.ID, model, func(state OpenAIBPSModelState) (OpenAIBPSModelState, bool) {
+		state.Active = false
+		state.DisabledReason = "upstream_403"
+		state.UpdatedAt = time.Now().UTC()
+		return state, true
+	}); err != nil {
 		logger.LegacyPrintf("service.openai_eval", "[OpenAI BPS] failed to persist 403 disable account=%d model=%s: %v", account.ID, model, err)
 	}
 }

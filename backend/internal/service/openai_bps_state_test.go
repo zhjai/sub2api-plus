@@ -44,10 +44,21 @@ func TestNextOpenAIBPSModelStateIgnoresInconclusiveAnd403Disabled(t *testing.T) 
 	unchanged, changed = nextOpenAIBPSModelState(state, "degraded")
 	require.False(t, changed)
 	require.Equal(t, state, unchanged)
-	reset, changed := nextOpenAIBPSModelState(state, "healthy")
+	unchanged, changed = nextOpenAIBPSModelState(state, "healthy")
+	require.False(t, changed)
+	require.Equal(t, state, unchanged)
+}
+
+func TestNextOpenAIBPSModelStateHealthyProbeClearsOtherDisableReasons(t *testing.T) {
+	state := OpenAIBPSModelState{
+		Active:         true,
+		DegradedStreak: 3,
+		DisabledReason: "temporary_probe_lock",
+	}
+	next, changed := nextOpenAIBPSModelState(state, "healthy")
 	require.True(t, changed)
-	require.False(t, reset.Active)
-	require.Empty(t, reset.DisabledReason)
-	require.Zero(t, reset.DegradedStreak)
-	require.Zero(t, reset.HealthyStreak)
+	require.False(t, next.Active)
+	require.Empty(t, next.DisabledReason)
+	require.Zero(t, next.DegradedStreak)
+	require.Zero(t, next.HealthyStreak)
 }

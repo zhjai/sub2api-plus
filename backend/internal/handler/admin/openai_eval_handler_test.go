@@ -41,12 +41,14 @@ func TestOpenAIEvalHandlersFailClosedWithoutService(t *testing.T) {
 	router.GET("/config", h.GetOpenAIEvalConfig)
 	router.PUT("/config", h.UpdateOpenAIEvalConfig)
 	router.POST("/run", h.RunOpenAIEval)
+	router.POST("/bps/reset", h.ResetOpenAIEvalBPSState)
 	router.GET("/runs", h.ListOpenAIEvalRuns)
 	router.GET("/audit", h.ListOpenAIEvalAudit)
 	for _, route := range []struct{ method, path string }{
 		{http.MethodGet, "/config"},
 		{http.MethodPut, "/config"},
 		{http.MethodPost, "/run"},
+		{http.MethodPost, "/bps/reset"},
 		{http.MethodGet, "/runs"},
 		{http.MethodGet, "/audit"},
 	} {

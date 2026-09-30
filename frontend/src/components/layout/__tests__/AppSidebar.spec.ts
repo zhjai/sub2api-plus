@@ -51,6 +51,13 @@ describe('AppSidebar collapsible groups', () => {
   })
 })
 
+describe('AppSidebar account navigation', () => {
+  it('keeps Account Management as a standalone top-level item', () => {
+    expect(componentSource).toMatch(/\{ path: '\/admin\/accounts', label: t\('nav\.accounts'\), icon: GlobeIcon \}/)
+    expect(componentSource).not.toMatch(/path: '\/admin\/accounts',[\s\S]{0,180}children:/)
+  })
+})
+
 describe('AppSidebar header styles', () => {
   it('does not clip the version badge dropdown', () => {
     const sidebarHeaderBlockMatch = styleSource.match(/\.sidebar-header\s*\{[\s\S]*?\n {2}\}/)

@@ -297,6 +297,21 @@ func (r *openAIEvalRepository) ListAuditEvents(ctx context.Context, limit int) (
 	return events, nil
 }
 
+func (r *openAIEvalRepository) RecordAuditEvent(ctx context.Context, actorID int64, action string, payload map[string]any) error {
+	action = strings.TrimSpace(action)
+	if action == "" {
+		return fmt.Errorf("OpenAI evaluation audit action is required")
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode OpenAI evaluation audit payload: %w", err)
+	}
+	if _, err := r.db.ExecContext(ctx, `INSERT INTO openai_eval_audit_events (actor_id, action, payload) VALUES ($1, $2, $3::jsonb)`, actorID, action, encoded); err != nil {
+		return fmt.Errorf("write OpenAI evaluation audit: %w", err)
+	}
+	return nil
+}
+
 func (r *openAIEvalRepository) ClaimDueSchedules(ctx context.Context, now time.Time, limit int) ([]service.OpenAIEvalScheduledRun, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 100
