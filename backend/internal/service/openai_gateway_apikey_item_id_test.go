@@ -63,9 +63,12 @@ func TestOpenAIGatewayService_APIKeyPassthrough_StripsInvalidInputItemIDs(t *tes
 	require.Equal(t, "msg_valid", gjson.GetBytes(forwarded, "input.2.id").String())
 	require.Equal(t, "fc_valid", gjson.GetBytes(forwarded, "input.3.id").String())
 	require.False(t, gjson.GetBytes(forwarded, "input.4.id").Exists())
-	require.Equal(t, "ctc_valid", gjson.GetBytes(forwarded, "input.5.id").String())
+	// API-key passthrough adapts custom/tool-search calls to function_call
+	// before forwarding; the adapter consequently normalizes their item IDs
+	// into the fc namespace. The client-facing response is restored later.
+	require.Equal(t, "fc_valid", gjson.GetBytes(forwarded, "input.5.id").String())
 	require.False(t, gjson.GetBytes(forwarded, "input.6.id").Exists())
-	require.Equal(t, "tsc_valid", gjson.GetBytes(forwarded, "input.7.id").String())
+	require.Equal(t, "fc_valid", gjson.GetBytes(forwarded, "input.7.id").String())
 	require.Equal(t, "item_output", gjson.GetBytes(forwarded, "input.8.id").String())
 	require.Equal(t, "call_123", gjson.GetBytes(forwarded, "input.8.call_id").String())
 	require.False(t, gjson.GetBytes(forwarded, "input.9.id").Exists())

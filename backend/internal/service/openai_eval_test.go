@@ -381,6 +381,41 @@ func TestOpenAIEvalInitializeRestoresEffectsSwitch(t *testing.T) {
 	require.False(t, OpenAIEvalEffectsEnabled())
 }
 
+func TestOpenAIEvalEffectsDisabledSuppressesSchedulingPolicy(t *testing.T) {
+	t.Cleanup(func() {
+		SetOpenAIEvalEffectsEnabled(false)
+		SetOpenAIEvalSchedulingPolicySnapshot(nil)
+	})
+	SetOpenAIEvalSchedulingPolicySnapshot(&OpenAIEvalConfig{
+		EffectsEnabled:   true,
+		SchedulingPolicy: OpenAIEvalSchedulingPolicyStabilityFirst,
+		Policies: []OpenAIEvalSchedulingPolicyRule{{
+			RequestedModel:  "gpt-6-astra",
+			ReasoningEffort: "high",
+			Policy:          OpenAIEvalSchedulingPolicyCostFirst,
+		}},
+	})
+	SetOpenAIEvalEffectsEnabled(false)
+	require.Empty(t, OpenAIEvalSchedulingPolicyForRequest("gpt-6-astra", "high"))
+
+	SetOpenAIEvalEffectsEnabled(true)
+	require.Equal(t, OpenAIEvalSchedulingPolicyCostFirst, OpenAIEvalSchedulingPolicyForRequest("gpt-6-astra", "high"))
+	require.Equal(t, OpenAIEvalSchedulingPolicyStabilityFirst, OpenAIEvalSchedulingPolicyForRequest("gpt-6-astra", "low"))
+}
+
+func TestOpenAIBPSForceOnBypassesMasterSwitchButNotLocks(t *testing.T) {
+	account := &Account{ID: 88, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	repo := &openAIEvalRepoFake{config: &OpenAIEvalConfig{
+		BPSAutoEnabled: false,
+		Accounts:       []OpenAIEvalAccountConfig{{AccountID: account.ID, RequestedModel: "gpt-6-astra", BPSMode: OpenAIEvalBPSModeForceOn}},
+	}}
+	svc := &OpenAIGatewayService{openAIEvalRepo: repo}
+	require.True(t, svc.isOpenAIBPSForwardEligible(context.Background(), account, "gpt-6-astra"))
+
+	account.Extra = map[string]any{openAIBPSModelStateKey("gpt-6-astra"): OpenAIBPSModelState{DisabledReason: "upstream_403"}}
+	require.False(t, svc.isOpenAIBPSForwardEligible(context.Background(), account, "gpt-6-astra"))
+}
+
 func TestOpenAIEvalRouteHealthIsScopedAndExpires(t *testing.T) {
 	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
 	health := OpenAIEvalRouteHealth{}

@@ -51,20 +51,55 @@ func (a *Account) IsOpenAIBPSActiveForModel(model string) bool {
 	return a != nil && a.IsOpenAIOAuth() && !a.IsShadow() && !a.IsSyntheticUITest() && !a.IsOpenAIAgentIdentity() && readOpenAIBPSModelState(a, model).Active
 }
 
-func (s *OpenAIGatewayService) isOpenAIBPSRouteEnabled(ctx context.Context, accountID int64, model string) bool {
-	if s == nil || s.openAIEvalRepo == nil {
-		return false
+func (s *OpenAIGatewayService) openAIBPSRouteMode(ctx context.Context, accountID int64, model string) (string, bool) {
+	if s == nil || s.openAIEvalRepo == nil || accountID <= 0 {
+		return "", false
 	}
 	config, err := s.openAIEvalRepo.GetConfig(ctx)
-	if err != nil || config == nil || !config.BPSAutoEnabled {
-		return false
+	if err != nil || config == nil {
+		return "", false
 	}
 	for _, route := range config.Accounts {
-		if route.AccountID == accountID && strings.EqualFold(route.RequestedModel, model) && route.ReasoningEffort == "" && route.BPSAuto {
-			return true
+		if route.AccountID == accountID && strings.EqualFold(strings.TrimSpace(route.RequestedModel), strings.TrimSpace(model)) && strings.TrimSpace(route.ReasoningEffort) == "" {
+			return normalizeOpenAIEvalBPSMode(route.BPSMode, route.BPSAuto), true
 		}
 	}
-	return false
+	return "", false
+}
+
+func (s *OpenAIGatewayService) isOpenAIBPSRouteEnabled(ctx context.Context, accountID int64, model string) bool {
+	mode, ok := s.openAIBPSRouteMode(ctx, accountID, model)
+	if !ok || mode == OpenAIEvalBPSModeForceOff {
+		return false
+	}
+	if mode == OpenAIEvalBPSModeForceOn {
+		return true
+	}
+	config, err := s.openAIEvalRepo.GetConfig(ctx)
+	return err == nil && config != nil && config.BPSAutoEnabled
+}
+
+// isOpenAIBPSForwardEligible separates the administrator's route mode from
+// the runtime State Probe state.  force_on is an explicit route decision and
+// therefore does not require Active, while auto still does.
+func (s *OpenAIGatewayService) isOpenAIBPSForwardEligible(ctx context.Context, account *Account, model string) bool {
+	if account == nil || !account.IsOpenAIOAuth() || account.IsShadow() || account.IsSyntheticUITest() || account.IsOpenAIAgentIdentity() {
+		return false
+	}
+	mode, ok := s.openAIBPSRouteMode(ctx, account.ID, model)
+	if !ok || mode == OpenAIEvalBPSModeForceOff {
+		return false
+	}
+	state := readOpenAIBPSModelState(account, model)
+	if strings.TrimSpace(state.DisabledReason) != "" {
+		// In particular, upstream_403 is an explicit lock and must only be
+		// cleared by the administrator reset endpoint.
+		return false
+	}
+	if mode == OpenAIEvalBPSModeForceOn {
+		return true
+	}
+	return s.isOpenAIBPSRouteEnabled(ctx, account.ID, model) && state.Active
 }
 
 func nextOpenAIBPSModelState(state OpenAIBPSModelState, verdict string) (OpenAIBPSModelState, bool) {
@@ -120,7 +155,7 @@ func (s *OpenAIEvalService) applyOpenAIStateProbeBPS(ctx context.Context, target
 	}
 	auto := false
 	for _, route := range config.Accounts {
-		if route.AccountID == target.Account.ID && strings.EqualFold(route.RequestedModel, target.RequestedModel) && route.ReasoningEffort == "" && route.BPSAuto {
+		if route.AccountID == target.Account.ID && strings.EqualFold(route.RequestedModel, target.RequestedModel) && route.ReasoningEffort == "" && openAIEvalBPSModeEnabled(route) {
 			auto = true
 			break
 		}

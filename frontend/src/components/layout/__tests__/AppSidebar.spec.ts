@@ -87,3 +87,24 @@ describe('AppSidebar subscription feature flag', () => {
     expect(componentSource).toMatch(/path: '\/purchase'[^\n]*label: purchaseNavLabel\.value/)
   })
 })
+
+describe('AppSidebar model integrity navigation', () => {
+  it('shows 降智调度 as its own top-level group, next to Account Management', () => {
+    const accountsIndex = componentSource.indexOf("{ path: '/admin/accounts', label: t('nav.accounts'), icon: GlobeIcon }")
+    const groupIndex = componentSource.indexOf("path: '/admin/model-integrity',")
+    expect(accountsIndex).toBeGreaterThan(-1)
+    expect(groupIndex).toBeGreaterThan(accountsIndex)
+    expect(componentSource).toMatch(/path: '\/admin\/model-integrity',\s*label: t\('nav\.modelIntegrity'\)[\s\S]{0,80}expandOnly: true/)
+  })
+
+  it('has exactly the two pages 降智测试 and 降智调度 as children', () => {
+    const block = componentSource.match(/path: '\/admin\/model-integrity',[\s\S]*?children: \[([\s\S]*?)\],/)
+    expect(block).not.toBeNull()
+    const children = block?.[1].match(/path: '[^']+'/g) ?? []
+    expect(children).toEqual(["path: '/admin/model-integrity/tests'", "path: '/admin/model-integrity/scheduling'"])
+  })
+
+  it('no longer links the legacy evaluation page directly', () => {
+    expect(componentSource).not.toContain("path: '/admin/evaluations'")
+  })
+})

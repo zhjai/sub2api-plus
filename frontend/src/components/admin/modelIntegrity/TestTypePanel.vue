@@ -1,0 +1,177 @@
+<template>
+  <article class="tt" :class="{ 'tt-unavailable': !available }" :data-testid="`test-${type}`">
+    <header class="tt-head">
+      <div class="min-w-0">
+        <h3 class="tt-name">
+          {{ t(`admin.modelIntegrity.tests.types.${type}.name`) }}
+          <span v-if="type !== 'state_probe'" class="tt-tag">{{ t('admin.modelIntegrity.tests.alertOnly') }}</span>
+        </h3>
+        <p class="tt-what">{{ t(`admin.modelIntegrity.tests.types.${type}.what`) }}</p>
+      </div>
+      <button
+        type="button"
+        class="btn btn-secondary btn-sm shrink-0"
+        :disabled="!available || running"
+        :data-testid="`run-${type}`"
+        @click="emit('run')"
+      >
+        <Icon name="play" size="xs" :class="running ? 'motion-safe:animate-pulse' : ''" />
+        {{ running ? t('admin.modelIntegrity.tests.running') : t('admin.modelIntegrity.tests.runNow') }}
+      </button>
+    </header>
+
+    <p v-if="!available" class="tt-unavailable-note">{{ t('admin.modelIntegrity.tests.onlyDirectOAuth') }}</p>
+
+    <template v-else>
+      <div class="tt-controls">
+        <label class="tt-switch">
+          <Toggle v-model="schedule.enabled" :aria-label="`${t(`admin.modelIntegrity.tests.types.${type}.name`)} ${t('admin.modelIntegrity.tests.auto')}`" />
+          <span>{{ t('admin.modelIntegrity.tests.auto') }}</span>
+        </label>
+        <label class="tt-field">
+          <span class="tt-label">{{ t('admin.modelIntegrity.tests.every') }}</span>
+          <select v-model.number="schedule.interval_seconds" class="input tt-input" :disabled="!schedule.enabled" @change="normalize">
+            <option v-if="!intervals.includes(schedule.interval_seconds)" :value="schedule.interval_seconds">{{ t('admin.modelIntegrity.tests.interval.custom', { value: humanInterval(schedule.interval_seconds) }) }}</option>
+            <option v-for="seconds in intervals" :key="seconds" :value="seconds">{{ intervalLabel(seconds) }}</option>
+          </select>
+        </label>
+        <label v-if="type === 'fingerprint'" class="tt-field">
+          <span class="tt-label">{{ t('admin.modelIntegrity.tests.sampleMode') }}</span>
+          <select v-model="schedule.sample_mode" class="input tt-input" :disabled="!schedule.enabled">
+            <option v-if="schedule.sample_mode && !modes.some(mode => mode.id === schedule.sample_mode)" :value="schedule.sample_mode">{{ t('admin.modelIntegrity.tests.sampleModes.custom', { mode: schedule.sample_mode }) }}</option>
+            <option v-for="mode in modes" :key="mode.id" :value="mode.id">{{ t('admin.modelIntegrity.tests.manualSampleOption', { mode: modeLabel(mode.id), count: mode.samples }) }}</option>
+          </select>
+        </label>
+        <label class="tt-field">
+          <span class="tt-label">{{ t('admin.modelIntegrity.tests.jitter') }}</span>
+          <input
+            v-model.number="jitterMinutes"
+            type="number"
+            min="0"
+            :max="maxJitterMinutes"
+            class="input tt-input tt-jitter"
+            :disabled="!schedule.enabled || maxJitterMinutes === 0"
+            :title="maxJitterMinutes === 0 ? t('admin.modelIntegrity.tests.jitterUnavailable') : t('admin.modelIntegrity.tests.jitterHint', { max: maxJitterMinutes })"
+          />
+        </label>
+      </div>
+
+      <p class="tt-cost">
+        <span>{{ t('admin.modelIntegrity.tests.perRun', { count: perRun }) }}</span>
+        <span :class="schedule.enabled ? 'tt-cost-strong' : ''">{{ schedule.enabled ? t('admin.modelIntegrity.tests.perDay', { count: formatDaily(perDay) }) : t('admin.modelIntegrity.tests.perDayOff') }}</span>
+        <span v-if="schedule.enabled && schedule.next_run_at">{{ t('admin.modelIntegrity.tests.nextRun', { time: formatTime(schedule.next_run_at) }) }}</span>
+      </p>
+      <p v-if="type === 'state_probe'" class="tt-link-note">
+        <router-link to="/admin/model-integrity/scheduling" class="tt-link">{{ t('admin.modelIntegrity.tests.goScheduling') }}</router-link>
+      </p>
+    </template>
+
+    <footer class="tt-result">
+      <template v-if="latest">
+        <button type="button" class="tt-result-btn" @click="emit('open', latest)">
+          <span class="tone" :class="`tone-${resultTone(latest.status)}`">{{ statusText(latest.status) }}</span>
+          <span class="tt-result-text">{{ explanation }}</span>
+          <time class="tt-result-time" :datetime="latest.finished_at || latest.started_at">{{ formatTime(latest.finished_at || latest.started_at) }}</time>
+        </button>
+      </template>
+      <span v-else class="tt-never">{{ t('admin.modelIntegrity.tests.neverRun') }}</span>
+    </footer>
+  </article>
+</template>
+
+<script setup lang="ts">
+import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
+import Icon from '@/components/icons/Icon.vue'
+import Toggle from '@/components/common/Toggle.vue'
+import type { OpenAIEvalModelCatalog, OpenAIEvalRouteConfig, OpenAIEvalRun } from '@/api/admin/accounts'
+import { DAY, HOUR, TEST_TYPE_META, dailyRequests, normalizeSchedule, requestsPerRun, resultTone, scheduleOf, type EvalTestType } from '@/views/admin/modelIntegrity/modelIntegrity'
+import { runExplanation, statusLabel } from '@/views/admin/modelIntegrity/runText'
+
+const props = defineProps<{
+  route: OpenAIEvalRouteConfig
+  type: EvalTestType
+  catalog: OpenAIEvalModelCatalog | null
+  latest?: OpenAIEvalRun
+  running: boolean
+  available: boolean
+}>()
+
+const emit = defineEmits<{ (e: 'run'): void; (e: 'open', run: OpenAIEvalRun): void }>()
+const { t } = useI18n()
+
+const schedule = computed(() => scheduleOf(props.route, props.type))
+const intervals = computed(() => TEST_TYPE_META[props.type].intervals)
+const modes = computed(() => props.catalog?.fingerprint_modes?.length ? props.catalog.fingerprint_modes : [{ id: 'quick', samples: 60 }, { id: 'standard', samples: 200 }, { id: 'strict', samples: 400 }])
+const perRun = computed(() => requestsPerRun(props.route, props.type, props.catalog))
+const perDay = computed(() => dailyRequests(props.route, props.type, props.catalog))
+const maxJitterMinutes = computed(() => Math.floor(Math.max(0, schedule.value.interval_seconds - TEST_TYPE_META[props.type].minInterval) / 60))
+
+const jitterMinutes = computed({
+  get: () => Math.round((schedule.value.jitter_seconds || 0) / 60),
+  set: (value: number) => {
+    const minutes = Number.isFinite(value) ? Math.min(Math.max(Math.trunc(value), 0), maxJitterMinutes.value) : 0
+    schedule.value.jitter_seconds = minutes * 60
+  }
+})
+
+const explanation = computed(() => (props.latest ? runExplanation(t, props.latest, props.catalog) : ''))
+
+function normalize() {
+  normalizeSchedule(schedule.value, props.type)
+}
+
+function modeLabel(id: string) {
+  const key = `admin.modelIntegrity.tests.sampleModes.${id}`
+  const text = t(key)
+  return text === key ? id : text
+}
+
+function intervalLabel(seconds: number) {
+  const map: Record<number, string> = { 900: 'm15', [HOUR]: 'h1', [6 * HOUR]: 'h6', [DAY]: 'h24', [3 * DAY]: 'd3', [7 * DAY]: 'd7' }
+  return map[seconds] ? t(`admin.modelIntegrity.tests.interval.${map[seconds]}`) : humanInterval(seconds)
+}
+
+function humanInterval(seconds: number) {
+  if (seconds >= DAY) return `${Number((seconds / DAY).toFixed(1))} d`
+  if (seconds >= HOUR) return `${Number((seconds / HOUR).toFixed(1))} h`
+  return `${Math.round(seconds / 60)} min`
+}
+
+const statusText = (status: string) => statusLabel(t, status)
+const formatDaily = (value: number) => (value >= 10 ? Math.round(value).toLocaleString() : Number(value.toFixed(1)).toString())
+const formatTime = (value: string) => {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })
+}
+</script>
+
+<style scoped>
+.tt { @apply flex flex-col gap-3 py-4; }
+.tt-head { @apply flex items-start justify-between gap-3; }
+.tt-name { @apply flex flex-wrap items-center gap-2 text-sm font-semibold text-gray-900 dark:text-white; }
+.tt-tag { @apply rounded bg-gray-100 px-1.5 py-0.5 text-[11px] font-medium text-gray-600 dark:bg-dark-700 dark:text-gray-300; }
+.tt-what { @apply mt-1 max-w-[62ch] text-[0.8125rem] leading-relaxed text-gray-600 dark:text-gray-400; }
+.tt-unavailable .tt-name { @apply text-gray-500 dark:text-gray-400; }
+.tt-unavailable-note { @apply text-xs text-gray-500 dark:text-gray-400; }
+.tt-controls { @apply flex flex-wrap items-end gap-3; }
+.tt-switch { @apply flex h-9 cursor-pointer items-center gap-2 pr-2 text-sm text-gray-700 dark:text-gray-300; }
+.tt-field { @apply flex flex-col gap-1; }
+.tt-label { @apply text-xs text-gray-500 dark:text-gray-400; }
+.tt-input { @apply h-9 w-auto min-w-[8.5rem] py-1 text-sm; }
+.tt-jitter { @apply min-w-0 w-24; }
+.tt-cost { @apply flex flex-wrap gap-x-4 gap-y-1 text-xs tabular-nums text-gray-500 dark:text-gray-400; }
+.tt-cost-strong { @apply font-medium text-gray-800 dark:text-gray-200; }
+.tt-link-note { @apply text-xs; }
+.tt-link { @apply font-medium text-primary-700 underline-offset-2 hover:underline dark:text-primary-300; }
+.tt-result { @apply text-xs; }
+.tt-result-btn { @apply flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 dark:hover:bg-dark-700/50; margin-left: -0.5rem; width: calc(100% + 1rem); }
+.tt-result-text { @apply min-w-0 flex-1 text-gray-600 dark:text-gray-300; }
+.tt-result-time { @apply shrink-0 tabular-nums text-gray-400; }
+.tt-never { @apply text-gray-400; }
+.tone { @apply inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded px-1.5 py-0.5 font-medium; }
+.tone-ok { @apply bg-emerald-50 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300; }
+.tone-attention { @apply bg-amber-100 text-amber-900 dark:bg-amber-900/40 dark:text-amber-200; }
+.tone-neutral { @apply bg-gray-100 text-gray-700 dark:bg-dark-700 dark:text-gray-300; }
+.tone-running { @apply bg-sky-50 text-sky-800 dark:bg-sky-950/40 dark:text-sky-300; }
+</style>

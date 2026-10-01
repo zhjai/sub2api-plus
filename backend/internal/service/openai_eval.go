@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"math"
@@ -19,6 +20,8 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 )
+
+var ErrOpenAIEvalConfigRevisionConflict = errors.New("OpenAI evaluation config revision conflict")
 
 const (
 	OpenAIEvalTypeCandy                  = "candy"
@@ -40,6 +43,25 @@ const (
 	openAIEvalFingerprintPermutationN    = 1000
 	OpenAIEvalModelTraceRequests         = 3
 	OpenAIEvalModelTraceMinInterval      = 24 * time.Hour
+)
+
+// OpenAIEvalSchedulingPolicy controls how eligible accounts are ranked after
+// capability, session, cooldown, and evaluation gates have run.  The empty
+// value is kept as the legacy/default scheduler behaviour.
+const (
+	OpenAIEvalSchedulingPolicyLegacy           = ""
+	OpenAIEvalSchedulingPolicyCostFirst        = "cost_first"
+	OpenAIEvalSchedulingPolicyStabilityFirst   = "stability_first"
+	OpenAIEvalSchedulingPolicyAvoidDegradation = "avoid_degradation"
+)
+
+// OpenAIEvalBPSMode is an explicit replacement for the historical bps_auto
+// boolean.  The boolean remains on the wire for old clients and is normalized
+// to auto when no explicit mode is supplied.
+const (
+	OpenAIEvalBPSModeAuto     = "auto"
+	OpenAIEvalBPSModeForceOn  = "force_on"
+	OpenAIEvalBPSModeForceOff = "force_off"
 )
 
 // Keep the Candy canary compatible with the upstream CPA plugin contract.
@@ -99,12 +121,115 @@ const OpenAIEvalRouteHealthTTL = 30 * time.Minute
 
 var openAIEvalEffectsEnabled atomic.Bool
 
+type openAIEvalSchedulingPolicySnapshot struct {
+	Default string
+	Rules   []OpenAIEvalSchedulingPolicyRule
+}
+
+var openAIEvalSchedulingPolicy atomic.Value // *openAIEvalSchedulingPolicySnapshot
+
+func init() {
+	openAIEvalSchedulingPolicy.Store(&openAIEvalSchedulingPolicySnapshot{})
+}
+
 func OpenAIEvalEffectsEnabled() bool { return openAIEvalEffectsEnabled.Load() }
 
 func SetOpenAIEvalEffectsEnabled(enabled bool) { openAIEvalEffectsEnabled.Store(enabled) }
 
+func SetOpenAIEvalSchedulingPolicySnapshot(config *OpenAIEvalConfig) {
+	snapshot := &openAIEvalSchedulingPolicySnapshot{}
+	if config != nil {
+		snapshot.Default = config.SchedulingPolicy
+		snapshot.Rules = append([]OpenAIEvalSchedulingPolicyRule(nil), config.Policies...)
+	}
+	openAIEvalSchedulingPolicy.Store(snapshot)
+}
+
+func OpenAIEvalSchedulingPolicyForRequest(model, effort string) string {
+	// Evaluation policies are an opt-in routing effect.  Keep the configured
+	// policy available for the admin preview/persistence layer, but never let a
+	// disabled evaluation switch alter production account ordering.
+	if !OpenAIEvalEffectsEnabled() {
+		return OpenAIEvalSchedulingPolicyLegacy
+	}
+	value := openAIEvalSchedulingPolicy.Load()
+	snapshot, _ := value.(*openAIEvalSchedulingPolicySnapshot)
+	if snapshot == nil {
+		return OpenAIEvalSchedulingPolicyLegacy
+	}
+	return OpenAIEvalSchedulingPolicyFor(&OpenAIEvalConfig{SchedulingPolicy: snapshot.Default, Policies: snapshot.Rules}, model, effort)
+}
+
 func OpenAIEvalRouteHealthKey(model, effort string) string {
 	return strings.ToLower(strings.TrimSpace(model)) + "\x00" + strings.ToLower(strings.TrimSpace(effort))
+}
+
+func normalizeOpenAIEvalBPSMode(mode string, legacyAuto bool) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case OpenAIEvalBPSModeForceOn:
+		return OpenAIEvalBPSModeForceOn
+	case OpenAIEvalBPSModeForceOff:
+		return OpenAIEvalBPSModeForceOff
+	case OpenAIEvalBPSModeAuto:
+		return OpenAIEvalBPSModeAuto
+	default:
+		if legacyAuto {
+			return OpenAIEvalBPSModeAuto
+		}
+		return OpenAIEvalBPSModeForceOff
+	}
+}
+
+func openAIEvalBPSModeEnabled(route OpenAIEvalAccountConfig) bool {
+	switch normalizeOpenAIEvalBPSMode(route.BPSMode, route.BPSAuto) {
+	case OpenAIEvalBPSModeForceOn, OpenAIEvalBPSModeAuto:
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeOpenAIEvalSchedulingPolicy(policy string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(policy)) {
+	case "", OpenAIEvalSchedulingPolicyCostFirst, OpenAIEvalSchedulingPolicyStabilityFirst, OpenAIEvalSchedulingPolicyAvoidDegradation:
+		return strings.ToLower(strings.TrimSpace(policy)), nil
+	default:
+		return "", fmt.Errorf("unsupported scheduling policy %q", policy)
+	}
+}
+
+// OpenAIEvalSchedulingPolicyFor resolves the most specific configured rule.
+// It is intentionally a pure helper so the scheduler and admin preview can
+// share exactly the same model/effort matching semantics.
+func OpenAIEvalSchedulingPolicyFor(config *OpenAIEvalConfig, model, effort string) string {
+	if config == nil {
+		return OpenAIEvalSchedulingPolicyLegacy
+	}
+	model = strings.ToLower(strings.TrimSpace(model))
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	policy := strings.ToLower(strings.TrimSpace(config.SchedulingPolicy))
+	if normalized, err := normalizeOpenAIEvalSchedulingPolicy(policy); err == nil {
+		policy = normalized
+	} else {
+		policy = OpenAIEvalSchedulingPolicyLegacy
+	}
+	for _, rule := range config.Policies {
+		if !strings.EqualFold(strings.TrimSpace(rule.RequestedModel), model) {
+			continue
+		}
+		if strings.TrimSpace(rule.ReasoningEffort) != "" && !strings.EqualFold(strings.TrimSpace(rule.ReasoningEffort), effort) {
+			continue
+		}
+		normalized, err := normalizeOpenAIEvalSchedulingPolicy(rule.Policy)
+		if err != nil || normalized == "" {
+			continue
+		}
+		if strings.TrimSpace(rule.ReasoningEffort) != "" {
+			return normalized
+		}
+		policy = normalized
+	}
+	return policy
 }
 
 func OpenAIEvalRouteHealthExtraKeyFor(model, effort string) string {
@@ -233,14 +358,29 @@ type OpenAIEvalAccountConfig struct {
 	ModelTraceSchedule  OpenAIEvalSchedule   `json:"modeltrace_schedule"`
 	StateProbeSchedule  OpenAIEvalSchedule   `json:"state_probe_schedule"`
 	BPSAuto             bool                 `json:"bps_auto"`
+	BPSMode             string               `json:"bps_mode,omitempty"`
 	BPSState            *OpenAIBPSModelState `json:"bps_state,omitempty"`
 	DirectOAuthEligible bool                 `json:"direct_oauth_eligible"`
 }
 
 type OpenAIEvalConfig struct {
-	EffectsEnabled bool                      `json:"effects_enabled"`
-	BPSAutoEnabled bool                      `json:"bps_auto_enabled"`
-	Accounts       []OpenAIEvalAccountConfig `json:"accounts"`
+	// Revision is optimistic-concurrency metadata.  Zero is accepted for
+	// legacy clients and is upgraded atomically by the repository.
+	Revision         int64                            `json:"revision,omitempty"`
+	EffectsEnabled   bool                             `json:"effects_enabled"`
+	BPSAutoEnabled   bool                             `json:"bps_auto_enabled"`
+	SchedulingPolicy string                           `json:"scheduling_policy,omitempty"`
+	Policies         []OpenAIEvalSchedulingPolicyRule `json:"policies,omitempty"`
+	Accounts         []OpenAIEvalAccountConfig        `json:"accounts"`
+}
+
+// OpenAIEvalSchedulingPolicyRule scopes a policy to the requested public
+// model and, optionally, reasoning effort.  An empty effort is the model
+// default.  More specific effort rules win at read time.
+type OpenAIEvalSchedulingPolicyRule struct {
+	RequestedModel  string `json:"requested_model"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	Policy          string `json:"policy"`
 }
 
 type OpenAIEvalProbe struct {

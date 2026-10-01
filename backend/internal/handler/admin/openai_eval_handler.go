@@ -1,6 +1,9 @@
 package admin
 
 import (
+	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -28,13 +31,37 @@ func (h *AccountHandler) UpdateOpenAIEvalConfig(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "OpenAI evaluation service is unavailable"})
 		return
 	}
-	var config service.OpenAIEvalConfig
-	if err := c.ShouldBindJSON(&config); err != nil {
+	payload, err := io.ReadAll(io.LimitReader(c.Request.Body, 4<<20))
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid evaluation config"})
 		return
 	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil || fields == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid evaluation config"})
+		return
+	}
+	var config service.OpenAIEvalConfig
+	if err := json.Unmarshal(payload, &config); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid evaluation config"})
+		return
+	}
+	// Whole-object saves from older admin clients predate revision, policy, and
+	// explicit BPS mode fields. Merge only omitted fields from the current
+	// projection so an old client cannot silently erase newer controls. Explicit
+	// false, empty arrays, or an empty BPS mode remain valid clear operations.
+	current, err := h.openAIEvalService.GetConfig(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load current evaluation config"})
+		return
+	}
+	mergeOpenAIEvalConfigOmittedFields(&config, current, fields)
 	actorID, _ := c.Request.Context().Value(ctxkey.UserID).(int64)
 	if err := h.openAIEvalService.SaveConfig(c.Request.Context(), &config, actorID); err != nil {
+		if errors.Is(err, service.ErrOpenAIEvalConfigRevisionConflict) {
+			c.JSON(http.StatusConflict, gin.H{"error": "evaluation config changed; reload before saving"})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -47,6 +74,80 @@ func (h *AccountHandler) UpdateOpenAIEvalConfig(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, saved)
+}
+
+func mergeOpenAIEvalConfigOmittedFields(incoming, current *service.OpenAIEvalConfig, fields map[string]json.RawMessage) {
+	if incoming == nil || current == nil {
+		return
+	}
+	if _, ok := fields["revision"]; !ok {
+		incoming.Revision = current.Revision
+	}
+	if _, ok := fields["effects_enabled"]; !ok {
+		incoming.EffectsEnabled = current.EffectsEnabled
+	}
+	if _, ok := fields["bps_auto_enabled"]; !ok {
+		incoming.BPSAutoEnabled = current.BPSAutoEnabled
+	}
+	if _, ok := fields["scheduling_policy"]; !ok {
+		incoming.SchedulingPolicy = current.SchedulingPolicy
+	}
+	if _, ok := fields["policies"]; !ok {
+		incoming.Policies = current.Policies
+	}
+	if raw, ok := fields["accounts"]; !ok {
+		incoming.Accounts = current.Accounts
+	} else {
+		var rawRoutes []map[string]json.RawMessage
+		if json.Unmarshal(raw, &rawRoutes) == nil {
+			byKey := make(map[string]service.OpenAIEvalAccountConfig, len(current.Accounts))
+			for _, route := range current.Accounts {
+				byKey[openAIEvalRouteConfigKey(route)] = route
+			}
+			for i := range incoming.Accounts {
+				if previous, exists := byKey[openAIEvalRouteConfigKey(incoming.Accounts[i])]; exists {
+					mergeOpenAIEvalRouteBPSFields(&incoming.Accounts[i], previous, rawRoutesField(rawRoutes, i))
+				}
+			}
+		}
+	}
+}
+
+func mergeOpenAIEvalRouteBPSFields(incoming *service.OpenAIEvalAccountConfig, previous service.OpenAIEvalAccountConfig, fields map[string]json.RawMessage) {
+	if incoming == nil {
+		return
+	}
+	if _, modePresent := fields["bps_mode"]; modePresent {
+		// An explicit mode, including an empty string, is a deliberate write.
+		// The service normalizer turns an empty mode into force_off.
+		return
+	}
+	if rawAuto, autoPresent := fields["bps_auto"]; autoPresent {
+		var legacyAuto bool
+		if err := json.Unmarshal(rawAuto, &legacyAuto); err == nil {
+			incoming.BPSAuto = legacyAuto
+			if legacyAuto {
+				incoming.BPSMode = service.OpenAIEvalBPSModeAuto
+			} else {
+				incoming.BPSMode = service.OpenAIEvalBPSModeForceOff
+			}
+		}
+		return
+	}
+	// Neither field was sent by the old client. Preserve both stored values.
+	incoming.BPSMode = previous.BPSMode
+	incoming.BPSAuto = previous.BPSAuto
+}
+
+func rawRoutesField(routes []map[string]json.RawMessage, index int) map[string]json.RawMessage {
+	if index < 0 || index >= len(routes) || routes[index] == nil {
+		return map[string]json.RawMessage{}
+	}
+	return routes[index]
+}
+
+func openAIEvalRouteConfigKey(route service.OpenAIEvalAccountConfig) string {
+	return strconv.FormatInt(route.AccountID, 10) + "\x00" + strings.ToLower(strings.TrimSpace(route.RequestedModel)) + "\x00" + strings.ToLower(strings.TrimSpace(route.ReasoningEffort))
 }
 
 func (h *AccountHandler) RunOpenAIEval(c *gin.Context) {

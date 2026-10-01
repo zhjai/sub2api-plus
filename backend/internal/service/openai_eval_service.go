@@ -51,9 +51,11 @@ func (s *OpenAIEvalService) Initialize(ctx context.Context) error {
 	}
 	if config == nil {
 		SetOpenAIEvalEffectsEnabled(false)
+		SetOpenAIEvalSchedulingPolicySnapshot(nil)
 		return nil
 	}
 	SetOpenAIEvalEffectsEnabled(config.EffectsEnabled)
+	SetOpenAIEvalSchedulingPolicySnapshot(config)
 	return nil
 }
 
@@ -71,6 +73,7 @@ func (s *OpenAIEvalService) GetConfig(ctx context.Context) (*OpenAIEvalConfig, e
 	config, err := s.repo.GetConfig(ctx)
 	if err == nil && config != nil {
 		SetOpenAIEvalEffectsEnabled(config.EffectsEnabled)
+		SetOpenAIEvalSchedulingPolicySnapshot(config)
 		if s.accounts != nil {
 			accountCache := make(map[int64]*Account)
 			for i := range config.Accounts {
@@ -103,11 +106,35 @@ func (s *OpenAIEvalService) SaveConfig(ctx context.Context, config *OpenAIEvalCo
 	if len(config.Accounts) > 5000 {
 		return errors.New("evaluation config exceeds the 5000 account-model-effort route limit")
 	}
+	if normalized, err := normalizeOpenAIEvalSchedulingPolicy(config.SchedulingPolicy); err != nil {
+		return err
+	} else {
+		config.SchedulingPolicy = normalized
+	}
+	for i := range config.Policies {
+		rule := &config.Policies[i]
+		if strings.TrimSpace(rule.RequestedModel) == "" || !isOpenAIEvalSupportedModel(rule.RequestedModel) {
+			return fmt.Errorf("invalid scheduling policy rule at index %d", i)
+		}
+		if rule.ReasoningEffort != "" && !isAllowedOpenAIEvalReasoningEffort(rule.ReasoningEffort) {
+			return fmt.Errorf("invalid scheduling policy effort %q", rule.ReasoningEffort)
+		}
+		if normalized, err := normalizeOpenAIEvalSchedulingPolicy(rule.Policy); err != nil || normalized == "" {
+			if err != nil {
+				return fmt.Errorf("policy rule %d: %w", i, err)
+			}
+			return fmt.Errorf("policy rule %d must specify a policy", i)
+		} else {
+			rule.Policy = normalized
+		}
+	}
 	seen := make(map[string]struct{}, len(config.Accounts))
 	for i := range config.Accounts {
 		item := &config.Accounts[i]
 		item.BPSState = nil              // runtime status is read-only, never persisted in route config
 		item.DirectOAuthEligible = false // derived from the current account, never persisted
+		item.BPSMode = normalizeOpenAIEvalBPSMode(item.BPSMode, item.BPSAuto)
+		item.BPSAuto = item.BPSMode == OpenAIEvalBPSModeAuto
 		if item.AccountID <= 0 || !isOpenAIEvalSupportedModel(item.RequestedModel) {
 			return fmt.Errorf("invalid evaluation route at index %d", i)
 		}
@@ -131,10 +158,10 @@ func (s *OpenAIEvalService) SaveConfig(ctx context.Context, config *OpenAIEvalCo
 		if err := validateOpenAIEvalSchedule(&item.StateProbeSchedule, OpenAIEvalTypeStateProbe); err != nil {
 			return fmt.Errorf("route %d State Probe schedule: %w", i, err)
 		}
-		if (item.StateProbeSchedule.Enabled || item.BPSAuto) && item.ReasoningEffort != "" {
+		if (item.StateProbeSchedule.Enabled || item.BPSMode != OpenAIEvalBPSModeForceOff) && item.ReasoningEffort != "" {
 			return fmt.Errorf("route %d State Probe and BPS auto policy require the default reasoning-effort route", i)
 		}
-		if item.StateProbeSchedule.Enabled || item.BPSAuto {
+		if item.StateProbeSchedule.Enabled || item.BPSMode != OpenAIEvalBPSModeForceOff {
 			if s.accounts == nil {
 				return errors.New("account lookup is unavailable for direct OAuth route validation")
 			}
@@ -148,6 +175,7 @@ func (s *OpenAIEvalService) SaveConfig(ctx context.Context, config *OpenAIEvalCo
 		return err
 	}
 	SetOpenAIEvalEffectsEnabled(config.EffectsEnabled)
+	SetOpenAIEvalSchedulingPolicySnapshot(config)
 	return nil
 }
 

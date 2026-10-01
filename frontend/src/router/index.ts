@@ -526,20 +526,43 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
-    path: '/admin/evaluations',
-    name: 'AdminOpenAIEvaluations',
-    component: () => import('@/views/admin/OpenAIEvaluationsView.vue'),
+    path: '/admin/model-integrity',
+    redirect: '/admin/model-integrity/tests'
+  },
+  {
+    path: '/admin/model-integrity/tests',
+    name: 'AdminModelIntegrityTests',
+    component: () => import('@/views/admin/modelIntegrity/ModelIntegrityTestsView.vue'),
     meta: {
       requiresAuth: true,
       requiresAdmin: true,
       title: '降智测试',
-      titleKey: 'admin.accounts.evaluations.title',
-      descriptionKey: 'admin.accounts.evaluations.description'
+      titleKey: 'admin.modelIntegrity.tests.title',
+      descriptionKey: 'admin.modelIntegrity.tests.description'
     }
   },
   {
+    path: '/admin/model-integrity/scheduling',
+    name: 'AdminModelIntegrityScheduling',
+    component: () => import('@/views/admin/modelIntegrity/ModelIntegritySchedulingView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: '降智调度',
+      titleKey: 'admin.modelIntegrity.scheduling.title',
+      descriptionKey: 'admin.modelIntegrity.scheduling.description'
+    }
+  },
+  // Legacy entry points for the former single evaluation page. The route name
+  // is kept so old router.push({ name }) calls and bookmarks keep working.
+  {
+    path: '/admin/evaluations',
+    name: 'AdminOpenAIEvaluations',
+    redirect: '/admin/model-integrity/tests'
+  },
+  {
     path: '/admin/accounts/evaluations',
-    redirect: '/admin/evaluations'
+    redirect: '/admin/model-integrity/tests'
   },
   {
     path: '/admin/plugins',

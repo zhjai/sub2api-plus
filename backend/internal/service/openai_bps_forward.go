@@ -28,7 +28,7 @@ var errOpenAIBPSNativeFallback = errors.New("BPS request requires native Respons
 
 func (s *OpenAIGatewayService) forwardOpenAIBPS(ctx context.Context, c *gin.Context, account *Account, body []byte, start time.Time) (*OpenAIForwardResult, error) {
 	requestedModel := strings.TrimSpace(gjson.GetBytes(body, "model").String())
-	if account == nil || !account.IsOpenAIBPSActiveForModel(requestedModel) || !s.isOpenAIBPSRouteEnabled(ctx, account.ID, requestedModel) {
+	if !s.isOpenAIBPSForwardEligible(ctx, account, requestedModel) {
 		return nil, errOpenAIBPSNativeFallback
 	}
 	if !gjson.GetBytes(body, "stream").Bool() || isOpenAIResponsesCompactPath(c) {

@@ -81,10 +81,6 @@ func (r *openAIEvalRepository) SaveConfig(ctx context.Context, cfg *service.Open
 	if cfg == nil {
 		return fmt.Errorf("OpenAI evaluation config is required")
 	}
-	payload, err := json.Marshal(cfg)
-	if err != nil {
-		return fmt.Errorf("encode OpenAI evaluation config: %w", err)
-	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin OpenAI evaluation config transaction: %w", err)
@@ -94,11 +90,60 @@ func (r *openAIEvalRepository) SaveConfig(ctx context.Context, cfg *service.Open
 	if err := tx.QueryRowContext(ctx, `SELECT config FROM openai_eval_configs WHERE id = 1 FOR UPDATE`).Scan(&before); err != nil {
 		return fmt.Errorf("lock OpenAI evaluation config: %w", err)
 	}
+	var previous service.OpenAIEvalConfig
+	if err := json.Unmarshal(before, &previous); err != nil {
+		return fmt.Errorf("decode previous OpenAI evaluation config: %w", err)
+	}
+	if cfg.Revision != 0 && cfg.Revision != previous.Revision {
+		return service.ErrOpenAIEvalConfigRevisionConflict
+	}
+	cfg.Revision = previous.Revision + 1
+	payload, err := json.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("encode OpenAI evaluation config: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE openai_eval_configs SET config = $1::jsonb, updated_by = $2, updated_at = NOW() WHERE id = 1`, payload, actorID); err != nil {
 		return fmt.Errorf("save OpenAI evaluation config: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE openai_eval_schedule_state SET enabled=FALSE, next_run_at=NULL, updated_at=NOW()`); err != nil {
-		return fmt.Errorf("disable removed OpenAI evaluation schedules: %w", err)
+	// Lock the existing schedule keys before reconciling the submitted route
+	// set.  A whole-table reset here used to clear next_run_at for every route,
+	// so merely editing an unrelated setting silently rescheduled all probes.
+	// Reconcile only keys that are actually absent from the submitted config;
+	// unchanged keys retain their scheduler-owned timestamps in the upsert below.
+	rows, err := tx.QueryContext(ctx, `
+		SELECT account_id, test_type, requested_model, reasoning_effort
+		FROM openai_eval_schedule_state
+		FOR UPDATE`)
+	if err != nil {
+		return fmt.Errorf("lock OpenAI evaluation schedule keys: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	keep := make(map[string]struct{}, len(cfg.Accounts)*4)
+	for _, route := range cfg.Accounts {
+		for _, testType := range []string{service.OpenAIEvalTypeCandy, service.OpenAIEvalTypeFingerprint, service.OpenAIEvalTypeModelTrace, service.OpenAIEvalTypeStateProbe} {
+			keep[openAIEvalScheduleKey(route.AccountID, testType, route.RequestedModel, route.ReasoningEffort)] = struct{}{}
+		}
+	}
+	for rows.Next() {
+		var accountID int64
+		var testType, model, effort string
+		if err := rows.Scan(&accountID, &testType, &model, &effort); err != nil {
+			return fmt.Errorf("scan OpenAI evaluation schedule keys: %w", err)
+		}
+		key := openAIEvalScheduleKey(accountID, testType, model, effort)
+		if _, exists := keep[key]; exists {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE openai_eval_schedule_state
+			SET enabled=FALSE, next_run_at=NULL, updated_at=NOW()
+			WHERE account_id=$1 AND test_type=$2 AND requested_model=$3 AND reasoning_effort=$4`,
+			accountID, testType, model, effort); err != nil {
+			return fmt.Errorf("disable removed OpenAI evaluation schedule: %w", err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate OpenAI evaluation schedule keys: %w", err)
 	}
 	for _, route := range cfg.Accounts {
 		for _, item := range []struct {
@@ -139,11 +184,11 @@ func (r *openAIEvalRepository) SaveConfig(ctx context.Context, cfg *service.Open
 	if err := json.Unmarshal(payload, &after); err != nil {
 		return fmt.Errorf("decode saved OpenAI evaluation config: %w", err)
 	}
-	var previous any
-	if err := json.Unmarshal(before, &previous); err != nil {
-		return fmt.Errorf("decode previous OpenAI evaluation config: %w", err)
+	var previousAudit any
+	if err := json.Unmarshal(before, &previousAudit); err != nil {
+		return fmt.Errorf("decode previous OpenAI evaluation config audit: %w", err)
 	}
-	audit, err := json.Marshal(map[string]any{"before": previous, "after": after})
+	audit, err := json.Marshal(map[string]any{"before": previousAudit, "after": after})
 	if err != nil {
 		return fmt.Errorf("encode OpenAI evaluation config audit: %w", err)
 	}
@@ -154,6 +199,10 @@ func (r *openAIEvalRepository) SaveConfig(ctx context.Context, cfg *service.Open
 		return fmt.Errorf("commit OpenAI evaluation config: %w", err)
 	}
 	return nil
+}
+
+func openAIEvalScheduleKey(accountID int64, testType, model, effort string) string {
+	return fmt.Sprintf("%d\x00%s\x00%s\x00%s", accountID, testType, strings.ToLower(strings.TrimSpace(model)), strings.ToLower(strings.TrimSpace(effort)))
 }
 
 func (r *openAIEvalRepository) CreateRun(ctx context.Context, run *service.OpenAIEvalRun) (int64, error) {

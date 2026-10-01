@@ -167,7 +167,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	if bpsFallback == "" && (!reqStream || isOpenAIResponsesCompactPath(c)) {
 		bpsFallback = "streaming_required"
 	}
-	if bpsFallback == "" && account.IsOpenAIBPSActiveForModel(originalModel) && s.isOpenAIBPSRouteEnabled(ctx, account.ID, originalModel) {
+	if bpsFallback == "" && s.isOpenAIBPSForwardEligible(ctx, account, originalModel) {
 		result, err := s.forwardOpenAIBPS(ctx, c, account, body, startTime)
 		if !errors.Is(err, errOpenAIBPSNativeFallback) {
 			return result, err
@@ -1494,6 +1494,7 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 			req.Header.Del("OpenAI-Beta")
 			req.Header.Del("originator")
 		} else {
+			stripOpenAILegacyResponsesBeta(req.Header)
 			req.Header.Set("originator", resolveOpenAIUpstreamOriginator(c, isCodexCLI))
 		}
 		apiKeyID := getAPIKeyIDFromContext(c)

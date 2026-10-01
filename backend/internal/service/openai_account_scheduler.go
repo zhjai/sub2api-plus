@@ -45,7 +45,7 @@ const (
 
 type cachedOpenAIAdvancedSchedulerSetting struct {
 	lowUpstreamRatePriorityEnabled bool
-	oauthSchedulingRateMultiplier  float64
+	oauthSchedulingRateMultiplier  *float64
 	enabled                        bool
 	stickyWeightedEnabled          bool
 	subscriptionPriorityEnabled    bool
@@ -56,7 +56,7 @@ type cachedOpenAIAdvancedSchedulerSetting struct {
 
 type openAIAdvancedSchedulerRuntimeSettings struct {
 	lowUpstreamRatePriorityEnabled bool
-	oauthSchedulingRateMultiplier  float64
+	oauthSchedulingRateMultiplier  *float64
 	enabled                        bool
 	stickyWeightedEnabled          bool
 	subscriptionPriorityEnabled    bool
@@ -92,6 +92,9 @@ type OpenAIAccountScheduleRequest struct {
 	// client-requested model/effort route. It is intentionally not the mapped
 	// upstream effort, which may differ after group policy rewriting.
 	RequestedReasoningEffort string
+	// SchedulingPolicy is optional; when empty the active Model Integrity
+	// configuration is resolved by requested model and effort.
+	SchedulingPolicy string
 	// RouteMigrationActive enables deterministic rate-ladder selection after a
 	// session escapes an account. Candidates at the failed account's rate are
 	// tried first, followed by the next available higher rate.
@@ -124,6 +127,7 @@ type OpenAIAccountScheduleDecision struct {
 	SelectedRateMultiplier      float64 `json:"selected_rate_multiplier"`
 	RouteMigrationActive        bool
 	MigrationFromRateMultiplier float64 `json:"migration_from_rate_multiplier"`
+	SchedulingPolicy            string  `json:"scheduling_policy,omitempty"`
 	Candidates                  []OpenAIAccountScheduleCandidate
 	CandidatesTruncated         bool
 }
@@ -202,6 +206,7 @@ type OpenAIAccountScheduleTrace struct {
 	ReasonText                  string                           `json:"reason_text"`
 	RequestedModel              string                           `json:"requested_model,omitempty"`
 	RequestedReasoningEffort    string                           `json:"requested_reasoning_effort,omitempty"`
+	SchedulingPolicy            string                           `json:"scheduling_policy,omitempty"`
 	StickyPreviousHit           bool                             `json:"sticky_previous_hit"`
 	StickySessionHit            bool                             `json:"sticky_session_hit"`
 	CandidateCount              int                              `json:"candidate_count"`
@@ -790,6 +795,7 @@ func (s *defaultOpenAIAccountScheduler) Select(
 				ReasonText:                  decision.ReasonText,
 				RequestedModel:              openAIClientModelForSchedule(req),
 				RequestedReasoningEffort:    strings.TrimSpace(req.RequestedReasoningEffort),
+				SchedulingPolicy:            strings.TrimSpace(req.SchedulingPolicy),
 				StickyPreviousHit:           decision.StickyPreviousHit,
 				StickySessionHit:            decision.StickySessionHit,
 				CandidateCount:              decision.CandidateCount,
@@ -1392,9 +1398,33 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAIAccountLoadPlan(
 	plan.loadSkew = calcLoadSkewByMoments(loadRateSum, loadRateSumSquares, len(candidates))
 
 	weights := s.service.openAIWSSchedulerWeightsForRequest(ctx)
+	policy := openAIEffectiveSchedulingPolicy(req)
+	switch policy {
+	case OpenAIEvalSchedulingPolicyCostFirst:
+		if weights.UpstreamCost < 2.0 {
+			weights.UpstreamCost = 2.0
+		}
+		weights.ErrorRate *= 0.65
+		weights.TTFT *= 0.65
+	case OpenAIEvalSchedulingPolicyStabilityFirst:
+		if weights.ErrorRate < 2.5 {
+			weights.ErrorRate = 2.5
+		}
+		if weights.TTFT < 1.5 {
+			weights.TTFT = 1.5
+		}
+	case OpenAIEvalSchedulingPolicyAvoidDegradation:
+		if weights.ErrorRate < 2.5 {
+			weights.ErrorRate = 2.5
+		}
+		if weights.TTFT < 1.25 {
+			weights.TTFT = 1.25
+		}
+		weights.UpstreamCost *= 0.25
+	}
 	now := time.Now()
 	upstreamCostFactors := map[int64]float64(nil)
-	if req.UseUpstreamTokenCost && weights.UpstreamCost > 0 {
+	if (req.UseUpstreamTokenCost || policy == OpenAIEvalSchedulingPolicyCostFirst) && weights.UpstreamCost > 0 {
 		accounts := make([]*Account, 0, len(candidates))
 		for _, candidate := range candidates {
 			accounts = append(accounts, candidate.account)
@@ -1496,6 +1526,20 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAIAccountLoadPlan(
 
 	plan.selectionOrder = s.buildOpenAISelectionOrder(req, plan)
 	return plan
+}
+
+// openAIEffectiveSchedulingPolicy is the final policy gate at the scheduler
+// boundary.  Callers may construct a request directly (without going through
+// selectAccountWithScheduler), so the global evaluation-effects switch must
+// be enforced here as well as in the configuration lookup helper.
+func openAIEffectiveSchedulingPolicy(req OpenAIAccountScheduleRequest) string {
+	if !OpenAIEvalEffectsEnabled() {
+		return OpenAIEvalSchedulingPolicyLegacy
+	}
+	if policy := strings.ToLower(strings.TrimSpace(req.SchedulingPolicy)); policy != "" {
+		return policy
+	}
+	return OpenAIEvalSchedulingPolicyForRequest(openAIClientModelForSchedule(req), req.RequestedReasoningEffort)
 }
 
 func buildOpenAIAccountScheduleCandidates(
@@ -2422,6 +2466,11 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 	if account == nil {
 		return false, "account_nil"
 	}
+	if source, ok := CompositeRouteSourceFromContext(ctx); ok && source == CompositeRouteSourceAccount {
+		if publicModel, modelOK := RequestedPublicModelFromContext(ctx); modelOK && !explicitModelMappingClaims(*account, publicModel) {
+			return false, "account_model_not_owned"
+		}
+	}
 	if s != nil && s.service != nil && s.service.isOpenAIExecCapabilityBlocked(ctx, account, req.RequestedModel) {
 		return false, "exec_capability_cooldown"
 	}
@@ -2570,7 +2619,7 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 		}
 
 		lowUpstreamRatePriorityEnabled := false
-		oauthSchedulingRateMultiplier := defaultOpenAIOAuthSchedulingRateMultiplier
+		oauthSchedulingRateMultiplier := parseOpenAIOAuthSchedulingRateMultiplier(nil)
 		enabled := false
 		stickyWeightedEnabled := false
 		subscriptionPriorityEnabled := false
@@ -2582,9 +2631,7 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 
 			if values, err := repo.GetMultiple(dbCtx, openAIAdvancedSchedulerRuntimeSettingKeys()); err == nil {
 				lowUpstreamRatePriorityEnabled = strings.EqualFold(strings.TrimSpace(values[SettingKeyOpenAILowUpstreamRatePriorityEnabled]), "true")
-				if parsed := parseOpenAIOAuthSchedulingRateMultiplier(values); parsed != nil {
-					oauthSchedulingRateMultiplier = *parsed
-				}
+				oauthSchedulingRateMultiplier = parseOpenAIOAuthSchedulingRateMultiplier(values)
 				enabled = strings.EqualFold(strings.TrimSpace(values[openAIAdvancedSchedulerSettingKey]), "true")
 				stickyWeightedEnabled = strings.EqualFold(strings.TrimSpace(values[SettingKeyOpenAIAdvancedSchedulerStickyWeightedEnabled]), "true")
 				subscriptionPriorityEnabled = strings.EqualFold(strings.TrimSpace(values[SettingKeyOpenAIAdvancedSchedulerSubscriptionPriorityEnabled]), "true")
@@ -2601,9 +2648,7 @@ func (s *OpenAIGatewayService) openAIAdvancedSchedulerRuntimeSettings(ctx contex
 					}
 				}
 				lowUpstreamRatePriorityEnabled = strings.EqualFold(strings.TrimSpace(fallbackValues[SettingKeyOpenAILowUpstreamRatePriorityEnabled]), "true")
-				if parsed := parseOpenAIOAuthSchedulingRateMultiplier(fallbackValues); parsed != nil {
-					oauthSchedulingRateMultiplier = *parsed
-				}
+				oauthSchedulingRateMultiplier = parseOpenAIOAuthSchedulingRateMultiplier(fallbackValues)
 				enabled = strings.EqualFold(strings.TrimSpace(fallbackValues[openAIAdvancedSchedulerSettingKey]), "true")
 				stickyWeightedEnabled = strings.EqualFold(strings.TrimSpace(fallbackValues[SettingKeyOpenAIAdvancedSchedulerStickyWeightedEnabled]), "true")
 				subscriptionPriorityEnabled = strings.EqualFold(strings.TrimSpace(fallbackValues[SettingKeyOpenAIAdvancedSchedulerSubscriptionPriorityEnabled]), "true")
@@ -2646,7 +2691,7 @@ func (s *OpenAIGatewayService) isOpenAILowUpstreamRatePriorityEnabled(ctx contex
 	return !settings.enabled && settings.lowUpstreamRatePriorityEnabled
 }
 
-func (s *OpenAIGatewayService) openAIOAuthSchedulingRateMultiplier(ctx context.Context) float64 {
+func (s *OpenAIGatewayService) openAIOAuthSchedulingRateMultiplier(ctx context.Context) *float64 {
 	return s.openAIAdvancedSchedulerRuntimeSettings(ctx).oauthSchedulingRateMultiplier
 }
 
@@ -2913,7 +2958,24 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 		ctx = s.withOpenAIProfitControlGate(ctx, groupID)
 	}
 	platform = NormalizeOpenAICompatiblePlatform(platform)
+	clientRequestedModel := OpenAIClientRequestedModelFromContext(ctx)
+	if strings.TrimSpace(clientRequestedModel) == "" {
+		clientRequestedModel = requestedModel
+	}
+	requestedReasoningEffort := ""
+	if effort := RequestedReasoningEffortFromContext(ctx); effort != nil {
+		requestedReasoningEffort = strings.TrimSpace(*effort)
+	}
+	if migration, ok := OpenAIRouteMigrationFromContext(ctx); ok {
+		if strings.TrimSpace(migration.RequestedModel) != "" {
+			clientRequestedModel = strings.TrimSpace(migration.RequestedModel)
+		}
+		if strings.TrimSpace(migration.RequestedEffort) != "" {
+			requestedReasoningEffort = strings.TrimSpace(migration.RequestedEffort)
+		}
+	}
 	decision := OpenAIAccountScheduleDecision{}
+	decision.SchedulingPolicy = OpenAIEvalSchedulingPolicyForRequest(clientRequestedModel, requestedReasoningEffort)
 	preserveGuardianParentBinding := preserveOpenAIGuardianParentBinding(ctx, sessionHash)
 	guardianParentAccountID := int64(0)
 	if strings.TrimSpace(previousResponseID) == "" {
@@ -2931,24 +2993,84 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	}
 	if scheduler == nil {
 		decision.Layer = openAIAccountScheduleLayerLoadBalance
+		recordLegacySelection := func(selection *AccountSelectionResult) {
+			if selection == nil || selection.Account == nil {
+				return
+			}
+			decision.SelectedAccountID = selection.Account.ID
+			decision.SelectedAccountType = selection.Account.Type
+			if selection.stickySessionHit {
+				decision.Layer = openAIAccountScheduleLayerSessionSticky
+				decision.StickySessionHit = true
+				addOpenAISelectedScheduleCandidate(&decision, selection.Account.ID, "session_affinity")
+			}
+		}
+		// Keep the legacy load-aware selector as the general fallback, but retain
+		// the two protocol-affinity guarantees that callers already rely on:
+		// a previous_response_id owner must be tried first, and a session binding
+		// must be reflected in the returned decision.  The old path previously
+		// selected the sticky account correctly but lost the decision label, while
+		// previous_response_id was skipped altogether when the advanced scheduler
+		// setting was disabled.
+		if s.checkChannelPricingRestriction(ctx, groupID, requestedModel) {
+			slog.Warn("channel pricing restriction blocked request",
+				"group_id", derefGroupID(groupID),
+				"model", requestedModel)
+			return nil, decision, fmt.Errorf("%w supporting model: %s (channel pricing restriction)", ErrNoAvailableAccounts, requestedModel)
+		}
+		if previousResponseCanMove && strings.TrimSpace(previousResponseID) != "" && platform == PlatformOpenAI {
+			previousSelection, previousErr := s.selectAccountByPreviousResponseIDForCapability(
+				ctx, groupID, previousResponseID, requestedModel, excludedIDs, requiredCapability, requireCompact,
+			)
+			if previousErr != nil {
+				return nil, decision, previousErr
+			}
+			if previousSelection != nil && previousSelection.Account != nil {
+				owner := previousSelection.Account
+				upstreamRestricted := false
+				if groupID != nil && s.needsUpstreamChannelRestrictionCheck(ctx, groupID) {
+					upstreamRestricted = s.isUpstreamModelRestrictedByChannel(ctx, *groupID, owner, requestedModel, requireCompact)
+				}
+				if !s.isOpenAIAccountTransportCompatible(owner, requiredTransport) || upstreamRestricted || s.isOpenAIProxyStreamQuarantined(ctx, owner) {
+					if previousSelection.ReleaseFunc != nil {
+						previousSelection.ReleaseFunc()
+					}
+					previousSelection = nil
+				}
+			}
+			if previousSelection != nil && previousSelection.Account != nil {
+				decision.Layer = openAIAccountScheduleLayerPreviousResponse
+				decision.StickyPreviousHit = true
+				decision.SelectedAccountID = previousSelection.Account.ID
+				decision.SelectedAccountType = previousSelection.Account.Type
+				addOpenAISelectedScheduleCandidate(&decision, previousSelection.Account.ID, "previous_response_owner")
+				if sessionHash != "" {
+					_ = s.bindOpenAIStickySessionDuringSelection(ctx, groupID, sessionHash, previousSelection.Account.ID)
+				}
+				return previousSelection, decision, nil
+			}
+		}
 		if guardianParentAccountID > 0 {
 			if s.checkChannelPricingRestriction(ctx, groupID, requestedModel) {
 				return nil, decision, fmt.Errorf("%w supporting model: %s (channel pricing restriction)", ErrNoAvailableAccounts, requestedModel)
 			}
 			fallbackScheduler := &defaultOpenAIAccountScheduler{service: s, stats: newOpenAIAccountRuntimeStats()}
 			selection, _, err := fallbackScheduler.selectBySessionHash(ctx, OpenAIAccountScheduleRequest{
-				GroupID:                 groupID,
-				Platform:                platform,
-				SessionHash:             sessionHash,
-				StickyAccountID:         guardianParentAccountID,
-				PreserveStickyBinding:   true,
-				RequestedModel:          requestedModel,
-				RequiredTransport:       requiredTransport,
-				RequiredCapability:      requiredCapability,
-				RequiredImageCapability: requiredImageCapability,
-				RequireCompact:          requireCompact,
-				ExcludedIDs:             excludedIDs,
-				RequirePrivacySet:       s.openAIGroupRequiresPrivacySet(ctx, groupID),
+				GroupID:                  groupID,
+				Platform:                 platform,
+				SessionHash:              sessionHash,
+				StickyAccountID:          guardianParentAccountID,
+				PreserveStickyBinding:    true,
+				RequestedModel:           requestedModel,
+				ClientRequestedModel:     clientRequestedModel,
+				RequestedReasoningEffort: requestedReasoningEffort,
+				SchedulingPolicy:         decision.SchedulingPolicy,
+				RequiredTransport:        requiredTransport,
+				RequiredCapability:       requiredCapability,
+				RequiredImageCapability:  requiredImageCapability,
+				RequireCompact:           requireCompact,
+				ExcludedIDs:              excludedIDs,
+				RequirePrivacySet:        s.openAIGroupRequiresPrivacySet(ctx, groupID),
 			})
 			if err != nil {
 				return nil, decision, err
@@ -2977,6 +3099,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 				}
 				if accountSupportsOpenAICapabilities(selection.Account, requiredCapability, requiredImageCapability) &&
 					!s.isOpenAIExecCapabilityBlocked(ctx, selection.Account, requestedModel) {
+					recordLegacySelection(selection)
 					return selection, decision, nil
 				}
 				if selection.ReleaseFunc != nil {
@@ -3003,6 +3126,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 			}
 			if s.isOpenAIAccountTransportCompatible(selection.Account, requiredTransport) &&
 				accountSupportsOpenAICapabilities(selection.Account, requiredCapability, requiredImageCapability) {
+				recordLegacySelection(selection)
 				return selection, decision, nil
 			}
 			if selection.ReleaseFunc != nil {
@@ -3039,25 +3163,28 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	}
 
 	return scheduler.Select(ctx, OpenAIAccountScheduleRequest{
-		GroupID:                 groupID,
-		Platform:                platform,
-		SessionHash:             sessionHash,
-		StickyAccountID:         stickyAccountID,
-		GuardianParentAccountID: guardianParentAccountID,
-		StickyPreviousAccountID: stickyPreviousAccountID,
-		StickyWeighted:          stickyWeighted,
-		SubscriptionPriority:    subscriptionPriority,
-		PreserveStickyBinding:   preserveGuardianParentBinding,
-		RequirePrivacySet:       s.openAIGroupRequiresPrivacySet(ctx, groupID),
-		PreviousResponseID:      previousResponseID,
-		PreviousResponseCanMove: previousResponseCanMove,
-		UseUpstreamTokenCost:    useUpstreamTokenCost,
-		RequestedModel:          requestedModel,
-		RequiredTransport:       requiredTransport,
-		RequiredCapability:      requiredCapability,
-		RequiredImageCapability: requiredImageCapability,
-		RequireCompact:          requireCompact,
-		ExcludedIDs:             excludedIDs,
+		GroupID:                  groupID,
+		Platform:                 platform,
+		SessionHash:              sessionHash,
+		StickyAccountID:          stickyAccountID,
+		GuardianParentAccountID:  guardianParentAccountID,
+		StickyPreviousAccountID:  stickyPreviousAccountID,
+		StickyWeighted:           stickyWeighted,
+		SubscriptionPriority:     subscriptionPriority,
+		PreserveStickyBinding:    preserveGuardianParentBinding,
+		RequirePrivacySet:        s.openAIGroupRequiresPrivacySet(ctx, groupID),
+		PreviousResponseID:       previousResponseID,
+		PreviousResponseCanMove:  previousResponseCanMove,
+		UseUpstreamTokenCost:     useUpstreamTokenCost,
+		RequestedModel:           requestedModel,
+		ClientRequestedModel:     clientRequestedModel,
+		RequestedReasoningEffort: requestedReasoningEffort,
+		SchedulingPolicy:         decision.SchedulingPolicy,
+		RequiredTransport:        requiredTransport,
+		RequiredCapability:       requiredCapability,
+		RequiredImageCapability:  requiredImageCapability,
+		RequireCompact:           requireCompact,
+		ExcludedIDs:              excludedIDs,
 	})
 }
 
@@ -3396,19 +3523,7 @@ func BuildOpenAIAccountSchedulerScoreSnapshot(
 	loadMap map[int64]*AccountLoadInfo,
 ) map[int64]OpenAIAccountSchedulerScoreSnapshot {
 	gateway := &OpenAIGatewayService{}
-	return buildOpenAIAccountSchedulerScoreSnapshot(accounts, loadMap, gateway.openAIWSSchedulerWeights(), false, defaultOpenAIOAuthSchedulingRateMultiplier)
-}
-
-func normalizeSchedulerRateMultiplier(value any) float64 {
-	switch v := value.(type) {
-	case float64:
-		return v
-	case *float64:
-		if v != nil {
-			return *v
-		}
-	}
-	return defaultOpenAIOAuthSchedulingRateMultiplier
+	return buildOpenAIAccountSchedulerScoreSnapshot(accounts, loadMap, gateway.openAIWSSchedulerWeights(), false, parseOpenAIOAuthSchedulingRateMultiplier(nil))
 }
 
 func buildOpenAIAccountSchedulerScoreSnapshot(
@@ -3416,9 +3531,8 @@ func buildOpenAIAccountSchedulerScoreSnapshot(
 	loadMap map[int64]*AccountLoadInfo,
 	weights GatewayOpenAIWSSchedulerScoreWeightsView,
 	stickyWeightedEnabled bool,
-	oauthSchedulingRateMultiplier any,
+	oauthSchedulingRateMultiplier *float64,
 ) map[int64]OpenAIAccountSchedulerScoreSnapshot {
-	oauthSchedulingRateMultiplier = normalizeSchedulerRateMultiplier(oauthSchedulingRateMultiplier)
 	if len(accounts) == 0 {
 		return nil
 	}
@@ -3540,8 +3654,7 @@ func buildOpenAIAccountSchedulerScoreSnapshot(
 	return result
 }
 
-func openAIUpstreamCostFactors(accounts []*Account, now time.Time, oauthSchedulingRateMultiplier any) map[int64]float64 {
-	oauthSchedulingRateMultiplier = normalizeSchedulerRateMultiplier(oauthSchedulingRateMultiplier)
+func openAIUpstreamCostFactors(accounts []*Account, now time.Time, oauthSchedulingRateMultiplier *float64) map[int64]float64 {
 	type rateSample struct {
 		accountID int64
 		rate      float64
@@ -3608,8 +3721,7 @@ type openAILegacyUpstreamRateOrder struct {
 	rates   map[int64]float64
 }
 
-func newOpenAILegacyUpstreamRateOrder(accounts []*Account, now time.Time, oauthSchedulingRateMultiplier any) openAILegacyUpstreamRateOrder {
-	oauthSchedulingRateMultiplier = normalizeSchedulerRateMultiplier(oauthSchedulingRateMultiplier)
+func newOpenAILegacyUpstreamRateOrder(accounts []*Account, now time.Time, oauthSchedulingRateMultiplier *float64) openAILegacyUpstreamRateOrder {
 	rates := make(map[int64]float64, len(accounts))
 	var first float64
 	distinct := false
@@ -3637,12 +3749,19 @@ func newOpenAILegacyUpstreamRateOrder(accounts []*Account, now time.Time, oauthS
 	return openAILegacyUpstreamRateOrder{enabled: len(rates) >= 2 && distinct, rates: rates}
 }
 
-func openAISchedulingRate(account *Account, now time.Time, oauthSchedulingRateMultiplier any) (float64, bool) {
-	multiplier := normalizeSchedulerRateMultiplier(oauthSchedulingRateMultiplier)
-	if account != nil && account.IsOpenAIOAuthLike() {
-		return multiplier, true
+func openAISchedulingRate(account *Account, now time.Time, oauthSchedulingRateMultiplier *float64) (float64, bool) {
+	if account == nil || (!account.IsOpenAIApiKey() && !account.IsOpenAIOAuthLike()) {
+		return 0, false
 	}
-	return openAIFreshUpstreamBillingRate(account, now)
+	if account.IsOpenAIOAuthLike() {
+		if rate := oauthSchedulingRateMultiplier; rate != nil && *rate >= 0 && !math.IsNaN(*rate) && !math.IsInf(*rate, 0) {
+			return *rate, true
+		}
+	} else if rate, ok := openAIFreshUpstreamBillingRate(account, now); ok {
+		return rate, true
+	}
+	rate := account.BillingRateMultiplier()
+	return rate, !math.IsNaN(rate) && !math.IsInf(rate, 0)
 }
 
 // compare returns -1 when a should be selected before b, 1 when b should be

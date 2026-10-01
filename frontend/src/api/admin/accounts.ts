@@ -41,6 +41,7 @@ export interface SchedulerDecisionTrace {
   reason_text: string
   requested_model?: string
   requested_reasoning_effort?: string
+  scheduling_policy?: OpenAIEvalSchedulingPolicy
   sticky_previous_hit: boolean
   sticky_session_hit: boolean
   candidate_count: number
@@ -73,6 +74,7 @@ export interface SchedulerDecisionCandidate {
   waiting_count?: number
   error_rate?: number
   ttft_ms?: number
+  evaluation_penalty?: number
   exclusion_reason?: string
   decision_reason?: string
 }
@@ -95,13 +97,31 @@ export interface OpenAIEvalRouteConfig {
   modeltrace_schedule: OpenAIEvalSchedule
   state_probe_schedule: OpenAIEvalSchedule
   bps_auto: boolean
+  /** Explicit BPS mode; older servers only return bps_auto. */
+  bps_mode?: OpenAIEvalBPSMode
   bps_state?: OpenAIBPSModelState | null
   direct_oauth_eligible?: boolean
 }
 
+/** '' keeps the historical scheduler behaviour. */
+export type OpenAIEvalSchedulingPolicy = '' | 'cost_first' | 'stability_first' | 'avoid_degradation'
+
+export type OpenAIEvalBPSMode = 'auto' | 'force_on' | 'force_off'
+
+export interface OpenAIEvalSchedulingPolicyRule {
+  requested_model: string
+  /** Empty means every reasoning effort of the model. */
+  reasoning_effort?: string
+  policy: Exclude<OpenAIEvalSchedulingPolicy, ''>
+}
+
 export interface OpenAIEvalConfig {
+  /** Optimistic-concurrency token; the server rejects stale saves with 409. */
+  revision?: number
   effects_enabled: boolean
   bps_auto_enabled: boolean
+  scheduling_policy?: OpenAIEvalSchedulingPolicy
+  policies?: OpenAIEvalSchedulingPolicyRule[]
   accounts: OpenAIEvalRouteConfig[]
 }
 
@@ -232,6 +252,11 @@ export async function listOpenAIEvalRuns(params?: {
 
 export async function listOpenAIEvalAudit(): Promise<{ items: Array<{ id: number; actor_id: number; action: string; payload: Record<string, unknown>; created_at: string }> }> {
   const { data } = await apiClient.get<{ items: Array<{ id: number; actor_id: number; action: string; payload: Record<string, unknown>; created_at: string }> }>('/admin/accounts/evaluations/audit')
+  return data
+}
+
+export async function resetOpenAIBPSState(request: { account_id: number; requested_model: string }): Promise<{ state: OpenAIBPSModelState }> {
+  const { data } = await apiClient.post<{ state: OpenAIBPSModelState }>('/admin/accounts/evaluations/bps/reset', request)
   return data
 }
 
@@ -1415,6 +1440,7 @@ export const accountsAPI = {
   ,runOpenAIEval
   ,listOpenAIEvalRuns
   ,listOpenAIEvalAudit
+  ,resetOpenAIBPSState
 }
 
 export default accountsAPI
