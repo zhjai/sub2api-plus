@@ -157,6 +157,9 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 				zap.Error(err),
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
 			)
+			if accountRPMSelectionExhausted(c, failedAccountIDs) {
+				return
+			}
 			if len(failedAccountIDs) == 0 {
 				cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, reqModel, reqModel, service.PlatformOpenAI)
 				if !cls.ModelNotFound {
@@ -212,6 +215,12 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 			}()
 			return h.gatewayService.ForwardEmbeddings(c.Request.Context(), c, account, forwardBody, "")
 		}()
+		if handled, retry := handleAccountRPMError(c, err, failedAccountIDs, true, c.Writer.Size() != writerSizeBeforeForward); handled {
+			if retry {
+				continue
+			}
+			return
+		}
 
 		forwardDurationMs := time.Since(forwardStart).Milliseconds()
 		upstreamLatencyMs, _ := getContextInt64(c, service.OpsUpstreamLatencyMsKey)

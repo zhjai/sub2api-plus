@@ -71,6 +71,7 @@ func TestPassthroughIngressFollowUpCallsBeforeTurnAfterBeforeRequest(t *testing.
 	var hooksMu sync.Mutex
 	var callbacks []string
 	afterTurnCalls := 0
+	settled := make(chan struct{}, 2)
 	hooks := &OpenAIWSIngressHooks{
 		BeforeRequest: func(int, []byte, string) error {
 			hooksMu.Lock()
@@ -88,6 +89,7 @@ func TestPassthroughIngressFollowUpCallsBeforeTurnAfterBeforeRequest(t *testing.
 			hooksMu.Lock()
 			afterTurnCalls++
 			hooksMu.Unlock()
+			settled <- struct{}{}
 		},
 	}
 
@@ -117,6 +119,15 @@ func TestPassthroughIngressFollowUpCallsBeforeTurnAfterBeforeRequest(t *testing.
 	require.NoError(t, err)
 	require.Equal(t, "response.completed", gjson.GetBytes(event, "type").String())
 
+	// R12 settles only after the terminal frame is delivered. Client Read may
+	// return before the server-side delivery callback runs; synchronize on it.
+	for range 2 {
+		select {
+		case <-settled:
+		case <-time.After(time.Second):
+			t.Fatal("terminal delivery did not settle the turn")
+		}
+	}
 	hooksMu.Lock()
 	gotCallbacks := append([]string(nil), callbacks...)
 	gotAfter := afterTurnCalls

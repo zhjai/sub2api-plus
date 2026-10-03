@@ -3,6 +3,7 @@ package service
 // ModelTrace scoring, ported from xqy2006/ModelTrace (MIT).
 // See data/modeltrace/README.md for the pinned source and license.
 import (
+	"crypto/sha256"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -13,7 +14,7 @@ import (
 	"unicode"
 )
 
-//go:embed data/modeltrace/unified_bank.json
+//go:embed data/modeltrace/unified_bank_97623969.json
 var modelTraceBankJSON []byte
 
 //go:embed data/modeltrace/LICENSE
@@ -48,6 +49,10 @@ type traceBank struct {
 }
 
 var modelTraceBank = mustDecodeModelTraceJSON[traceBank](modelTraceBankJSON)
+
+func OpenAIEvalModelTraceBankInfo() (revision string, candidates int) {
+	return fmt.Sprintf("sha256:%x", sha256.Sum256(modelTraceBankJSON)), len(modelTraceBank.Models)
+}
 
 func mustDecodeModelTraceJSON[T any](data []byte) T {
 	var value T

@@ -262,6 +262,9 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 			service.PlatformGrok,
 		)
 		if selectErr != nil || selection == nil || selection.Account == nil {
+			if accountRPMSelectionExhausted(c, failed) {
+				return
+			}
 			if last != nil {
 				h.handleFailoverExhausted(c, last, false)
 			} else {
@@ -285,10 +288,18 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 			failed[account.ID] = struct{}{}
 			continue
 		}
+		writerSizeBeforeForward := c.Writer.Size()
 		result, forwardErr := func() (*service.OpenAIForwardResult, error) {
 			defer release()
 			return h.gatewayService.ForwardGrokVoice(c.Request.Context(), c, account, endpoint, body, contentType)
 		}()
+		if handled, retry := handleAccountRPMError(c, forwardErr, failed, true, c.Writer.Size() != writerSizeBeforeForward); handled {
+			if retry {
+				attempts--
+				continue
+			}
+			return
+		}
 		if forwardErr == nil {
 			h.recordGrokVoiceUsage(c, apiKey, account, subscription, endpoint, body, result)
 			return

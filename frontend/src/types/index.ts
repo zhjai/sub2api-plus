@@ -1290,6 +1290,10 @@ export interface Account {
   rpm_sticky_buffer?: number | null
   user_msg_queue_mode?: string | null  // "serialize" | "throttle" | null
 
+  // 账号级 RPM 上限（extra.rpm_limit 的规范化值，0 = 不限制），跨分组/模型共享
+  rpm_limit?: number
+  rpm_capacity?: AccountRPMCapacity | null
+
   // TLS指纹伪装（仅 Anthropic OAuth/SetupToken 账号有效）
   enable_tls_fingerprint?: boolean | null
   tls_fingerprint_profile_id?: number | null
@@ -1343,6 +1347,14 @@ export interface Account {
 // The admin account list may return this compact shape when lite=1. Detail
 // operations still use Account from /admin/accounts/:id.
 export type AccountListItem = Omit<Account, 'groups'>
+
+// 账号级 RPM 当前分钟用量；status 由后端给出（如 unavailable），数值缺失表示未知而非 0。
+export interface AccountRPMCapacity {
+  status: string
+  used?: number | null
+  remaining?: number | null
+  reset_at?: string | null
+}
 
 export interface AccountSchedulerGroupScore {
   group_id?: number | null

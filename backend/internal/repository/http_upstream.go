@@ -218,10 +218,13 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 
 	// 执行请求
 	client := s.httpClientForUpstreamRequest(entry.client, req)
+	client = httpClientWithAccountRPMAdmission(client)
 	client = httpClientWithGrokAccessDeniedFallback(client)
 	resp, err := doUpstreamRequest(client, req)
 	if err != nil {
-		s.recordOpenAIHTTP2Failure(profile, entry.protocolMode, entry.proxyKey, err)
+		if !service.IsAccountRPMError(err) {
+			s.recordOpenAIHTTP2Failure(profile, entry.protocolMode, entry.proxyKey, err)
+		}
 		// 请求失败，立即减少计数
 		atomic.AddInt64(&entry.inFlight, -1)
 		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
@@ -279,6 +282,7 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 	}
 
 	client := s.httpClientForUpstreamRequest(entry.client, req)
+	client = httpClientWithAccountRPMAdmission(client)
 	client = httpClientWithGrokAccessDeniedFallback(client)
 	resp, err := doUpstreamRequest(client, req)
 	if err != nil {
@@ -354,7 +358,7 @@ func (s *httpUpstreamService) httpClientForUpstreamRequest(client *http.Client, 
 	}
 	ctx := req.Context()
 	switch {
-	case service.HTTPUpstreamRedirectsDisabled(ctx):
+	case service.HTTPUpstreamRedirectsDisabled(ctx), service.HTTPUpstreamSingleSendRequired(ctx):
 		clone := *client
 		clone.CheckRedirect = func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -394,6 +398,9 @@ func httpClientWithGrokAccessDeniedFallback(client *http.Client) *http.Client {
 
 func (t *grokAccessDeniedFallbackTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp, err := t.base.RoundTrip(req)
+	if service.HTTPUpstreamSingleSendRequired(req.Context()) {
+		return resp, err
+	}
 	if err != nil || !isGrokCLIAccessDeniedFallbackCandidate(req, resp) {
 		return resp, err
 	}
@@ -408,6 +415,10 @@ func (t *grokAccessDeniedFallbackTransport) RoundTrip(req *http.Request) (*http.
 		return resp, nil
 	}
 	fallbackResp, fallbackErr := t.base.RoundTrip(fallbackReq)
+	if service.IsAccountRPMError(fallbackErr) {
+		_ = resp.Body.Close()
+		return nil, fallbackErr
+	}
 	if fallbackErr != nil {
 		slog.Debug("grok_cli_access_denied_api_fallback_failed", "path", req.URL.EscapedPath(), "error", fallbackErr)
 		return resp, nil
@@ -1421,6 +1432,13 @@ func enableHTTP2KeepAlive(transport *http.Transport, protocolMode string) (*http
 			h2.ReadIdleTimeout = openAIHTTP2ReadIdleTimeout
 			h2.PingTimeout = openAIHTTP2PingTimeout
 		}
+		// Transport.Clone copies HTTP2, but not x/net's registered configuration.
+		// Preserve these settings in the isolated account RPM transport as well.
+		if transport.HTTP2 == nil {
+			transport.HTTP2 = &http.HTTP2Config{}
+		}
+		transport.HTTP2.SendPingTimeout = h2.ReadIdleTimeout
+		transport.HTTP2.PingTimeout = h2.PingTimeout
 	}
 	return h2, nil
 }

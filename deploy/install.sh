@@ -123,6 +123,7 @@ declare -A MSG_ZH=(
     ["rollback_complete"]="版本回退完成！"
     ["install_version_complete"]="指定版本安装完成！"
     ["validating_version"]="正在验证版本..."
+    ["prerelease_warning"]="正在选择预发布版本，可能包含尚未修复的问题；默认升级仍使用稳定版。"
     ["available_versions"]="可用版本列表"
     ["fetching_versions"]="正在获取可用版本..."
     ["not_installed"]="Sub2API 尚未安装，请先执行全新安装"
@@ -248,6 +249,7 @@ declare -A MSG_EN=(
     ["rollback_complete"]="Version rollback completed!"
     ["install_version_complete"]="Specified version installed!"
     ["validating_version"]="Validating version..."
+    ["prerelease_warning"]="Selecting a pre-release that may contain unresolved issues; default upgrades still use stable releases."
     ["available_versions"]="Available versions"
     ["fetching_versions"]="Fetching available versions..."
     ["not_installed"]="Sub2API is not installed. Please run a fresh install first"
@@ -590,9 +592,13 @@ validate_version() {
         version="v$version"
     fi
 
-    if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-zhjai\.[0-9]+$ ]]; then
+    if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-zhjai\.[0-9]+(-(alpha|beta|rc)([.-][0-9]+)?)?$ ]]; then
         print_error "$(msg 'version_not_found'): $version" >&2
         return 1
+    fi
+
+    if [[ "$version" =~ -(alpha|beta|rc)([.-][0-9]+)?$ ]]; then
+        print_warning "$(msg 'prerelease_warning')" >&2
     fi
 
     print_info "$(msg 'validating_version') $version" >&2
@@ -1209,6 +1215,9 @@ main() {
             echo "  $0 install -v v0.2.8-zhjai.9  # Install specific fork version"
             echo "  $0 upgrade                # Upgrade to latest"
             echo "  $0 upgrade -v v0.2.8-zhjai.9  # Upgrade to specific fork version"
+            echo "  $0 install -v v0.2.11-zhjai.14-rc.1  # Install an explicit pre-release"
+            echo "  $0 upgrade -v v0.2.11-zhjai.14-rc.1  # Upgrade to an explicit pre-release"
+            echo "  # Pre-releases require -v; default installs and upgrades use stable releases."
             echo "  $0 rollback v0.2.7-zhjai.2    # Roll back to an older fork version"
             echo "  $0 list-versions          # List available versions"
             echo ""

@@ -63,6 +63,7 @@
                   <th scope="col" class="num">{{ t('admin.modelIntegrity.scheduling.decisions.columns.errors') }}</th>
                   <th scope="col" class="num">{{ t('admin.modelIntegrity.scheduling.decisions.columns.ttft') }}</th>
                   <th scope="col" class="num">{{ t('admin.modelIntegrity.scheduling.decisions.columns.load') }}</th>
+                  <th v-if="hasQuality(trace)" scope="col" class="num" :title="t('admin.modelIntegrity.scheduling.decisions.qualityHint')">{{ t('admin.modelIntegrity.scheduling.decisions.columns.quality') }}</th>
                   <th scope="col">{{ t('admin.modelIntegrity.scheduling.decisions.columns.score') }}</th>
                 </tr>
               </thead>
@@ -75,6 +76,16 @@
                   <td class="num">{{ candidate.eligible && candidate.error_rate != null ? formatPercent(candidate.error_rate) : '—' }}</td>
                   <td class="num">{{ candidate.eligible && candidate.ttft_ms ? `${Math.round(candidate.ttft_ms)} ms` : '—' }}</td>
                   <td class="num">{{ candidate.eligible && candidate.load_rate != null ? `${candidate.load_rate}%` : '—' }}</td>
+                  <td v-if="hasQuality(trace)" class="num" data-testid="candidate-quality">
+                    <template v-if="hasRatio(candidate)">
+                      <span class="block">{{ formatPercent(candidate.quality_ratio) }}</span>
+                      <span class="block text-[11px] text-gray-500 dark:text-gray-400">{{ t('admin.modelIntegrity.scheduling.decisions.qualityCounts', { passed: (candidate.pass_count ?? 0) + (candidate.suspected_pass_count ?? 0), evaluated: candidate.evaluated_count }) }}</span>
+                      <span v-if="candidate.suspected_pass_count" class="block text-[11px] text-gray-500 dark:text-gray-400">{{ t('admin.modelIntegrity.scheduling.decisions.qualitySplit', { pass: candidate.pass_count ?? 0, suspected: candidate.suspected_pass_count }) }}</span>
+                      <span v-if="candidate.quality_contribution" class="block text-[11px] text-gray-500 dark:text-gray-400" data-testid="candidate-quality-contribution">{{ t('admin.modelIntegrity.scheduling.decisions.qualityContribution', { value: formatSigned(candidate.quality_contribution) }) }}</span>
+                    </template>
+                    <span v-else-if="candidate.eligible" class="text-gray-500 dark:text-gray-400" data-testid="candidate-quality-unknown">{{ t('admin.modelIntegrity.scheduling.decisions.qualityUnknown') }}</span>
+                    <span v-else class="text-gray-400">—</span>
+                  </td>
                   <td>
                     <span v-if="candidate.eligible && candidate.score != null" class="score">
                       <span class="score-bar" aria-hidden="true"><span class="score-fill" :style="{ width: `${scoreWidth(trace, candidate.score)}%` }" /></span>
@@ -123,6 +134,23 @@ function toggle(index: number) {
 function isProblem(trace: SchedulerDecisionTrace) {
   return !trace.selected_account_id || Boolean(trace.error) || trace.reason_code === 'no_selection' || trace.reason_code === 'selection_error'
 }
+
+function hasRatio(candidate: SchedulerDecisionCandidate): candidate is SchedulerDecisionCandidate & { quality_ratio: number } {
+  // Counts are selected test types; an 'unassessed' state means unknown even if a stale ratio is present.
+  return candidate.quality_state !== 'unassessed' && candidate.quality_ratio != null && Number(candidate.evaluated_count) > 0
+}
+
+/**
+ * The pass-rate column appears when the decision used a policy that reads it
+ * (so a missing rate is shown as unknown, never as 100 %), or when the server
+ * reported a rate for any candidate.
+ */
+function hasQuality(trace: SchedulerDecisionTrace) {
+  if (trace.scheduling_policy === 'avoid_degradation') return true
+  return (trace.candidates ?? []).some(candidate => hasRatio(candidate) || Boolean(candidate.quality_contribution))
+}
+
+const formatSigned = (value: number) => `${value > 0 ? '+' : ''}${formatNumber(value)}`
 
 function isAffinityOnly(trace: SchedulerDecisionTrace) {
   return ['previous_response_id', 'session_hash', 'guardian_parent'].includes(trace.layer) && trace.reason_code !== 'sticky_escape'

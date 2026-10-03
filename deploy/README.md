@@ -401,6 +401,25 @@ For production servers using systemd.
 curl -sSL https://raw.githubusercontent.com/zhjai/sub2api-plus/main/deploy/install.sh | sudo bash
 ```
 
+### Pre-Release Installation And Upgrade
+
+Default installation and upgrade commands select stable releases only. To opt
+into a pre-release, specify its exact version with `-v` or `--version`:
+
+```bash
+# Fresh installation
+curl -fsSL https://raw.githubusercontent.com/zhjai/sub2api-plus/main/deploy/install.sh | sudo bash -s -- install -v v0.2.11-zhjai.14-rc.1
+
+# Upgrade an existing binary installation
+curl -fsSL https://raw.githubusercontent.com/zhjai/sub2api-plus/main/deploy/install.sh | sudo bash -s -- upgrade -v v0.2.11-zhjai.14-rc.1
+```
+
+The installer accepts derived fork versions ending in `-alpha`, `-beta`, or
+`-rc`, optionally followed by a numeric revision such as `.1`. The version must
+have a published GitHub release, and archive checksum verification remains
+required. Pre-releases may contain unresolved issues. This opt-in does not
+change the in-app stable update channel or Docker `latest` image.
+
 ### Manual Installation
 
 1. Download the latest release from [this fork's GitHub Releases](https://github.com/zhjai/sub2api-plus/releases)
@@ -599,6 +618,8 @@ sudo systemctl status redis
 2. **Database connection failed**: Check PostgreSQL is running and credentials are correct
 3. **Redis connection failed**: Check Redis is running and password is correct
 4. **Permission denied**: Ensure proper file ownership for binary install
+
+**Account RPM limits and external plugins**: An account with an RPM limit (`RPM 上限` / `RPM limit` greater than 0) cannot be served through an external plugin transport (`openai.oauth.outbound_transport.v1`), because the plugin sends upstream requests itself and Sub2API cannot count each send against the limit. Those requests are rejected with HTTP 503 instead of bypassing the limit. Set the account's RPM limit to 0 (unlimited) for accounts that should use a plugin; unlimited accounts are unaffected.
 
 ---
 

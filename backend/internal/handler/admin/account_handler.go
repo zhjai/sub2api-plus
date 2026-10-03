@@ -408,6 +408,8 @@ func (h *AccountHandler) buildAccountResponseWithRuntime(ctx context.Context, ac
 	if account == nil {
 		return item
 	}
+	capacity := h.openAIGatewayService.AccountRPMCapacities(ctx, []service.Account{*account})[account.ID]
+	item.RPMCapacity = &capacity
 
 	if h.concurrencyService != nil {
 		if counts, err := h.concurrencyService.GetAccountConcurrencyBatch(ctx, []int64{account.ID}); err == nil {
@@ -832,6 +834,7 @@ func (h *AccountHandler) List(c *gin.Context) {
 	}
 
 	// Build response with concurrency info
+	rpmCapacities := h.openAIGatewayService.AccountRPMCapacities(c.Request.Context(), accounts)
 	result := make([]AccountWithConcurrency, len(accounts))
 	for i := range accounts {
 		acc := &accounts[i]
@@ -849,6 +852,8 @@ func (h *AccountHandler) List(c *gin.Context) {
 			SchedulerScore:     schedulerScores[acc.ID],
 			SchedulerScores:    schedulerGroupScores[acc.ID],
 		}
+		capacity := rpmCapacities[acc.ID]
+		item.RPMCapacity = &capacity
 
 		// 添加窗口费用（仅当启用时）
 		if windowCosts != nil {

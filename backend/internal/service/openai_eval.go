@@ -11,6 +11,7 @@ import (
 	"hash/crc32"
 	"math"
 	"math/rand"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,9 +32,10 @@ const (
 	// OpenAIEvalBPSAccountEffort separates account-scoped BPS probes from
 	// legacy route/model State Probe schedules. It is an internal scheduler
 	// dimension, never a user-facing reasoning effort.
-	OpenAIEvalBPSAccountEffort = "__bps_account__"
-	OpenAIEvalDataVersion      = "sub2api-candy-29-v2-cpa-fingerprint-5654020c"
-	OpenAIEvalBaselineVersion  = "cpa-codex-candy-eval-5654020c-v1"
+	OpenAIEvalBPSAccountEffort          = "__bps_account__"
+	OpenAIEvalDataVersion               = OpenAIEvalQualityDataVersion
+	OpenAIEvalDefaultMaxRequestAttempts = 3
+	OpenAIEvalBaselineVersion           = OpenAIEvalQualityBaselineVersion
 	// All user-facing evaluation schedules share the same 5-minute floor.
 	OpenAIEvalMinFingerprintInterval     = 5 * time.Minute
 	OpenAIEvalFingerprintQuickSamples    = 60
@@ -70,19 +72,16 @@ const (
 	OpenAIEvalBPSModeForceOff = "force_off"
 )
 
-// The upstream CPA plugin labels 21 as correct, but the unrestricted draw
-// problem has a 28-candy counterexample. This fork versions the corrected
-// contract instead of mixing incompatible answers into one historical probe.
-const OpenAIEvalCandyExpectedAnswer = 29
+// The pinned shape-selectable question is distinct from historical 29 runs.
+const OpenAIEvalCandyExpectedAnswer = 21
 
-// CPA Candy/Fingerprint probe and reference data are vendored from
-// haowang02/cpa-plugin-codex-candy-eval at commit 5654020c1815b4c4d29139fa76b1fbfcffd9a990.
+// CPA Fingerprint reference data is vendored from the pinned CPA release.
 // The upstream MIT license and copyright notice are kept beside these data files.
 //
-//go:embed data/cpa_fingerprint_probes_5654020c.json
+//go:embed data/cpa_fingerprint_probes_97623969.json
 var openAIEvalFingerprintProbesJSON []byte
 
-//go:embed data/cpa_fingerprint_baselines_5654020c.json
+//go:embed data/cpa_fingerprint_baselines_97623969.json
 var openAIEvalFingerprintBaselinesJSON []byte
 
 var OpenAIEvalFingerprintProbes = mustDecodeOpenAIEvalJSON[[]OpenAIEvalProbe](openAIEvalFingerprintProbesJSON)
@@ -126,9 +125,8 @@ type OpenAIEvalRouteHealth struct {
 
 const OpenAIEvalRouteHealthTTL = 30 * time.Minute
 
-var openAIEvalEffectsEnabled atomic.Bool
-
 type openAIEvalSchedulingPolicySnapshot struct {
+	Enabled       bool
 	Default       string
 	CustomBalance OpenAIEvalPolicyWeights
 	Rules         []OpenAIEvalSchedulingPolicyRule
@@ -140,30 +138,52 @@ func init() {
 	openAIEvalSchedulingPolicy.Store(&openAIEvalSchedulingPolicySnapshot{})
 }
 
-func OpenAIEvalEffectsEnabled() bool { return openAIEvalEffectsEnabled.Load() }
+func OpenAIEvalEffectsEnabled() bool {
+	return openAIEvalSchedulingPolicy.Load().(*openAIEvalSchedulingPolicySnapshot).Enabled
+}
 
-func SetOpenAIEvalEffectsEnabled(enabled bool) { openAIEvalEffectsEnabled.Store(enabled) }
+func SetOpenAIEvalEffectsEnabled(enabled bool) {
+	cache := openAIEvalQualitySnapshots
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	snapshot := *openAIEvalSchedulingPolicy.Load().(*openAIEvalSchedulingPolicySnapshot)
+	if snapshot.Enabled != enabled {
+		snapshot.Enabled = enabled
+		cache.clearLocked()
+		openAIEvalSchedulingPolicy.Store(&snapshot)
+	}
+}
 
 func SetOpenAIEvalSchedulingPolicySnapshot(config *OpenAIEvalConfig) {
+	// The revision guard applies to effects and policy as well as the cache.
+	// A rejected configuration leaves the last accepted settings intact.
+	_ = openAIEvalQualitySnapshots.configure(config)
+}
+
+func newOpenAIEvalSchedulingPolicySnapshot(config *OpenAIEvalConfig) *openAIEvalSchedulingPolicySnapshot {
 	snapshot := &openAIEvalSchedulingPolicySnapshot{}
 	if config != nil {
+		snapshot.Enabled = config.EffectsEnabled
 		snapshot.Default = config.SchedulingPolicy
 		snapshot.CustomBalance = config.CustomBalance
 		snapshot.Rules = append([]OpenAIEvalSchedulingPolicyRule(nil), config.Policies...)
+		for i := range snapshot.Rules {
+			if snapshot.Rules[i].CustomBalance != nil {
+				weights := *snapshot.Rules[i].CustomBalance
+				snapshot.Rules[i].CustomBalance = &weights
+			}
+		}
 	}
-	openAIEvalSchedulingPolicy.Store(snapshot)
+	return snapshot
 }
 
 func OpenAIEvalSchedulingPolicyForRequest(model, effort string) string {
 	// Evaluation policies are an opt-in routing effect.  Keep the configured
 	// policy available for the admin preview/persistence layer, but never let a
 	// disabled evaluation switch alter production account ordering.
-	if !OpenAIEvalEffectsEnabled() {
-		return OpenAIEvalSchedulingPolicyLegacy
-	}
 	value := openAIEvalSchedulingPolicy.Load()
 	snapshot, _ := value.(*openAIEvalSchedulingPolicySnapshot)
-	if snapshot == nil {
+	if snapshot == nil || !snapshot.Enabled {
 		return OpenAIEvalSchedulingPolicyLegacy
 	}
 	return OpenAIEvalSchedulingPolicyFor(&OpenAIEvalConfig{SchedulingPolicy: snapshot.Default, CustomBalance: snapshot.CustomBalance, Policies: snapshot.Rules}, model, effort)
@@ -173,15 +193,12 @@ func OpenAIEvalSchedulingPolicyForRequest(model, effort string) string {
 // a model/effort route. It is intentionally read-only and follows the same
 // most-specific rule resolution as OpenAIEvalSchedulingPolicyFor.
 func OpenAIEvalCustomBalanceForRequest(model, effort string) (OpenAIEvalPolicyWeights, bool) {
-	if !OpenAIEvalEffectsEnabled() {
-		return OpenAIEvalPolicyWeights{}, false
-	}
 	value := openAIEvalSchedulingPolicy.Load()
 	snapshot, _ := value.(*openAIEvalSchedulingPolicySnapshot)
-	if snapshot == nil {
+	if snapshot == nil || !snapshot.Enabled {
 		return OpenAIEvalPolicyWeights{}, false
 	}
-	policy := OpenAIEvalSchedulingPolicyForRequest(model, effort)
+	policy := OpenAIEvalSchedulingPolicyFor(&OpenAIEvalConfig{SchedulingPolicy: snapshot.Default, CustomBalance: snapshot.CustomBalance, Policies: snapshot.Rules}, model, effort)
 	if policy != OpenAIEvalSchedulingPolicyCustomBalance {
 		return OpenAIEvalPolicyWeights{}, false
 	}
@@ -259,7 +276,7 @@ func normalizeOpenAIEvalSchedulingPolicy(policy string) (string, error) {
 }
 
 func normalizeOpenAIEvalPolicyWeights(weights OpenAIEvalPolicyWeights) (OpenAIEvalPolicyWeights, error) {
-	values := []float64{weights.Cost, weights.Stability, weights.ErrorRate, weights.TTFT, weights.Load}
+	values := []float64{weights.Cost, weights.Stability, weights.ErrorRate, weights.TTFT, weights.Load, weights.Quality}
 	total := 0.0
 	for _, value := range values {
 		if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
@@ -273,12 +290,16 @@ func normalizeOpenAIEvalPolicyWeights(weights OpenAIEvalPolicyWeights) (OpenAIEv
 	if total <= 0 {
 		return OpenAIEvalPolicyWeights{}, errors.New("custom balance requires at least one positive weight")
 	}
+	if weights.Stability == 0 && math.Abs(total-1) <= 1e-12 {
+		return weights, nil
+	}
 	return OpenAIEvalPolicyWeights{
 		Cost:      weights.Cost / total,
-		Stability: weights.Stability / total,
-		ErrorRate: weights.ErrorRate / total,
-		TTFT:      weights.TTFT / total,
+		Stability: 0,
+		ErrorRate: weights.ErrorRate/total + 0.6*(weights.Stability/total),
+		TTFT:      weights.TTFT/total + 0.4*(weights.Stability/total),
 		Load:      weights.Load / total,
+		Quality:   weights.Quality / total,
 	}, nil
 }
 
@@ -384,10 +405,22 @@ type OpenAIEvalRun struct {
 }
 
 type OpenAIEvalSampleRecord struct {
-	ProbeID          string `json:"probe_id"`
-	NormalizedAnswer string `json:"normalized_answer,omitempty"`
-	Valid            bool   `json:"valid"`
-	ErrorCode        string `json:"error_code,omitempty"`
+	ProbeID          string                   `json:"probe_id"`
+	NormalizedAnswer string                   `json:"normalized_answer,omitempty"`
+	Valid            bool                     `json:"valid"`
+	ErrorCode        string                   `json:"error_code,omitempty"`
+	Answer           string                   `json:"answer,omitempty"`
+	Attempts         int                      `json:"attempts"`
+	ErrorMessage     string                   `json:"error_message,omitempty"`
+	AttemptErrors    []OpenAIEvalAttemptError `json:"attempt_errors,omitempty"`
+	HTTPStatus       int                      `json:"http_status,omitempty"`
+}
+
+type OpenAIEvalAttemptError struct {
+	Attempt    int    `json:"attempt"`
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+	HTTPStatus int    `json:"http_status,omitempty"`
 }
 
 type OpenAIEvalRunFilter struct {
@@ -485,9 +518,12 @@ type OpenAIEvalPolicyWeights struct {
 	ErrorRate float64 `json:"error_rate"`
 	TTFT      float64 `json:"ttft"`
 	Load      float64 `json:"load"`
+	Quality   float64 `json:"quality"`
 }
 
 type OpenAIEvalConfig struct {
+	QualityRefreshIntervalSeconds int `json:"quality_refresh_interval_seconds"`
+	MaxRequestAttempts            int `json:"max_request_attempts"`
 	// Revision is optimistic-concurrency metadata.  Zero is accepted for
 	// legacy clients and is upgraded atomically by the repository.
 	Revision         int64                            `json:"revision,omitempty"`
@@ -561,13 +597,17 @@ type OpenAIEvalModelTraceDiagnostic struct {
 }
 
 type OpenAIEvalModelTraceSample struct {
-	Prompt        string `json:"-"`
-	ExpectedCount int    `json:"expected_count"`
-	Attempts      int    `json:"attempts,omitempty"`
-	Text          string `json:"-"`
-	Error         string `json:"error,omitempty"`
-	Parsed        int    `json:"parsed_numbers"`
-	Valid         bool   `json:"accepted"`
+	Prompt        string                   `json:"-"`
+	ExpectedCount int                      `json:"expected_count"`
+	Attempts      int                      `json:"attempts"`
+	Answer        string                   `json:"answer,omitempty"`
+	ErrorMessage  string                   `json:"error_message,omitempty"`
+	AttemptErrors []OpenAIEvalAttemptError `json:"attempt_errors,omitempty"`
+	HTTPStatus    int                      `json:"http_status,omitempty"`
+	Text          string                   `json:"-"`
+	Error         string                   `json:"error,omitempty"`
+	Parsed        int                      `json:"parsed_numbers"`
+	Valid         bool                     `json:"accepted"`
 }
 
 type OpenAIEvalModelTraceResult struct {
@@ -604,19 +644,18 @@ type OpenAIEvalSampleResponse struct {
 	InputTokens  int64
 	OutputTokens int64
 	CompletedAt  time.Time
+	HTTPStatus   int
+	Model        string
 }
 
-// OpenAIEvalCandyPrompt is the corrected, versioned public canary. Keep this
-// text stable: changing the wording changes the evaluation contract.
-var OpenAIEvalCandyPrompt = `不使用任何外部工具回答以下问题：
+// Exact candyPrompt from cpa-plugin-codex-candy-eval commit
+// 976239690451849223c2174ffdd08681019753d1. Never add the expected answer.
+var OpenAIEvalCandyPrompt = `在一个黑色的袋子里放有三种口味的糖果，每种糖果有两种不同的形状（圆形和五角星形，不同的形状靠手感可以分辨）。现已知不同口味的糖和不同形状的数量统计如下表。参赛者需要在活动前决定摸出的糖果数目，那么，最少取出多少个糖果才能保证手中同时拥有不同形状的苹果味和桃子味的糖？（同时手中有圆形苹果味匹配五角星桃子味糖果，或者有圆形桃子味匹配五角星苹果味糖果都满足要求）
 
-在一个黑色的袋子里放有三种口味的糖果，每种糖果有两种不同的形状（圆形和五角星形，不同的形状靠手感可以分辨）。参赛者需要在活动前决定摸出的糖果数目，不能通过触摸辨别口味。那么，最少取出多少个糖果才能保证手中同时拥有不同形状的苹果味和桃子味的糖？（同时手中有圆形苹果味匹配五角星桃子味糖果，或者有圆形桃子味匹配五角星苹果味糖果都满足要求）
-
-苹果味  桃子味  西瓜味
+        苹果味  桃子味  西瓜味
 圆形       7      9      8
 五角星形   7      6      4
-
-先给出整数答案，再证明该数量足够且少取一颗不够。`
+`
 
 // Kept as a legacy API name for callers that identify the pinned Candy probe.
 // It must never diverge from OpenAIEvalCandyPrompt.
@@ -678,10 +717,85 @@ func OpenAIEvalFingerprintCostEstimate(samples int, inputTokensPerRequest int, i
 }
 
 func ScoreOpenAIEvalCandy(answer string) OpenAIEvalOutcome {
-	if value, ok := firstEvalNumber(answer); ok && value == OpenAIEvalCandyExpectedAnswer {
+	if value, ok := leadingOpenAIEvalCandyAnswer(answer); ok && value == OpenAIEvalCandyExpectedAnswer {
 		return OpenAIEvalOutcome{Status: "pass", Reason: "correct_answer", Score: 1, SampleCount: 1, ExpectedCount: 1, Confidence: "low", Scheduling: "neutral"}
 	}
 	return OpenAIEvalOutcome{Status: "warning", Reason: "single_public_item_failed", Score: 0, SampleCount: 1, ExpectedCount: 1, Confidence: "low", Scheduling: "alert_only"}
+}
+
+var openAIEvalCandyFinalAnswer = regexp.MustCompile(`(?im)(?:^|[\n。.!！；;，,])\s*(?:\*\*|#+\s*)?(?:最终答案(?:是|为)?|答案(?:是|为)?|final answer(?: is)?|answer(?: is)?|(?:最终|所以|因此|综上(?:所述)?)[，,：:\s]*(?:答案(?:是|为)?|(?:最少|至少)?(?:需要|需|要)?(?:取出|取|抽取|拿出)?))\s*[:：]?\s*(?:\*\*)?([0-9０-９一二三四五六七八九十百两]+)`)
+
+var openAIEvalCandyMinimumAnswer = regexp.MustCompile(`(?im)(?:^|[\n。.!！；;，,])\s*(?:\*\*|#+\s*)?(?:最少|至少)(?:需要|需|要)?(?:取出|取|抽取|拿出)?\s*[:：]?\s*(?:\*\*)?([0-9０-９一二三四五六七八九十百两]+)`)
+
+var openAIEvalCandyShapeQuantity = regexp.MustCompile(`^\s*(?:\*\*)?\s*(?:颗|个|枚|粒)?\s*(?:圆形|五角星形|五角星|星形)`)
+
+var openAIEvalCandyNegativeTail = regexp.MustCompile(`(?i)^(?:(?:仍然|依然|还是|仍|也|并|是|根本|还)\s*)*(?:不够|不对|不是|不成立|不足|不正确|无法(?:保证|确保)|不能(?:保证|确保)|可能失败|时(?:仍)?可能失败|is not|isn't)`)
+
+func leadingOpenAIEvalCandyAnswer(answer string) (int, bool) {
+	// Compare scalar conclusions together; shape-specific quantities are
+	// reasoning, not competing answers. Never accept a conflicting 21.
+	var explicit int
+	found := false
+	for _, pattern := range []*regexp.Regexp{openAIEvalCandyFinalAnswer, openAIEvalCandyMinimumAnswer} {
+		for _, match := range pattern.FindAllStringSubmatchIndex(answer, -1) {
+			if openAIEvalCandyShapeQuantity.MatchString(answer[match[3]:]) {
+				continue
+			}
+			if openAIEvalCandyValueRejected(answer[match[2]:]) {
+				// A counterexample explicitly called insufficient is reasoning,
+				// not a competing final answer. Continue to the actual conclusion.
+				continue
+			}
+			value, ok := leadingOpenAIEvalCandyValue(answer[match[2]:])
+			if !ok || (found && value != explicit) {
+				return 0, false
+			}
+			explicit, found = value, true
+		}
+	}
+	if found {
+		return explicit, true
+	}
+	return leadingOpenAIEvalCandyValue(answer)
+}
+
+func leadingOpenAIEvalCandyValue(answer string) (int, bool) {
+	answer = strings.TrimLeft(strings.TrimSpace(answer), "*# ")
+	for _, prefix := range []string{"最终答案是", "最终答案为", "最终答案", "答案是", "答案为", "答案", "最少需要取出", "最少需要", "最少取出", "至少需要", "至少", "最少", "需要", "Final answer is", "Final answer", "Answer is", "Answer"} {
+		if strings.HasPrefix(answer, prefix) {
+			answer = strings.TrimLeft(strings.TrimPrefix(answer, prefix), "：: *")
+			break
+		}
+	}
+	runes := []rune(answer)
+	if len(runes) == 0 || (!isEvalDigit(runes[0]) && !isChineseEvalNumeral(runes[0])) {
+		return 0, false
+	}
+	i := 0
+	for i < len(runes) && (isEvalDigit(runes[i]) || isChineseEvalNumeral(runes[i])) {
+		i++
+	}
+	if i < len(runes) && (runes[i] == '/' || runes[i] == '%' || (runes[i] >= 'a' && runes[i] <= 'z') || (runes[i] >= 'A' && runes[i] <= 'Z') ||
+		(strings.ContainsRune(".．", runes[i]) && i+1 < len(runes) && isEvalDigit(runes[i+1]))) {
+		return 0, false
+	}
+	if openAIEvalCandyShapeQuantity.MatchString(string(runes[i:])) || openAIEvalCandyValueRejected(answer) {
+		return 0, false
+	}
+	return parseEvalNumber(string(runes[:i]))
+}
+
+func openAIEvalCandyValueRejected(answer string) bool {
+	runes := []rune(strings.TrimLeft(strings.TrimSpace(answer), "*# "))
+	i := 0
+	for i < len(runes) && (isEvalDigit(runes[i]) || isChineseEvalNumeral(runes[i])) {
+		i++
+	}
+	if i == 0 {
+		return false
+	}
+	tail := strings.TrimLeft(string(runes[i:]), " *颗个糖果，,：:。.")
+	return openAIEvalCandyNegativeTail.MatchString(tail)
 }
 
 func firstEvalNumber(value string) (int, bool) {

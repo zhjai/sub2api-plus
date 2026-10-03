@@ -22,11 +22,33 @@
       </div>
 
       <template v-else>
-        <p class="budget" data-testid="budget">
-          <template v-if="planCount">{{ t('admin.modelIntegrity.tests.budget', { requests: formatCount(dailyTotal), plans: planCount }) }}</template>
-          <template v-else>{{ t('admin.modelIntegrity.tests.budgetNone') }}</template>
-          <span class="budget-hint">{{ t('admin.modelIntegrity.tests.budgetHint') }}</span>
-        </p>
+        <div class="budget-row">
+          <p class="budget" data-testid="budget">
+            <template v-if="planCount">{{ t('admin.modelIntegrity.tests.budget', { requests: formatCount(dailyTotal), plans: planCount }) }}<template v-if="dailyMax > dailyTotal"> {{ t('admin.modelIntegrity.tests.budgetRetry', { max: formatCount(dailyMax) }) }}</template></template>
+            <template v-else>{{ t('admin.modelIntegrity.tests.budgetNone') }}</template>
+            <span class="budget-hint">{{ t('admin.modelIntegrity.tests.budgetHint') }}</span>
+          </p>
+          <div class="attempts">
+            <label class="attempts-field">
+              <span class="attempts-label">{{ t('admin.modelIntegrity.tests.maxAttempts.label') }}</span>
+              <input
+                v-model.number="attemptsInput"
+                type="number"
+                :min="MIN_MAX_REQUEST_ATTEMPTS"
+                :max="MAX_MAX_REQUEST_ATTEMPTS"
+                step="1"
+                inputmode="numeric"
+                class="input attempts-input"
+                aria-describedby="attempts-hint"
+                data-testid="max-attempts"
+                @change="commitAttempts"
+                @blur="commitAttempts"
+              />
+              <span class="attempts-unit">{{ t('admin.modelIntegrity.tests.maxAttempts.unit') }}</span>
+            </label>
+            <p id="attempts-hint" class="attempts-hint">{{ t('admin.modelIntegrity.tests.maxAttempts.hint') }}</p>
+          </div>
+        </div>
 
         <div v-if="!config.accounts.length" class="tests-empty">
           <Icon name="beaker" size="lg" class="text-gray-400" />
@@ -78,9 +100,14 @@
                 <h2 id="detail-title" class="tests-h2 truncate">{{ accountName(selected.account_id) }} <span class="font-normal text-gray-400">#{{ selected.account_id }}</span></h2>
                 <p class="tests-hint">{{ selected.requested_model }} · {{ selected.reasoning_effort || t('admin.modelIntegrity.common.defaultEffort') }}</p>
               </div>
-              <button type="button" class="detail-remove" :title="t('admin.modelIntegrity.tests.removeTarget')" :aria-label="t('admin.modelIntegrity.tests.removeTarget')" data-testid="remove-target" @click="pendingRemove = selected">
-                <Icon name="trash" size="sm" />
-              </button>
+              <div class="detail-actions">
+                <button type="button" class="detail-edit" data-testid="edit-target" @click="editing = selected">
+                  <Icon name="edit" size="sm" />{{ t('admin.modelIntegrity.tests.edit.open') }}
+                </button>
+                <button type="button" class="detail-remove" :title="t('admin.modelIntegrity.tests.removeTarget')" :aria-label="t('admin.modelIntegrity.tests.removeTarget')" data-testid="remove-target" @click="pendingRemove = selected">
+                  <Icon name="trash" size="sm" />
+                </button>
+              </div>
             </header>
             <div class="detail-body">
               <TestTypePanel
@@ -93,6 +120,7 @@
                 :progress="runningProgress.get(runKey(selected, type))"
                 :running="isRunning(selected, type)"
                 :available="type !== 'state_probe' || isDirectOAuthRoute(selected)"
+                :max-attempts="maxAttempts"
                 @run="requestRun(selected, type)"
                 @open="detailRun = $event"
               />
@@ -169,6 +197,14 @@
     </ModelIntegrityShell>
 
     <AddTargetsDialog :show="showAdd" :accounts="accounts" :catalog="catalog" @close="showAdd = false" @add="addTargets" />
+    <EditTargetDialog
+      :route="editing"
+      :routes="config.accounts"
+      :catalog="catalog"
+      :account-label="editing ? accountLabel(editing.account_id) : ''"
+      @close="editing = null"
+      @save="saveEdit"
+    />
     <RunDetailDialog :run="detailRun" :target="detailRun ? `${accountName(detailRun.account_id)} · ${detailRun.requested_model} · ${detailRun.reasoning_effort || t('admin.modelIntegrity.common.defaultEffort')}` : ''" :catalog="catalog" @close="detailRun = null" />
 
     <BaseDialog :show="pendingFingerprint !== null" :title="t('admin.modelIntegrity.tests.manualSampleTitle')" width="narrow" @close="pendingFingerprint = null">
@@ -211,19 +247,26 @@ import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import ModelIntegrityShell from '@/components/admin/modelIntegrity/ModelIntegrityShell.vue'
 import TestTypePanel from '@/components/admin/modelIntegrity/TestTypePanel.vue'
 import AddTargetsDialog from '@/components/admin/modelIntegrity/AddTargetsDialog.vue'
+import EditTargetDialog from '@/components/admin/modelIntegrity/EditTargetDialog.vue'
 import RunDetailDialog from '@/components/admin/modelIntegrity/RunDetailDialog.vue'
 import { accountsAPI, type OpenAIEvalRouteConfig, type OpenAIEvalRun } from '@/api/admin/accounts'
 import { useAppStore } from '@/stores/app'
 import { extractApiErrorMessage } from '@/utils/apiError'
 import {
+  MAX_MAX_REQUEST_ATTEMPTS,
+  MIN_MAX_REQUEST_ATTEMPTS,
   TEST_TYPES,
   activeScheduleCount,
+  isDirectOAuthAccount,
   isDirectOAuthRoute,
   latestRunFor,
   newRoute,
+  normalizeMaxRequestAttempts,
   resultTone,
+  retriesSamples,
   routeKey,
   scheduleOf,
+  totalDailyMaxRequests,
   totalDailyRequests,
   type EvalTestType
 } from './modelIntegrity'
@@ -232,7 +275,7 @@ import { useModelIntegrityConfig } from './useModelIntegrityConfig'
 
 const { t } = useI18n()
 const appStore = useAppStore()
-const { config, catalog, accounts, loading, loaded, saving, conflict, dirty, load, reloadConfig, save, accountName } = useModelIntegrityConfig()
+const { config, catalog, accounts, loading, loaded, saving, conflict, dirty, load, reloadConfig, save, accountName, accountLabel } = useModelIntegrityConfig()
 
 const search = ref('')
 const selectedKey = ref('')
@@ -245,6 +288,7 @@ const typeFilter = ref<'' | EvalTestType>('')
 const toneFilter = ref('')
 const detailRun = ref<OpenAIEvalRun | null>(null)
 const pendingRemove = ref<OpenAIEvalRouteConfig | null>(null)
+const editing = ref<OpenAIEvalRouteConfig | null>(null)
 const pendingFingerprint = ref<OpenAIEvalRouteConfig | null>(null)
 const manualSampleMode = ref('quick')
 const runningKeys = reactive(new Set<string>())
@@ -258,6 +302,17 @@ const filteredTargets = computed(() => {
 })
 const selected = computed(() => config.accounts.find(route => routeKey(route) === selectedKey.value) ?? null)
 const dailyTotal = computed(() => totalDailyRequests(config.accounts, catalog.value))
+const maxAttempts = computed(() => normalizeMaxRequestAttempts(config.max_request_attempts))
+const dailyMax = computed(() => totalDailyMaxRequests(config.accounts, maxAttempts.value, catalog.value))
+// The field may hold an out-of-range draft while typing; the config only ever
+// gets a clamped integer, applied on change/blur.
+const attemptsInput = ref<number | string>(maxAttempts.value)
+watch(maxAttempts, value => { attemptsInput.value = value })
+function commitAttempts() {
+  const value = normalizeMaxRequestAttempts(attemptsInput.value)
+  config.max_request_attempts = value
+  attemptsInput.value = value
+}
 const planCount = computed(() => activeScheduleCount(config.accounts))
 const fingerprintModes = computed(() => catalog.value?.fingerprint_modes?.length ? catalog.value.fingerprint_modes : [{ id: 'quick', samples: 60 }, { id: 'standard', samples: 200 }, { id: 'strict', samples: 400 }])
 
@@ -268,7 +323,7 @@ const historyRuns = computed(() => {
   }
   return runs.value
 })
-const visibleRuns = computed(() => historyRuns.value.filter(run => (!typeFilter.value || run.test_type === typeFilter.value) && (!toneFilter.value || resultTone(run.status) === toneFilter.value || (toneFilter.value === 'neutral' && resultTone(run.status) === 'running'))))
+const visibleRuns = computed(() => historyRuns.value.filter(run => (!typeFilter.value || run.test_type === typeFilter.value) && (!toneFilter.value || resultTone(run.status) === toneFilter.value || (toneFilter.value === 'neutral' && ['running', 'error'].includes(resultTone(run.status))))))
 
 watch(() => config.accounts.length, () => {
   if (!selected.value) selectedKey.value = config.accounts[0] ? routeKey(config.accounts[0]) : ''
@@ -297,6 +352,12 @@ function signalLabel(route: OpenAIEvalRouteConfig) {
   return TEST_TYPES.map(type => `${t(`admin.modelIntegrity.tests.types.${type}.name`)}: ${signalText(route, type)}`).join('; ')
 }
 
+// Eligibility is an account capability derived by the server; until the next
+// reload apply the same rules it does so State Probe is neither hidden nor offered wrongly.
+function assumeDirectOAuth(accountID: number) {
+  return isDirectOAuthAccount(accounts.value.find(item => item.id === accountID))
+}
+
 function addTargets(payload: { accountIDs: number[]; model: string; effort: string }) {
   const existing = new Set(config.accounts.map(routeKey))
   let added = 0
@@ -306,10 +367,7 @@ function addTargets(payload: { accountIDs: number[]; model: string; effort: stri
     const key = routeKey(route)
     if (existing.has(key)) continue
     existing.add(key)
-    const account = accounts.value.find(item => item.id === accountID)
-    // Eligibility is derived by the server; until the next reload assume the
-    // same rules it applies so the State Probe row is not shown as unusable.
-    route.direct_oauth_eligible = payload.effort === '' && account?.type === 'oauth' && account.parent_account_id == null
+    route.direct_oauth_eligible = assumeDirectOAuth(accountID)
     config.accounts.push(route)
     firstKey ||= key
     added++
@@ -321,6 +379,30 @@ function addTargets(payload: { accountIDs: number[]; model: string; effort: stri
   }
   const skipped = payload.accountIDs.length - added
   if (skipped) appStore.showInfo(t('admin.modelIntegrity.tests.add.skipped', { count: skipped }))
+}
+
+/**
+ * Changes only the model and effort of one target. The route is replaced, not
+ * mutated, so a run that is still in flight keeps the identity it started
+ * with. Account, every schedule (State Probe included — it always uses the
+ * account default effort) and route BPS mode carry over; account-level BPS
+ * settings live elsewhere and are not touched. Past runs keep their own
+ * model/effort and are not shown for the new target.
+ */
+function saveEdit(payload: { model: string; effort: string }) {
+  const route = editing.value
+  editing.value = null
+  const index = route ? config.accounts.indexOf(route) : -1
+  if (!route || index < 0) return
+  const next: OpenAIEvalRouteConfig = { ...route, requested_model: payload.model, reasoning_effort: payload.effort }
+  const key = routeKey(next)
+  if (config.accounts.some(item => item !== route && routeKey(item) === key)) {
+    appStore.showError(t('admin.modelIntegrity.tests.edit.duplicate', { target: `${payload.model} · ${payload.effort || t('admin.modelIntegrity.common.defaultEffort')}` }))
+    return
+  }
+  config.accounts.splice(index, 1, next)
+  selectedKey.value = key
+  appStore.showSuccess(t('admin.modelIntegrity.tests.edit.updated'))
 }
 
 function confirmRemove() {
@@ -352,20 +434,23 @@ function confirmFingerprint() {
 }
 
 async function runNow(route: OpenAIEvalRouteConfig, type: EvalTestType, sampleMode?: string) {
+  // Snapshot the identity: the target may be edited while this run is in flight.
+  const target = { account_id: route.account_id, requested_model: route.requested_model, reasoning_effort: route.reasoning_effort }
   const key = runKey(route, type)
   runningKeys.add(key)
   let pollTimer: ReturnType<typeof setInterval> | undefined
   try {
-    const request: Parameters<typeof accountsAPI.runOpenAIEval>[0] = { account_id: route.account_id, requested_model: route.requested_model, reasoning_effort: route.reasoning_effort, test_type: type }
+    const request: Parameters<typeof accountsAPI.runOpenAIEval>[0] = { ...target, test_type: type }
     if (type === 'fingerprint') request.sample_mode = sampleMode || 'quick'
     if (type === 'candy') request.sample_count = Math.max(1, Math.trunc(Number(route.candy_schedule.sample_count) || 1))
+    if (retriesSamples(type)) request.max_attempts = maxAttempts.value
     const pendingRun = accountsAPI.runOpenAIEval(request)
     const poll = async () => {
       try {
         const response = await accountsAPI.listOpenAIEvalRuns({
-          account_id: route.account_id,
-          requested_model: route.requested_model,
-          reasoning_effort: type === 'state_probe' ? '' : route.reasoning_effort,
+          account_id: target.account_id,
+          requested_model: target.requested_model,
+          reasoning_effort: type === 'state_probe' ? '' : target.reasoning_effort,
           test_type: type,
           limit: 5
         })
@@ -483,8 +568,15 @@ onMounted(initialLoad)
 .tests-h2 { @apply text-base font-semibold text-gray-900 dark:text-white; }
 .tests-hint { @apply mt-1 text-sm leading-relaxed text-gray-600 dark:text-gray-400; }
 .tests-note { @apply text-xs text-gray-500 dark:text-gray-400; }
+.budget-row { @apply flex flex-col gap-3 rounded-xl border border-gray-200 bg-white px-4 py-3 dark:border-dark-700 dark:bg-dark-800/60 md:flex-row md:items-start md:justify-between md:gap-6; }
 .budget { @apply max-w-[80ch] text-sm text-gray-800 dark:text-gray-200; }
 .budget-hint { @apply ml-1 text-gray-500 dark:text-gray-400; }
+.attempts { @apply flex max-w-[30rem] flex-col gap-1 md:shrink-0; }
+.attempts-field { @apply flex flex-wrap items-center gap-2 text-sm text-gray-700 dark:text-gray-300; }
+.attempts-label { @apply font-medium; }
+.attempts-input { @apply h-9 w-20 min-w-0 py-1 text-sm tabular-nums; }
+.attempts-unit { @apply text-xs text-gray-500 dark:text-gray-400; }
+.attempts-hint { @apply text-xs leading-relaxed text-gray-500 dark:text-gray-400; }
 .workbench { @apply grid gap-5 lg:grid-cols-[20rem_minmax(0,1fr)]; }
 .targets { @apply flex max-h-[44rem] flex-col overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-dark-700 dark:bg-dark-800/60; }
 .targets-head { @apply space-y-3 border-b border-gray-100 p-4 dark:border-dark-700; }
@@ -501,12 +593,15 @@ onMounted(initialLoad)
 .signal-likely { @apply bg-emerald-100 ring-1 ring-inset ring-emerald-500 dark:bg-emerald-950/60 dark:ring-emerald-400; }
 .signal-attention { @apply bg-amber-500; }
 .signal-neutral { @apply bg-gray-400 dark:bg-dark-400; }
+.signal-error { @apply bg-rose-500; }
 .signal-running { @apply bg-sky-500; }
 .signal-none { @apply border border-gray-300 dark:border-dark-500; }
 .signal-na { background: repeating-linear-gradient(135deg, transparent 0 2px, theme('colors.gray.300') 2px 3px); @apply border border-gray-200 dark:border-dark-600; }
 .detail { @apply rounded-xl border border-gray-200 bg-white px-5 dark:border-dark-700 dark:bg-dark-800/60 sm:px-6; }
 .detail-placeholder { @apply flex items-center justify-center py-12 text-sm text-gray-500; }
 .detail-head { @apply flex items-start justify-between gap-3 border-b border-gray-100 py-4 dark:border-dark-700; }
+.detail-actions { @apply flex shrink-0 items-center gap-1; }
+.detail-edit { @apply inline-flex h-9 items-center gap-1.5 rounded-md px-2.5 text-sm text-gray-600 hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 dark:text-gray-300 dark:hover:bg-dark-700 dark:hover:text-white; }
 .detail-remove { @apply inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-gray-400 hover:bg-rose-50 hover:text-rose-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 dark:hover:bg-rose-950/40; }
 .detail-body { @apply divide-y divide-gray-100 dark:divide-dark-700; }
 .history { @apply space-y-3 rounded-xl border border-gray-200 bg-white p-5 dark:border-dark-700 dark:bg-dark-800/60 sm:p-6; }
@@ -548,6 +643,7 @@ onMounted(initialLoad)
 .tone-likely { @apply border border-dashed border-emerald-400 text-emerald-800 dark:border-emerald-600 dark:text-emerald-300; }
 .tone-attention { @apply bg-amber-100 text-amber-900 dark:bg-amber-900/40 dark:text-amber-200; }
 .tone-neutral { @apply bg-gray-100 text-gray-700 dark:bg-dark-700 dark:text-gray-300; }
+.tone-error { @apply bg-rose-50 text-rose-800 dark:bg-rose-950/40 dark:text-rose-300; }
 .tone-running { @apply bg-sky-50 text-sky-800 dark:bg-sky-950/40 dark:text-sky-300; }
 .sample-choice { @apply flex cursor-pointer items-center gap-3 rounded-lg border border-gray-200 px-3 py-2.5 text-sm dark:border-dark-600; }
 .sample-choice:has(input:checked) { @apply border-primary-600 bg-primary-50/50 dark:bg-primary-950/30; }

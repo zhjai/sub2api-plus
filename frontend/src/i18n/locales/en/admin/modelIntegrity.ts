@@ -38,7 +38,7 @@ export default {
     reason: {
       stateProbe: {
         healthy: 'Both requests used the same route.',
-        degraded: 'The route changed between the two requests. This result is a reminder only and does not change BPS state; automatic BPS switching for an account is driven by that account’s independent probe under Scheduling policy.',
+        degraded: 'The route changed between the two requests. This result does not change BPS state; automatic BPS switching for an account is driven by that account’s independent probe under Scheduling policy.',
         inconclusive: 'Could not determine whether the route changed.'
       },
       running: 'Test in progress. Refresh later to see the result.',
@@ -47,7 +47,8 @@ export default {
       correct_answer: 'Candy question answered correctly.',
       all_public_candy_variants_passed: 'All {count} answers were correct.',
       single_public_item_failed: 'Incorrect answer. The question is public, so a single miss does not indicate a downgrade. Retest recommended.',
-      one_or_more_public_candy_variants_failed: 'At least 1 of {count} answers was not {answer}. Reminder only; retest later.',
+      one_or_more_public_candy_variants_failed: 'At least 1 of {count} answers was not {answer}. The question is public; retest to confirm.',
+      one_or_more_public_candy_variants_failed_unversioned: 'At least 1 of {count} answers was wrong. The question is public; retest to confirm.',
       insufficient_valid_samples: '{valid}/{required} valid answers, not enough to conclude. The upstream may be unstable; try again later.',
       insufficient_cells: 'Not enough valid samples; no verdict this run.',
       no_versioned_baseline: 'No reference samples for this model; comparison unavailable.',
@@ -71,15 +72,32 @@ export default {
       response_incomplete: 'Upstream response was interrupted; no verdict this run.',
       response_failed: 'Upstream response failed; no verdict this run.',
       previous_response_not_found: 'Upstream could not find the previous response; no verdict this run.',
-      upstream_error: 'Upstream returned an unknown error; no verdict this run.'
+      upstream_error: 'Upstream returned an unknown error; no verdict this run.',
+      rate_limited: 'Upstream rate limit; test incomplete. Try again later.',
+      account_error: 'Upstream rejected the account. Check the account credentials and permissions.',
+      network_error: 'Could not reach the upstream; test incomplete.',
+      stream_error: 'The upstream response stream failed; no verdict this run.',
+      missing_terminal: 'The upstream stream ended before the response completed; no verdict this run.',
+      missing_ticket: 'The upstream returned no route ticket, so a route change cannot be checked.',
+      credential_unavailable: 'The account’s OAuth credentials could not be used, so no request was sent. Check the account authorization.',
+      unsupported_account: 'State probe only supports direct OpenAI OAuth accounts.',
+      unavailable: 'State probe is unavailable on this server; no request was sent.',
+      cancelled: 'The test was cancelled before it finished.',
+      request_invalid: 'The probe request could not be built; no request was sent.'
     },
     tests: {
       title: 'Integrity tests',
-      headerDescription: 'Check whether accounts serve the requested model. Results are reminders only.',
-      description: 'Periodically checks, with fixed questions and sampling, whether accounts serve the requested model and whether request routes stay stable. Results are reminders only: they do not affect account ranking and do not change BPS state. Automatic BPS switching is driven by each account’s independent probe under Scheduling policy.',
+      headerDescription: 'Check for degraded models. Automatic results can affect ranking.',
+      description: 'Periodically checks, with fixed questions and sampling, whether accounts serve the requested model and whether request routes stay stable. With evaluation effects on, the integrity pass rate from automatic tests ranks accounts under “Avoid degradation” and under “Custom balance” when it has a pass-rate weight. Manual tests are diagnostics only and never affect ranking. Test results do not change BPS state; automatic BPS switching is driven by each account’s independent probe under Scheduling policy.',
       budget: 'Automatic tests send about {requests} upstream requests per day ({plans} automatic plans).',
       budgetNone: 'Automatic tests are off. Only manual tests send requests.',
       budgetHint: 'Test requests are billed like normal requests.',
+      budgetRetry: 'Up to about {max} with retries.',
+      maxAttempts: {
+        label: 'Max requests per sample',
+        unit: 'including the first',
+        hint: 'Applies to manual and automatic Candy, Fingerprint and ModelTrace tests. 1–10, default 3. Failed requests are retried automatically and retries are billed. State probe sends two linked requests and never retries.'
+      },
       targets: 'Test targets',
       targetsHint: 'Each target is an account + model + reasoning effort combination, tested independently.',
       search: 'Search accounts or models',
@@ -96,7 +114,7 @@ export default {
       types: {
         candy: {
           name: 'Candy question',
-          what: 'Asks a public question with a known answer {count} times and checks that every answer is correct. An incorrect answer only indicates a retest is needed.'
+          what: 'Asks a public question with a known answer {count} times and checks that every answer is correct. The question is public, so retest a single wrong answer to confirm.'
         },
         fingerprint: {
           name: 'Behavior fingerprint',
@@ -104,19 +122,19 @@ export default {
         },
         modeltrace: {
           name: 'ModelTrace attribution',
-          what: 'Sends 3 requests and infers the closest model from response behavior. A non-Luna attribution is marked likely normal. For reference only.'
+          what: 'Sends {count} requests and infers the closest of {candidates} reference models from response behavior. A non-Luna attribution is marked likely normal; a Luna attribution is marked possibly degraded.'
         },
         state_probe: {
           name: 'State probe',
-          what: 'Sends two linked requests to detect whether the route switches mid-way. The result is a reminder only and does not change BPS state; automatic BPS switching is driven by the account probe under Scheduling policy.'
+          what: 'Sends two linked requests to detect whether the route switches mid-way. The result is not part of the integrity pass rate and does not change BPS state; automatic BPS switching is driven by the account probe under Scheduling policy.'
         }
       },
-      alertOnly: 'Reminder only',
       runNow: 'Test now',
       running: 'Testing…',
       progress: {
         starting: 'Starting test',
-        samples: 'Sampling {done}/{total}'
+        samples: 'Sampling {done}/{total}',
+        requests: '{count} upstream requests sent'
       },
       runDone: 'Test finished',
       runFailed: 'Failed to start test',
@@ -151,12 +169,15 @@ export default {
         custom: 'Current: {mode}'
       },
       perRun: '{count} requests per run',
+      perRunRetry: '{count} requests per run, up to {max} with retries',
+      perRunNoRetry: '{count} requests per run, no retries',
       perDay: '≈ {count} requests / day',
       perDayOff: 'Automatic runs off',
       nextRun: 'Next {time}',
       lastRun: 'Last {time}',
       neverRun: 'Not tested yet',
-      onlyDirectOAuth: 'Only for direct OpenAI OAuth accounts on the default reasoning effort.',
+      onlyDirectOAuth: 'Only for direct OpenAI OAuth accounts.',
+      stateProbeDefaultEffort: 'State probe runs on the account\'s default reasoning effort, whatever effort this target tests.',
       goScheduling: 'Configure BPS on the Scheduling policy page',
       manualSampleTitle: 'Select sample size',
       manualSampleHint: 'Applies to this manual run only and does not change the schedule. More samples give a more reliable result and send more requests.',
@@ -202,10 +223,54 @@ export default {
         modeltraceMetric: 'Attributed model {model}, probability {probability}.',
         fingerprintNearest: 'Closest reference model: {model}.',
         nearestModel: 'Closest reference model',
-        attributionNote: 'Attribution results are reminders only and are not used in account scheduling.',
+        attributionNote: 'Attribution is inferred from response behavior and does not prove the actual route. Only automatic test results count toward the integrity pass rate; manual tests are diagnostics only.',
         stateProbeMetric: 'Status codes {mint} / {cont}, {ticket}',
         newTicket: 'route switched',
-        sameTicket: 'route unchanged'
+        sameTicket: 'route unchanged',
+        ticketUnknown: 'route change not determined',
+        logicalSamples: 'Valid / planned samples',
+        physicalRequests: 'Upstream requests (incl. retries)',
+        expected: 'Expected answer',
+        expectedUnknown: 'This record does not name its question version, so the expected answer at the time is unknown.',
+        historical: 'This record used an older question set (data version {version}); the expected answer is the one for that question.'
+      },
+      samples: {
+        title: 'Samples',
+        index: 'Sample {n}',
+        state: {
+          correct: 'Correct',
+          wrong: 'Wrong',
+          valid: 'Valid',
+          invalid: 'Invalid answer',
+          error: 'Request failed'
+        },
+        attempts: '{count} attempts',
+        http: 'HTTP {status}',
+        errorNoCode: 'Request failed',
+        answer: 'Model answer',
+        answers: 'Model answers: ',
+        noAnswer: 'No answer returned',
+        extractedAnswer: 'Extracted answer',
+        noExtractedAnswer: 'No answer extracted',
+        fullModelReply: 'Full model reply',
+        labelSeparator: ': ',
+        error: 'Error message',
+        attemptLog: 'Attempts',
+        attempt: 'Attempt {attempt}',
+        legacy: 'Older record; answers and error details were not stored.',
+        none: 'This record has no per-sample results.',
+        failureSummary: '{count} samples failed: {error} ({attempts} attempts).',
+        separator: ', ',
+        showAll: 'Show all {count} samples',
+        stateProbe: {
+          mint: 'First request',
+          continue: 'Linked request',
+          completed: 'Completed',
+          completedNote: 'The request completed. This check compares route tickets only, so no answer text is stored.',
+          notSent: 'Not sent',
+          failure: '{request} failed: {error}.',
+          notSentFailure: 'No request was sent: {error}.'
+        }
       },
       add: {
         title: 'Add test targets',
@@ -221,6 +286,16 @@ export default {
         added: 'Added {count} test targets. Takes effect after saving.',
         skipped: '{count} combinations already exist and were skipped.'
       },
+      edit: {
+        open: 'Edit',
+        title: 'Edit test target',
+        account: 'Account',
+        submit: 'Apply',
+        updated: 'Applied. Takes effect after saving.',
+        duplicate: 'This account already has a {target} test target.',
+        hint: 'Automatic test plans stay the same; the change applies to future tests only. History keeps the original model and reasoning effort.',
+        stateProbeDefault: 'State probe keeps running on the account\'s default reasoning effort; its automatic plan is unchanged.'
+      },
       baselineNote: 'Fingerprint reference version {version}.'
     },
     scheduling: {
@@ -232,11 +307,16 @@ export default {
         hint: 'Determines the order only among accounts that meet the scheduling conditions; whether an account can be scheduled is decided by the scheduling conditions.',
         defaultLabel: 'Default policy',
         factors: {
+          quality: 'Integrity pass rate',
           price: 'Price',
           errors: 'Error rate',
           speed: 'First-token latency'
         },
         levelAria: '{factor}: {level} of 4',
+        qualityMode: {
+          tier: 'Filtered first',
+          ignored: 'Not used'
+        },
         options: {
           legacy: {
             name: 'System default',
@@ -248,29 +328,53 @@ export default {
           },
           stability_first: {
             name: 'Stability first',
-            effect: 'Prefers accounts with low error rates and short first-token latency; price weight follows system settings. Integrity test results are not considered.'
+            effect: 'Prefers accounts with low request error rates and short first-token latency; price weight follows system settings. The integrity pass rate is not considered.'
           },
           avoid_degradation: {
             name: 'Avoid degradation',
-            effect: 'Greatly reduces the price weight and prefers accounts with low error rates and stable responses.'
+            effect: 'Chooses from the best integrity pass rate tier first and ranks that tier by price and operational stability. If that tier has no available capacity, the next tier is tried.'
           },
           custom_balance: {
             name: 'Custom balance',
-            effect: 'Ranks accounts by custom price, stability, error rate, first-token latency and load weights.'
+            effect: 'Ranks accounts by custom price, error rate, first-token latency, load and integrity pass rate weights.'
           }
         },
         custom: {
           title: 'Custom weights',
           hint: 'Enter percentages; they are normalized on save. Higher weights have more influence on ranking.',
           cost: 'Price',
-          stability: 'Stability',
           error_rate: 'Error rate',
           ttft: 'First-token latency',
           load: 'Concurrency load',
+          quality: 'Integrity pass rate',
+          help: {
+            cost: 'Account billing multiplier; lower ranks first.',
+            error_rate: 'Share of real requests that failed. Not a sign of degradation.',
+            ttft: 'Wait for the first output, not the time to a full answer.',
+            load: 'Current concurrency and queue use.',
+            quality: 'Selected automatic tests whose verdict passed or likely passed ÷ tests selected.'
+          },
+          legacyFolded: 'The old “Stability” weight was merged as 60% error rate and 40% first-token latency; ranking is unchanged.',
           zeroTotal: 'Weights must add up to more than 0. Set at least one weight.'
         },
-        avoidNote: 'Integrity test results are currently reminders only and do not affect ranking, so “Avoid degradation” differs from “Stability first” mainly by a lower price weight.',
+        avoidNote: 'The integrity pass rate is counted per test: of the selected Candy, Fingerprint and ModelTrace tests, how many had a passed or likely passed verdict in their latest automatic run, divided by the number selected. Two selected with one passing is 50%; three selected with one passing is 33.3%. Each test counts once by its final verdict, whatever its sample count or retries. If any selected test has no valid verdict (insufficient evidence, request failure or expired), the rate is unknown and counts as neither passed nor degraded. “Avoid degradation” chooses from the best pass rate tier first and ranks within it by price and operational stability; if that tier has no available capacity, the next tier is tried. Account disabling, model support, capacity and continued-response account binding are still checked live.',
         sharedNote: 'Account priority weight is the same under every policy. Load weight is adjustable only under “Custom balance”; other policies use system settings.'
+      },
+      quality: {
+        title: 'Ranking evaluation interval',
+        hint: 'How often the integrity pass rate is recalculated from stored automatic test results for “Avoid degradation” and “Custom balance”. Separate from test frequency; it sends no new test requests.',
+        interval: 'Interval',
+        refreshNow: 'Refresh now',
+        refreshing: 'Refreshing…',
+        refreshDone: 'Refreshed the integrity pass rate for {count} targets.',
+        refreshFailed: 'Refresh failed. Ranking keeps using the previous pass rate.',
+        lastRefresh: 'Last refreshed {time}',
+        nextRefresh: 'Next {time}',
+        neverRefreshed: 'Not refreshed yet',
+        routes: '{count} targets in this refresh',
+        pending: 'The new interval applies after saving; it still refreshes every {interval}. “Refresh now” uses the saved settings.',
+        effectsOff: 'Evaluation effects are off: the integrity pass rate does not affect ranking, and pass-rate weights in “Avoid degradation” and “Custom balance” are inactive.',
+        liveChecks: 'Account disabling, model support, rate-limit cooldown, concurrency and continued-response account binding are always checked live, whatever the interval.'
       },
       rules: {
         title: 'Model rules',
@@ -423,8 +527,14 @@ export default {
           errors: 'Error rate',
           ttft: 'First-token latency',
           load: 'Load',
+          quality: 'Integrity pass rate',
           score: 'Score'
         },
+        qualityCounts: '{passed} of {evaluated} tests passed',
+        qualitySplit: '{pass} passed, {suspected} likely passed',
+        qualityContribution: 'Score contribution {value}',
+        qualityUnknown: 'Unknown',
+        qualityHint: 'Selected automatic tests whose final verdict passed or likely passed ÷ tests selected; each test has equal weight. Unknown when any selected test has no valid verdict; it is not 100%.',
         verdict: {
           selected: 'Selected',
           topK: 'Candidate',
@@ -442,6 +552,7 @@ export default {
         rate_ladder_same_rate: 'Accounts with the same multiplier are preferred when switching.',
         rate_ladder_upgrade: 'No available account at the same multiplier; switched to a higher multiplier.',
         rate_ladder_lower_rate_fallback: 'Switched to a lower-multiplier account.',
+        quality_tier_selection: 'Chose from the best integrity pass rate tier first, then by price and operational stability within that tier.',
         no_selection: 'No account available; the request was not sent.',
         selection_error: 'Account selection failed.',
         unknown: 'Other reason ({code}).'
@@ -476,7 +587,9 @@ export default {
         ranked_below_top_k: 'Available, but not ranked high enough to be a candidate.',
         same_rate_candidate: 'Same multiplier as the previous account.',
         higher_rate_candidate: 'Higher multiplier than the previous account.',
-        below_migration_rate: 'Lower multiplier than the previous account; not considered for this switch.'
+        below_migration_rate: 'Lower multiplier than the previous account; not considered for this switch.',
+        quality_tier_top_k_candidate: 'In the best integrity pass rate tier; a candidate by score.',
+        quality_lower_tier_fallback: 'Higher pass rate tiers had no available capacity, so this tier was used.'
       }
     }
   }

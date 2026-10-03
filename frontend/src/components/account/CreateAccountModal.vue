@@ -3040,6 +3040,23 @@
           <p class="input-hint">{{ t('admin.accounts.priorityHint') }}</p>
         </div>
         <div>
+          <label class="input-label">{{ t('admin.accounts.rpmLimit') }}</label>
+          <input
+            v-model.number="rpmLimit"
+            type="number"
+            min="0"
+            max="10000"
+            step="1"
+            inputmode="numeric"
+            :class="['input', rpmLimitInvalid ? 'border-red-500 dark:border-red-500' : '']"
+            :aria-invalid="rpmLimitInvalid ? 'true' : undefined"
+            :placeholder="t('admin.accounts.rpmLimitPlaceholder')"
+            data-testid="account-rpm-limit"
+          />
+          <p v-if="rpmLimitInvalid" class="input-error-text" data-testid="account-rpm-limit-error">{{ t('admin.accounts.rpmLimitInvalid', { max: 10000 }) }}</p>
+          <p v-else class="input-hint">{{ t('admin.accounts.rpmLimitHint') }}</p>
+        </div>
+        <div>
           <label class="input-label">{{ t('admin.accounts.billingRateMultiplier') }}</label>
           <input v-model.number="form.rate_multiplier" type="number" min="0" step="0.001" class="input" />
           <p class="input-hint">{{ t('admin.accounts.billingRateMultiplierHint') }}</p>
@@ -4035,10 +4052,24 @@ const oauthStepTitle = computed(() => {
 // Platform-specific hints for API Key type
 // 上游ID：直接上游声明请求标识的响应头名，留空不记录。
 const upstreamRequestIdHeader = ref('')
+// 账号级 RPM 上限（extra.rpm_limit）：跨分组/模型共享，0 表示不限制，独立于并发与旧 base_rpm。
+const RPM_LIMIT_MAX = 10000
+const rpmLimit = ref<number | ''>(0)
+const rpmLimitInvalid = computed(() => {
+  const value = rpmLimit.value
+  if (value === '' || value == null) return false
+  return !Number.isInteger(value) || value < 0 || value > RPM_LIMIT_MAX
+})
+// Every create path funnels its extra through here, so account-wide fields
+// (upstream request-id header, RPM limit) apply to all platforms and types.
 const withUpstreamRequestIdHeader = <T extends Record<string, unknown> | undefined>(extra: T): T | Record<string, unknown> => {
   const name = upstreamRequestIdHeader.value.trim()
-  if (!name) return extra
-  return { ...(extra || {}), upstream_request_id_header: name }
+  const rpm = typeof rpmLimit.value === 'number' && !rpmLimitInvalid.value ? rpmLimit.value : 0
+  if (!name && rpm <= 0) return extra
+  const next: Record<string, unknown> = { ...(extra || {}) }
+  if (name) next.upstream_request_id_header = name
+  if (rpm > 0) next.rpm_limit = rpm
+  return next
 }
 
 const baseUrlHint = computed(() => {
@@ -5350,6 +5381,7 @@ const resetForm = () => {
   apiKeyValue.value = ''
   upstreamRequestIdHeader.value = ''
   upstreamBillingAutoProbeEnabled.value = true
+  rpmLimit.value = 0
   editQuotaLimit.value = null
   editQuotaDailyLimit.value = null
   editQuotaWeeklyLimit.value = null
@@ -5658,6 +5690,10 @@ const handleVertexServiceAccountDrop = async (event: DragEvent) => {
 }
 
 const handleSubmit = async () => {
+  if (rpmLimitInvalid.value) {
+    appStore.showError(t('admin.accounts.rpmLimitInvalid', { max: RPM_LIMIT_MAX }))
+    return
+  }
   // For OAuth-based type, handle OAuth flow (goes to step 2)
   if (isOAuthFlow.value) {
     if (!isGrokSSOInputMethod.value && !form.name.trim()) {

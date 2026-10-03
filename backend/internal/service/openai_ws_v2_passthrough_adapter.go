@@ -358,6 +358,50 @@ func (l *openAIWSPassthroughTurnLifecycle) finishTerminalWrite(succeeded bool, o
 	l.mu.Unlock()
 }
 
+// Relay usage is authoritative before delivery, but routing evidence is not.
+// Keep the turn snapshot until its terminal write settles, while admission is locked.
+type openAIWSPassthroughTurnCompletion struct {
+	turn          int
+	terminalEvent string
+	result        *OpenAIForwardResult
+	evidence      *openAIWSIntegrityEvidence
+	settled       bool
+}
+
+func (p *openAIWSPassthroughTurnCompletion) settle(cancelled bool, afterTurn func(int, *OpenAIForwardResult, error)) {
+	if p == nil || p.settled {
+		return
+	}
+	p.settled = true
+	p.evidence.apply(p.result, false, cancelled || !p.evidence.terminalWasDelivered(p.terminalEvent))
+	if afterTurn != nil {
+		// A downstream failure must not discard already-observed upstream usage.
+		afterTurn(p.turn, p.result, nil)
+	}
+}
+
+func prepareOpenAIWSPassthroughIntegrityFrames(evidence *openAIWSIntegrityEvidence, msgType coderws.MessageType, payload []byte) ([]openaiwsv2.RelayClientFrame, error) {
+	eventType, _, _ := parseOpenAIWSEventEnvelope(payload)
+	if msgType != coderws.MessageText {
+		var frames []openaiwsv2.RelayClientFrame
+		if eventType != "keepalive" {
+			for _, pending := range evidence.takePendingFrames() {
+				frames = append(frames, openaiwsv2.RelayClientFrame{MessageType: coderws.MessageText, Payload: pending})
+			}
+		}
+		return append(frames, openaiwsv2.RelayClientFrame{MessageType: msgType, Payload: payload}), nil
+	}
+	frames, err := evidence.prepareDelivery(eventType, payload)
+	if err != nil {
+		return nil, err
+	}
+	prepared := make([]openaiwsv2.RelayClientFrame, len(frames))
+	for i, frame := range frames {
+		prepared[i] = openaiwsv2.RelayClientFrame{MessageType: coderws.MessageText, Payload: frame}
+	}
+	return prepared, nil
+}
+
 type openAIWSPassthroughFirstOutputFrameConn struct {
 	inner             openaiwsv2.FrameConn
 	resolveDeadline   func(payload []byte) openAIWSPassthroughFirstOutputDeadline
@@ -809,7 +853,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	// goroutine）之间同步当前 turn 的 usage metadata。
 	usageMeta.initFromFirstFrame(firstClientMessage, capturedSessionModel)
 	usageMeta.captureRequestedReasoningEffort(originalFirstClientMessage, capturedSessionModel)
-	var activeIntegrity, eventIntegrity, terminalIntegrity atomic.Pointer[openAIWSIntegrityEvidence]
+	var activeIntegrity, eventIntegrity atomic.Pointer[openAIWSIntegrityEvidence]
 	activeIntegrity.Store(newOpenAIWSIntegrityEvidence(originalFirstClientMessage, firstClientMessage))
 	_, initialUpstreamModel := usageMeta.turnModels(initialRequestModel)
 	SetOpsUpstreamModel(c, initialUpstreamModel)
@@ -925,6 +969,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	if !ok {
 		return errors.New("openai ws passthrough upstream connection does not support frame relay")
 	}
+	upstreamFrameConn = &accountRPMFrameConn{FrameConn: upstreamFrameConn, admit: func(admitCtx context.Context) error { return s.admitAccountRPM(admitCtx, account) }}
 	relayUpstreamFrameConn := &openAIWSPassthroughFirstOutputFrameConn{
 		inner:             upstreamFrameConn,
 		activeReadTimeout: s.openAIWSPassthroughIdleTimeout(),
@@ -955,6 +1000,8 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	}
 
 	completedTurns := atomic.Int32{}
+	startedTurns := atomic.Int32{}
+	startedTurns.Store(1)
 	turnLifecycle := newOpenAIWSPassthroughTurnLifecycle(true)
 	var acceptedTurnStartedAt atomic.Pointer[time.Time]
 	clientFrameConn := &openAIWSClientFrameConn{
@@ -997,6 +1044,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 					err := errors.New("overlapping response.create is not supported")
 					return payload, nil, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, err.Error(), err)
 				}
+				startedTurns.Add(1)
 				defer func() {
 					if !acceptedTurn {
 						turnLifecycle.cancelResponseCreate()
@@ -1165,6 +1213,9 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	firstWriteCtx, cancelFirstWrite := context.WithTimeout(ctx, s.openAIWSWriteTimeout())
 	firstWriteErr := relayUpstreamFrameConn.WriteFrame(firstWriteCtx, coderws.MessageText, firstClientMessage)
 	cancelFirstWrite()
+	if IsAccountRPMError(firstWriteErr) {
+		return firstWriteErr
+	}
 	if firstWriteErr != nil {
 		return wrapOpenAIWSIngressTurnError(
 			"write_upstream",
@@ -1195,6 +1246,24 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	}
 	failureAccountSideEffectsApplied := false
 	var rejectedIntegrityResult *OpenAIForwardResult
+	var pendingTurn *openAIWSPassthroughTurnCompletion
+	var settledIntegrity *openAIWSIntegrityEvidence
+	var downstreamUnavailable atomic.Bool
+	settlePendingTurn := func(cancelled bool) {
+		if pendingTurn == nil {
+			return
+		}
+		completion := pendingTurn
+		pendingTurn = nil
+		completion.settle(cancelled || downstreamUnavailable.Load(), func(turn int, result *OpenAIForwardResult, _ error) {
+			// Bind the creating epoch before AfterTurn can advance the future root.
+			s.bindHTTPResponseAccount(ctx, c, account, result.RequestID)
+			settledIntegrity = completion.evidence
+			if hooks != nil && hooks.AfterTurn != nil {
+				hooks.AfterTurn(turn, result, nil)
+			}
+		})
+	}
 	relayResult, relayExit := openaiwsv2.RunEntry(openaiwsv2.EntryInput{
 		Ctx:                ctx,
 		ClientConn:         policyClientConn,
@@ -1226,13 +1295,8 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 				)
 			},
 			OnTurnComplete: func(turn openaiwsv2.RelayTurnResult) {
+				settlePendingTurn(true)
 				turnNo := int(completedTurns.Add(1))
-				if responseID := strings.TrimSpace(turn.RequestID); responseID != "" {
-					groupID := getOpenAIGroupIDFromContext(c)
-					stateStore := s.getOpenAIWSStateStore()
-					logOpenAIWSBindResponseAccountWarn(groupID, account.ID, responseID, stateStore.BindResponseAccount(ctx, groupID, responseID, account.ID, s.openAIWSResponseStickyTTL()))
-					s.bindOpenAIResponseRouteEpoch(ctx, c, account, responseID)
-				}
 				if hooks != nil && hooks.TurnStarted != nil && !turn.StartedAt.IsZero() {
 					hooks.TurnStarted(turnNo, turn.StartedAt)
 				}
@@ -1261,7 +1325,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 					Duration:                      turn.Duration,
 					FirstTokenMs:                  turn.FirstTokenMs,
 				}
-				terminalIntegrity.Load().apply(turnResult, false, ctx.Err() != nil)
+				pendingTurn = &openAIWSPassthroughTurnCompletion{turn: turnNo, terminalEvent: turn.TerminalEventType, result: turnResult, evidence: activeIntegrity.Load()}
 				logOpenAIWSV2Passthrough(
 					"relay_turn_completed account_id=%d turn=%d request_id=%s terminal_event=%s turn_requested_model=%s turn_upstream_model=%s duration_ms=%d first_token_ms=%d input_tokens=%d output_tokens=%d cache_read_tokens=%d",
 					account.ID,
@@ -1276,8 +1340,10 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 					turnResult.Usage.OutputTokens,
 					turnResult.Usage.CacheReadInputTokens,
 				)
-				if hooks != nil && hooks.AfterTurn != nil {
-					hooks.AfterTurn(turnNo, turnResult, nil)
+				if turn.TerminalEventType == "error" {
+					// Bare errors are finalized by the relay after their write, or
+					// at exit if no authoritative response.failed follows them.
+					settlePendingTurn(ctx.Err() != nil)
 				}
 			},
 			BeforeClientWrite: func(msgType coderws.MessageType, payload []byte) {
@@ -1286,18 +1352,24 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 				}
 			},
 			AfterClientWrite: func(msgType coderws.MessageType, payload []byte, writeErr error) {
-				if msgType == coderws.MessageText && writeErr == nil {
+				if writeErr == nil {
 					eventType, _, _ := parseOpenAIWSEventEnvelope(payload)
 					if evidence := eventIntegrity.Load(); evidence != nil {
 						evidence.delivered(eventType, payload)
 					}
-					markOpenAIWSClientVisibleFailure(c, eventType, payload)
+					if msgType == coderws.MessageText {
+						markOpenAIWSClientVisibleFailure(c, eventType, payload)
+					}
 				}
 				if msgType == coderws.MessageText && openAIWSPassthroughIsTerminalOutput(payload) {
+					settlePendingTurn(writeErr != nil || ctx.Err() != nil)
 					turnLifecycle.finishTerminalWrite(writeErr == nil, clientFrameConn.markTurnCompleted)
 				}
 			},
 			BeforeRelayCancel: func(exit openaiwsv2.RelayExit) {
+				if exit.Stage == "read_client" || exit.Stage == "write_client" {
+					downstreamUnavailable.Store(true)
+				}
 				if context.Cause(ctx) != nil {
 					return
 				}
@@ -1314,12 +1386,8 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 				_ = clientConn.CloseNow()
 			},
 			PrepareClientFrames: func(msgType coderws.MessageType, payload []byte) ([]openaiwsv2.RelayClientFrame, error) {
-				if msgType != coderws.MessageText {
-					return []openaiwsv2.RelayClientFrame{{MessageType: msgType, Payload: payload}}, nil
-				}
-				eventType, _, _ := parseOpenAIWSEventEnvelope(payload)
 				evidence := activeIntegrity.Load()
-				frames, err := evidence.prepareDelivery(eventType, payload)
+				frames, err := prepareOpenAIWSPassthroughIntegrityFrames(evidence, msgType, payload)
 				if err != nil {
 					if completedTurns.Load() > 0 {
 						turnModel, sentModel := usageMeta.turnModels(requestModel)
@@ -1332,23 +1400,16 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 					}
 					return nil, err
 				}
-				prepared := make([]openaiwsv2.RelayClientFrame, len(frames))
-				for i, frame := range frames {
-					prepared[i] = openaiwsv2.RelayClientFrame{MessageType: msgType, Payload: frame}
-				}
-				return prepared, nil
+				return frames, nil
 			},
 			BeforeWriteClient: func(msgType coderws.MessageType, payload []byte, wroteDownstream bool) error {
+				evidence := activeIntegrity.Load()
+				eventIntegrity.Store(evidence)
 				if msgType != coderws.MessageText {
 					return nil
 				}
 				eventType, _, _ := parseOpenAIWSEventEnvelope(payload)
-				evidence := activeIntegrity.Load()
 				evidence.observe(eventType, payload)
-				eventIntegrity.Store(evidence)
-				if isOpenAIWSTerminalEvent(eventType) {
-					terminalIntegrity.Store(evidence)
-				}
 				if eventType == "response.created" {
 					failureAccountSideEffectsApplied = false
 				}
@@ -1414,8 +1475,11 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			},
 		},
 	})
+	// The relay joins the upstream reader before returning. A terminal may have
+	// been observed while writes were dropped or a preceding staged write failed.
+	settlePendingTurn(true)
 	if cause := context.Cause(ctx); cause != nil {
-		if evidence := activeIntegrity.Load(); evidence != nil && evidence != terminalIntegrity.Load() {
+		if evidence := activeIntegrity.Load(); evidence != nil && evidence != settledIntegrity {
 			s.bindHTTPResponseAccount(ctx, c, account, evidence.deliveredID())
 		}
 		if isOpenAIWSSessionPreempted(ctx) {
@@ -1494,6 +1558,12 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	)
 
 	relayErr := relayExit.Err
+	if IsAccountRPMError(relayErr) {
+		if hooks != nil && hooks.AfterTurn != nil {
+			hooks.AfterTurn(turnCount+1, nil, relayErr)
+		}
+		return accountRPMWSTurnError(relayErr, turnCount+1)
+	}
 	var firstOutputTimeoutErr *openAIWSPassthroughFirstOutputTimeoutError
 	if errors.As(relayErr, &firstOutputTimeoutErr) {
 		deadline := firstOutputTimeoutErr.deadline
@@ -1541,12 +1611,16 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 			relayErr,
 		)
 	}
+	var replayable *UpstreamFailoverError
+	if (relayExit.WroteDownstream || turnCount > 0) && errors.As(relayErr, &replayable) {
+		relayErr = NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "upstream response failed; please reconnect", errors.New("upstream failure after downstream output"))
+	}
 	turnErr := wrapOpenAIWSIngressTurnError(
 		relayExit.Stage,
 		relayErr,
 		relayExit.WroteDownstream,
 	)
-	if hooks != nil && hooks.AfterTurn != nil {
+	if hooks != nil && hooks.AfterTurn != nil && (activeIntegrity.Load() != settledIntegrity || startedTurns.Load() > completedTurns.Load()) {
 		if hooks.TurnStarted != nil {
 			hooks.TurnStarted(turnCount+1, time.Now().Add(-result.Duration))
 		}
@@ -1554,13 +1628,14 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		if failedResult == nil {
 			turnModel, sentModel := usageMeta.turnModels(requestModel)
 			failedResult = &OpenAIForwardResult{Model: turnModel, UpstreamModel: sentModel, OpenAIWSMode: true,
-				RequestedReasoningEffort: usageMeta.requestedReasoningEffort.Load()}
-			if evidence := activeIntegrity.Load(); evidence != terminalIntegrity.Load() {
+				RequestedReasoningEffort: usageMeta.requestedReasoningEffort.Load(),
+				ClientDisconnect:         ctx.Err() != nil || relayExit.Stage == "read_client" || relayExit.Stage == "write_client"}
+			if evidence := activeIntegrity.Load(); evidence != settledIntegrity {
 				evidence.apply(failedResult, relayExit.Stage == "read_upstream", ctx.Err() != nil || relayExit.Stage == "read_client" || relayExit.Stage == "write_client")
 			}
 			var failoverErr *UpstreamFailoverError
 			if !errors.As(turnErr, &failoverErr) {
-				if evidence := activeIntegrity.Load(); evidence != nil && evidence != terminalIntegrity.Load() {
+				if evidence := activeIntegrity.Load(); evidence != nil && evidence != settledIntegrity {
 					s.bindHTTPResponseAccount(ctx, c, account, evidence.deliveredID())
 				}
 			}
@@ -1571,6 +1646,9 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 }
 
 func openAIWSPassthroughRelayClientClose(exit openaiwsv2.RelayExit, completedTurns int) (coderws.StatusCode, string, bool) {
+	if IsAccountRPMError(exit.Err) {
+		return coderws.StatusTryAgainLater, "account RPM admission denied; retry later", true
+	}
 	var closeErr *OpenAIWSClientCloseError
 	if errors.As(exit.Err, &closeErr) {
 		return closeErr.StatusCode(), closeErr.Reason(), true

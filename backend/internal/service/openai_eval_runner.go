@@ -63,6 +63,10 @@ func (r *OpenAIEvalRunner) Stop() {
 
 func (r *OpenAIEvalRunner) loop(ctx context.Context, done chan struct{}) {
 	defer close(done)
+	// A long model evaluation must not delay quality snapshot refreshes.
+	qualityDone := make(chan struct{})
+	go r.qualityRefreshLoop(ctx, qualityDone)
+	defer func() { <-qualityDone }()
 	ticker := time.NewTicker(openAIEvalRunnerInterval)
 	defer ticker.Stop()
 	r.runDue(ctx)
@@ -72,6 +76,25 @@ func (r *OpenAIEvalRunner) loop(ctx context.Context, done chan struct{}) {
 			return
 		case <-ticker.C:
 			r.runDue(ctx)
+		}
+	}
+}
+
+func (r *OpenAIEvalRunner) qualityRefreshLoop(ctx context.Context, done chan struct{}) {
+	defer close(done)
+	ticker := time.NewTicker(openAIEvalRunnerInterval)
+	defer ticker.Stop()
+	for {
+		refreshCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		_, err := r.service.refreshOpenAIEvalQuality(refreshCtx, false)
+		cancel()
+		if err != nil && ctx.Err() == nil {
+			logger.LegacyPrintf("service.openai_eval_runner", "[OpenAIEvalRunner] quality refresh failed: %v", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
 		}
 	}
 }

@@ -100,6 +100,8 @@ func observeOpenAINonStreamingOutcome(c *gin.Context, body []byte) *openaiStream
 			switch strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "status").String())) {
 			case "completed", "incomplete", "failed", "cancelled", "canceled":
 				eventType = "response." + strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "status").String()))
+			case "terminated":
+				eventType = "response.done"
 			default:
 				return nil
 			}
@@ -227,6 +229,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		}
 		return int64(bufferedWriter.Buffered())
 	}
+	pendingVisibleOutput, deliveredVisibleOutput := false, false
 	flushBuffered := func() error {
 		if firstOutputStage != nil && !firstOutputStage.closed {
 			if err := firstOutputStage.CommitTo(w); err != nil {
@@ -238,6 +241,8 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			}
 		}
 		flusher.Flush()
+		deliveredVisibleOutput = deliveredVisibleOutput || pendingVisibleOutput
+		pendingVisibleOutput = false
 		return nil
 	}
 
@@ -467,7 +472,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			responsesProtocolStatus:    responsesProtocolStatus,
 			responsesStatus:            responsesStatus,
 			responsesIncompleteReason:  responsesIncompleteReason,
-			responsesMeaningfulOutput:  responsesSemanticOutputSeen && !strongToolLeakRejected,
+			responsesMeaningfulOutput:  deliveredVisibleOutput,
 			responsesToolCallForwarded: responsesToolCallForwarded,
 			toolCapabilityFailure:      toolCapabilityFailure,
 			execCallObserved:           isNativeOpenAIResponsesRequest(c) && capability.ClientExecDeclared && capability.OutboundExecDeclared && capability.ExecCallObserved,
@@ -924,6 +929,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 					handlePendingWriteError(err)
 				} else {
 					eventInProgress = true
+					pendingVisibleOutput = pendingVisibleOutput || startsVisibleOutput
 				}
 			}
 

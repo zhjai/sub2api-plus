@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -96,5 +97,27 @@ func TestOpenAIEvalHandlersFailClosedWithoutService(t *testing.T) {
 		recorder := httptest.NewRecorder()
 		router.ServeHTTP(recorder, httptest.NewRequest(route.method, route.path, nil))
 		require.Equal(t, http.StatusServiceUnavailable, recorder.Code, route.method+" "+route.path)
+	}
+}
+
+func TestMergeOpenAIEvalConfigPreservesAttemptsForOlderClients(t *testing.T) {
+	current := &service.OpenAIEvalConfig{MaxRequestAttempts: 8}
+	incoming := &service.OpenAIEvalConfig{}
+	mergeOpenAIEvalConfigOmittedFields(incoming, current, map[string]json.RawMessage{})
+	require.Equal(t, 8, incoming.MaxRequestAttempts)
+	incoming.MaxRequestAttempts = 1
+	mergeOpenAIEvalConfigOmittedFields(incoming, current, map[string]json.RawMessage{"max_request_attempts": json.RawMessage("1")})
+	require.Equal(t, 1, incoming.MaxRequestAttempts)
+}
+
+func TestOpenAIEvalConfigRejectsInvalidExplicitAttempts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := &AccountHandler{openAIEvalService: service.NewOpenAIEvalService(nil, nil, nil)}
+	router := gin.New()
+	router.PUT("/config", h.UpdateOpenAIEvalConfig)
+	for _, value := range []string{"0", "-1", "11", "1.5", "null", `"3"`} {
+		r := httptest.NewRecorder()
+		router.ServeHTTP(r, httptest.NewRequest(http.MethodPut, "/config", strings.NewReader(`{"max_request_attempts":`+value+`}`)))
+		require.Equal(t, http.StatusBadRequest, r.Code, value)
 	}
 }

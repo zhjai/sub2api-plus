@@ -23,6 +23,8 @@ func TestOpenAIEvalStateProbeBPSIsolation(t *testing.T) {
 	}{
 		{name: "manual test target", source: "manual", accountConfig: true, wantModel: "gpt-5.4"},
 		{name: "scheduled test target", source: "scheduled", accountConfig: true, wantModel: "gpt-5.4"},
+		{name: "manual high effort target", source: "manual", effort: "high", accountConfig: true, wantModel: "gpt-5.4"},
+		{name: "scheduled xhigh effort target", source: "scheduled", effort: "xhigh", accountConfig: true, wantModel: "gpt-5.4"},
 		{name: "internal account BPS schedule", source: "scheduled", effort: OpenAIEvalBPSAccountEffort, accountConfig: true, wantModel: "gpt-6-astra", wantUpdate: true},
 		{name: "legacy manual probe without account entry", source: "manual", wantModel: "gpt-5.4"},
 		{name: "legacy scheduled probe without account entry", source: "scheduled", wantModel: "gpt-5.4"},
@@ -76,6 +78,8 @@ func TestOpenAIEvalStateProbeBPSIsolation(t *testing.T) {
 			require.Equal(t, tc.wantModel, run.UpstreamModel)
 			require.Empty(t, run.ReasoningEffort)
 			require.Len(t, upstream.requests, 2)
+			require.Equal(t, "unsupported_linked_ticket_chain", run.Outcome.StateProbe.RetryPolicy)
+			require.Len(t, run.Samples, 2)
 			for _, req := range upstream.requests {
 				var body struct {
 					Model string `json:"model"`

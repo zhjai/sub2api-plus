@@ -21,6 +21,12 @@ type r7OwnerAccountRepo struct {
 	err error
 }
 
+// Owner-lookup failures here apply to previous_response_id validation, not
+// the current selected account's independent RPM configuration read.
+func (r *r7OwnerAccountRepo) GetAccountRPMLimit(context.Context, int64) (int, error) {
+	return 0, nil
+}
+
 func (r *r7OwnerAccountRepo) GetByID(context.Context, int64) (*Account, error) {
 	return nil, r.err
 }
@@ -148,6 +154,7 @@ func TestR7CustomPolicyRankingUsesModelEffortWeights(t *testing.T) {
 	t.Cleanup(func() { SetOpenAIEvalEffectsEnabled(false); SetOpenAIEvalSchedulingPolicySnapshot(nil) })
 	SetOpenAIEvalEffectsEnabled(true)
 	SetOpenAIEvalSchedulingPolicySnapshot(&OpenAIEvalConfig{
+		EffectsEnabled:   true,
 		SchedulingPolicy: OpenAIEvalSchedulingPolicyCustomBalance,
 		CustomBalance:    OpenAIEvalPolicyWeights{Cost: 1},
 		Policies:         []OpenAIEvalSchedulingPolicyRule{{RequestedModel: "gpt-6-astra", ReasoningEffort: "high", Policy: OpenAIEvalSchedulingPolicyCustomBalance, CustomBalance: &OpenAIEvalPolicyWeights{Stability: 1}}},

@@ -92,7 +92,10 @@ func (s *OpenAIGatewayService) forwardOpenAIBPS(ctx context.Context, c *gin.Cont
 	}
 	SetActualOpenAIUpstreamEndpoint(c, "/basispoints/api/responses")
 	SetOpsUpstreamModel(c, model)
-	resp, err := s.httpUpstream.Do(req, proxy, account.ID, account.Concurrency)
+	resp, err := s.doAccountRPMUpstream(req, proxy, account)
+	if IsAccountRPMError(err) {
+		return nil, err
+	}
 	if err != nil {
 		// The bridge has not committed anything downstream yet. Let the native
 		// Responses path make the same request instead of exposing a bridge-only

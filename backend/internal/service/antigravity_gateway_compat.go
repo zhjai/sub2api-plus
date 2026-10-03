@@ -195,6 +195,9 @@ func (s *AntigravityGatewayService) forwardAntigravityCompat(
 		sessionHash:     "",
 	})
 	if err != nil {
+		if IsAccountRPMError(err) {
+			return nil, err
+		}
 		return nil, s.handleAntigravityCompatTransportError(c, err)
 	}
 

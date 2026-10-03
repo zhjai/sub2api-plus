@@ -74,6 +74,9 @@ func (r *openAIEvalRepository) GetConfig(ctx context.Context) (*service.OpenAIEv
 	if cfg.Accounts == nil {
 		cfg.Accounts = []service.OpenAIEvalAccountConfig{}
 	}
+	if cfg.MaxRequestAttempts == 0 {
+		cfg.MaxRequestAttempts = service.OpenAIEvalDefaultMaxRequestAttempts
+	}
 	schedules, err := r.db.QueryContext(ctx, `
 		SELECT account_id, test_type, requested_model, reasoning_effort, sample_count, last_run_at, next_run_at
 		FROM openai_eval_schedule_state`)
@@ -161,6 +164,12 @@ func (r *openAIEvalRepository) SaveConfig(ctx context.Context, cfg *service.Open
 		return service.ErrOpenAIEvalConfigRevisionConflict
 	}
 	disableLegacyBPSForRemovedAccounts(&previous, cfg)
+	if cfg.MaxRequestAttempts == 0 {
+		cfg.MaxRequestAttempts = previous.MaxRequestAttempts
+		if cfg.MaxRequestAttempts == 0 {
+			cfg.MaxRequestAttempts = service.OpenAIEvalDefaultMaxRequestAttempts
+		}
+	}
 	cfg.Revision = previous.Revision + 1
 	payload, err := json.Marshal(cfg)
 	if err != nil {
@@ -471,6 +480,10 @@ func (r *openAIEvalRepository) ListRuns(ctx context.Context, filter service.Open
 			run.ExpectedSamples = run.Outcome.ExpectedCount
 			run.SampleCount = run.Outcome.ExpectedCount
 			run.Phase = run.Outcome.Reason
+		} else {
+			run.CompletedSamples = len(run.Samples)
+			run.ExpectedSamples = run.Outcome.ExpectedCount
+			run.SampleCount = run.Outcome.ExpectedCount
 		}
 		result = append(result, run)
 	}

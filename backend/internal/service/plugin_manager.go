@@ -952,6 +952,21 @@ func (m *PluginManager) RoundTripOpenAIOAuth(ctx context.Context, request *http.
 	if route == nil {
 		return nil, false, nil
 	}
+	// The v1 plugin owns its HTTP transport and cannot request admission for
+	// internal replays. Do not hand it a rate-limited user request until the
+	// protocol supports admission at each upstream send.
+	if HTTPUpstreamSingleSendRequired(ctx) {
+		if request != nil && request.Body != nil {
+			_ = request.Body.Close()
+		}
+		return nil, true, &HTTPUpstreamSingleSendUnsupportedError{}
+	}
+	if rpmErr := accountRPMPluginDispatchCheck(ctx, account); rpmErr != nil {
+		if request != nil && request.Body != nil {
+			_ = request.Body.Close()
+		}
+		return nil, true, rpmErr
+	}
 	if route.runtime == nil {
 		return nil, true, fmt.Errorf("OpenAI OAuth 插件不可用: %s", route.unavailable)
 	}
@@ -964,6 +979,13 @@ func (m *PluginManager) RoundTripOpenAIOAuth(ctx context.Context, request *http.
 	}
 	if !route.runtime.beginRequest() {
 		return nil, true, errors.New("OpenAI OAuth 插件正在停止")
+	}
+	if err := accountRPMPluginDispatchCheck(ctx, account); err != nil {
+		route.runtime.finishRequest()
+		if request != nil && request.Body != nil {
+			_ = request.Body.Close()
+		}
+		return nil, true, err
 	}
 	response, err := route.runtime.roundTrip(ctx, request, proxyURL, account)
 	if err != nil {

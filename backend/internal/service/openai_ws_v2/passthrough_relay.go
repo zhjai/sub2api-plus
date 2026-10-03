@@ -670,7 +670,7 @@ func runUpstreamToClient(
 				exitCh <- relayExitSignal{stage: "write_client", err: writeErr, wroteDownstream: wroteDownstream}
 				return
 			}
-			commitsOutput := msgType != coderws.MessageText || gjson.GetBytes(payload, "type").String() != "keepalive"
+			commitsOutput := gjson.GetBytes(payload, "type").String() != "keepalive"
 			wroteDownstream = wroteDownstream || commitsOutput
 			if state != nil && commitsOutput {
 				state.turnWroteDownstream.Store(true)

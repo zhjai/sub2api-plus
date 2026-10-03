@@ -38,6 +38,7 @@ type OpenAIEvalRunRequest struct {
 	ReasoningEffort string `json:"reasoning_effort"`
 	SampleMode      string `json:"sample_mode,omitempty"`
 	SampleCount     int    `json:"sample_count,omitempty"`
+	MaxAttempts     *int   `json:"max_attempts,omitempty"`
 }
 
 type OpenAIEvalService struct {
@@ -59,11 +60,12 @@ func (s *OpenAIEvalService) Initialize(ctx context.Context) error {
 		return err
 	}
 	if config == nil {
-		SetOpenAIEvalEffectsEnabled(false)
 		SetOpenAIEvalSchedulingPolicySnapshot(nil)
 		return nil
 	}
-	SetOpenAIEvalEffectsEnabled(config.EffectsEnabled)
+	if err := normalizeOpenAIEvalQualityConfig(config); err != nil {
+		return err
+	}
 	SetOpenAIEvalSchedulingPolicySnapshot(config)
 	return nil
 }
@@ -81,7 +83,12 @@ func NewOpenAIEvalService(repo OpenAIEvalRepository, accounts AccountRepository,
 func (s *OpenAIEvalService) GetConfig(ctx context.Context) (*OpenAIEvalConfig, error) {
 	config, err := s.repo.GetConfig(ctx)
 	if err == nil && config != nil {
-		SetOpenAIEvalEffectsEnabled(config.EffectsEnabled)
+		if normalizeErr := normalizeOpenAIEvalQualityConfig(config); normalizeErr != nil {
+			return nil, normalizeErr
+		}
+		if config.MaxRequestAttempts == 0 {
+			config.MaxRequestAttempts = OpenAIEvalDefaultMaxRequestAttempts
+		}
 		SetOpenAIEvalSchedulingPolicySnapshot(config)
 		if s.accounts != nil {
 			accountCache := make(map[int64]*Account)
@@ -95,16 +102,15 @@ func (s *OpenAIEvalService) GetConfig(ctx context.Context) (*OpenAIEvalConfig, e
 			}
 			for i := range config.Accounts {
 				route := &config.Accounts[i]
-				if route.ReasoningEffort != "" {
-					continue
-				}
+				route.DirectOAuthEligible = false
+				route.BPSState = nil
 				account := accountFor(route.AccountID)
 				if account != nil && account.IsOpenAIOAuth() {
 					state := readOpenAIBPSAccountState(account)
 					route.BPSState = &state
 				}
 				if account != nil {
-					route.DirectOAuthEligible = account.IsOpenAIOAuth() && !account.IsShadow() && !account.IsSyntheticUITest() && !account.IsOpenAIAgentIdentity() && route.ReasoningEffort == ""
+					route.DirectOAuthEligible = account.IsOpenAIOAuth() && !account.IsShadow() && !account.IsSyntheticUITest() && !account.IsOpenAIAgentIdentity()
 				}
 			}
 			for i := range config.BPSAccounts {
@@ -135,6 +141,15 @@ func (s *OpenAIEvalService) GetConfig(ctx context.Context) (*OpenAIEvalConfig, e
 func (s *OpenAIEvalService) SaveConfig(ctx context.Context, config *OpenAIEvalConfig, actorID int64) error {
 	if config == nil {
 		return errors.New("evaluation config is required")
+	}
+	if err := normalizeOpenAIEvalQualityConfig(config); err != nil {
+		return err
+	}
+	if config.MaxRequestAttempts == 0 {
+		config.MaxRequestAttempts = OpenAIEvalDefaultMaxRequestAttempts
+	}
+	if config.MaxRequestAttempts < 1 || config.MaxRequestAttempts > 10 {
+		return errors.New("max_request_attempts must be between 1 and 10")
 	}
 	if len(config.Accounts) > 5000 {
 		return errors.New("evaluation config exceeds the 5000 account-model-effort route limit")
@@ -259,23 +274,19 @@ func (s *OpenAIEvalService) SaveConfig(ctx context.Context, config *OpenAIEvalCo
 		if err := validateOpenAIEvalSchedule(&item.StateProbeSchedule, OpenAIEvalTypeStateProbe); err != nil {
 			return fmt.Errorf("route %d State Probe schedule: %w", i, err)
 		}
-		if (item.StateProbeSchedule.Enabled || item.BPSMode != OpenAIEvalBPSModeForceOff) && item.ReasoningEffort != "" {
-			return fmt.Errorf("route %d State Probe and BPS auto policy require the default reasoning-effort route", i)
-		}
-		if item.StateProbeSchedule.Enabled || item.BPSMode != OpenAIEvalBPSModeForceOff {
+		if item.StateProbeSchedule.Enabled {
 			if s.accounts == nil {
 				return errors.New("account lookup is unavailable for direct OAuth route validation")
 			}
 			account, accountErr := s.accounts.GetByID(ctx, item.AccountID)
 			if accountErr != nil || account == nil || !account.IsOpenAIOAuth() || account.IsShadow() || account.IsSyntheticUITest() || account.IsOpenAIAgentIdentity() {
-				return fmt.Errorf("route %d State Probe and BPS require a direct OpenAI OAuth account", i)
+				return fmt.Errorf("route %d State Probe requires a direct OpenAI OAuth account", i)
 			}
 		}
 	}
 	if err := s.repo.SaveConfig(ctx, config, actorID); err != nil {
 		return err
 	}
-	SetOpenAIEvalEffectsEnabled(config.EffectsEnabled)
 	SetOpenAIEvalSchedulingPolicySnapshot(config)
 	return nil
 }
@@ -402,6 +413,24 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 		// Ticket identity belongs to the OAuth account and model, not effort.
 		request.ReasoningEffort = ""
 	}
+	maximum := OpenAIEvalDefaultMaxRequestAttempts
+	if request.MaxAttempts != nil {
+		maximum = *request.MaxAttempts
+	} else {
+		config, configErr := s.repo.GetConfig(ctx)
+		if configErr != nil {
+			return nil, configErr
+		}
+		if config != nil && config.MaxRequestAttempts != 0 {
+			maximum = config.MaxRequestAttempts
+		}
+	}
+	if maximum < 1 || maximum > 10 {
+		return nil, errors.New("max_attempts must be between 1 and 10")
+	}
+	if request.TestType == OpenAIEvalTypeStateProbe && request.MaxAttempts != nil && maximum != 1 {
+		return nil, errors.New("State Probe retries are unsupported; max_attempts must be 1 for the linked ticket chain")
+	}
 	leaseKey := openAIEvalRouteKey(request.AccountID, request.RequestedModel, request.ReasoningEffort) + ":" + request.TestType
 	owner, err := newOpenAIEvalLeaseOwner()
 	if err != nil {
@@ -519,7 +548,15 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 			markHardFailure(runErr)
 			run.Status = "error"
 			run.Error = safeOpenAIEvalErrorCode(runErr)
-			run.Outcome = OpenAIEvalOutcome{Status: "error", Reason: run.Error, SampleCount: run.RequestCount, ExpectedCount: run.RequestCount, Confidence: "none", Scheduling: "alert_only"}
+			run.Outcome = OpenAIEvalOutcome{Status: "error", Reason: run.Error, SampleCount: run.CompletedSamples, ExpectedCount: run.ExpectedSamples, Confidence: "none", Scheduling: "alert_only"}
+		}
+		if run.Error == "" {
+			for _, sample := range run.Samples {
+				if sample.ErrorMessage != "" {
+					run.Error = sample.ErrorCode
+					break
+				}
+			}
 		}
 		run.CostEstimateUSD = s.estimateRunCost(target.UpstreamModel, request.RequestedModel, run.InputTokens, run.OutputTokens)
 		finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -530,11 +567,11 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 			}
 			return run, saveErr
 		}
-		// Evaluation probes are diagnostic signals.  Candy/Fingerprint can be
-		// affected by sampling variance, provider-specific behavior, or a
-		// temporary transport failure, so they remain alert-only and must not
-		// silently remove a route from production scheduling.  ModelTrace and
-		// State Probe have the same non-mutating contract.
+		if qualityErr := s.recordOpenAIEvalQualityResult(finishCtx, runID, run); qualityErr != nil {
+			logger.LegacyPrintf("service.openai_eval", "[OpenAI Eval] quality update failed run=%d: %v", runID, qualityErr)
+		}
+		// Diagnostic quality changes preference only. It must not fabricate
+		// operational health failures or hard-exclude a production route.
 		if shouldRecordOpenAIEvalRouteHealth(request.TestType) {
 			s.recordRouteHealth(finishCtx, target.Account.ID, request.RequestedModel, request.ReasoningEffort, hardFailure, hardFailureCode)
 		}
@@ -543,6 +580,8 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 	if request.TestType == OpenAIEvalTypeStateProbe {
 		probe := s.accountTest.RunOpenAIStateProbe(runCtx, target)
 		run.RequestCount = probe.RequestCount
+		run.Samples = probe.Samples
+		run.CompletedSamples = len(probe.Samples)
 		run.Outcome = OpenAIEvalOutcome{Status: probe.Verdict, Reason: probe.Failure, SampleCount: probe.RequestCount, ExpectedCount: 2, Confidence: "low", Scheduling: "alert_only", StateProbe: probe}
 		run.Status = probe.Verdict
 		completed, finishErr := finish(nil)
@@ -553,29 +592,39 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 	}
 
 	if request.TestType == OpenAIEvalTypeCandy {
+		candyCtx := withOpenAIEvalFullCandyAnswer(runCtx)
 		allPassed := true
 		validSamples := 0
 		for i := 0; i < request.SampleCount; i++ {
 			run.Phase = "sampling"
-			result, sampleErr := s.accountTest.RunOpenAIEvalSample(runCtx, target, OpenAIEvalCandyPrompt, request.ReasoningEffort)
-			run.RequestCount++
-			run.CompletedSamples = run.RequestCount
+			result, record, sampleErr := s.accountTest.runOpenAIEvalSampleAttempts(candyCtx, target, OpenAIEvalCandyPrompt, request.ReasoningEffort, maximum)
+			record.ProbeID = fmt.Sprintf("candy-21-v3-97623969-%d", i+1)
+			run.RequestCount += record.Attempts
+			run.CompletedSamples++
+			run.Samples = append(run.Samples, record)
+			if result != nil {
+				run.InputTokens += result.InputTokens
+				run.OutputTokens += result.OutputTokens
+			}
 			if ctxErr := runCtx.Err(); ctxErr != nil {
 				return finish(ctxErr)
 			}
 			if sampleErr != nil {
 				markHardFailure(sampleErr)
+				if run.Error == "" {
+					run.Error = record.ErrorCode
+				}
 				allPassed = false
-				run.Samples = append(run.Samples, OpenAIEvalSampleRecord{ProbeID: fmt.Sprintf("candy-29-v2-%d", i+1), ErrorCode: safeOpenAIEvalErrorCode(sampleErr)})
 				persistProgress()
 				continue
 			}
 			validSamples++
-			run.InputTokens += result.InputTokens
-			run.OutputTokens += result.OutputTokens
 			outcome := ScoreOpenAIEvalCandy(result.Text)
 			allPassed = allPassed && outcome.Status == "pass"
-			run.Samples = append(run.Samples, OpenAIEvalSampleRecord{ProbeID: fmt.Sprintf("candy-29-v2-%d", i+1), Valid: outcome.Status == "pass", ErrorCode: outcome.Reason})
+			if value, ok := leadingOpenAIEvalCandyAnswer(result.Text); ok {
+				run.Samples[len(run.Samples)-1].NormalizedAnswer = fmt.Sprint(value)
+			}
+			run.Samples[len(run.Samples)-1].ErrorCode = outcome.Reason
 			persistProgress()
 		}
 		if validSamples < request.SampleCount {
@@ -585,28 +634,28 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 			run.Outcome = OpenAIEvalOutcome{Status: "insufficient", Reason: "insufficient_valid_samples", Score: 0, SampleCount: validSamples, ExpectedCount: request.SampleCount, Confidence: "none", Scheduling: "alert_only"}
 			run.Status = "insufficient"
 		} else if allPassed {
-			run.Outcome = OpenAIEvalOutcome{Status: "pass", Reason: "all_public_candy_variants_passed", Score: 1, SampleCount: run.RequestCount, ExpectedCount: run.RequestCount, Confidence: "low", Scheduling: "alert_only"}
+			run.Outcome = OpenAIEvalOutcome{Status: "pass", Reason: "all_public_candy_variants_passed", Score: 1, SampleCount: validSamples, ExpectedCount: request.SampleCount, Confidence: "low", Scheduling: "alert_only"}
 			run.Status = "pass"
 		} else {
-			run.Outcome = OpenAIEvalOutcome{Status: "warning", Reason: "one_or_more_public_candy_variants_failed", Score: 0, SampleCount: run.RequestCount, ExpectedCount: run.RequestCount, Confidence: "low", Scheduling: "alert_only"}
+			run.Outcome = OpenAIEvalOutcome{Status: "warning", Reason: "one_or_more_public_candy_variants_failed", Score: 0, SampleCount: validSamples, ExpectedCount: request.SampleCount, Confidence: "low", Scheduling: "alert_only"}
 			run.Status = "warning"
 		}
 		return finish(nil)
 	}
 
 	if request.TestType == OpenAIEvalTypeModelTrace {
-		trace, count, inputTokens, outputTokens, traceErr := s.runModelTrace(runCtx, target, request.ReasoningEffort)
+		trace, count, inputTokens, outputTokens, traceErr := s.runModelTrace(runCtx, target, request.ReasoningEffort, maximum)
 		run.RequestCount = count
 		run.InputTokens = inputTokens
 		run.OutputTokens = outputTokens
 		if trace != nil {
-			// Do not persist prompts or model output text. The result remains
-			// useful for attribution while respecting the evaluation repository's
-			// no-raw-content retention contract.
 			for i := range trace.Samples {
+				sample := trace.Samples[i]
+				run.Samples = append(run.Samples, OpenAIEvalSampleRecord{ProbeID: fmt.Sprintf("modeltrace-%d", i+1), Answer: sample.Answer, Attempts: sample.Attempts, Valid: sample.Valid, ErrorCode: sample.Error, ErrorMessage: sample.ErrorMessage, AttemptErrors: sample.AttemptErrors, HTTPStatus: sample.HTTPStatus})
 				trace.Samples[i].Prompt = ""
 				trace.Samples[i].Text = ""
 			}
+			run.CompletedSamples = len(run.Samples)
 			run.Outcome = modelTraceSchedulingOutcome(trace, traceErr)
 			run.Status = run.Outcome.Status
 		}
@@ -631,31 +680,39 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 			prompts := probe.Prompts
 			prompt := prompts[sampleIndex%len(prompts)]
 			fullPrompt := probe.Instructions + "\n" + prompt
-			result, sampleErr := s.accountTest.RunOpenAIEvalSample(runCtx, target, fullPrompt, request.ReasoningEffort)
-			run.RequestCount++
-			run.CompletedSamples = run.RequestCount
+			result, record, sampleErr := s.accountTest.runOpenAIEvalSampleAttempts(runCtx, target, fullPrompt, request.ReasoningEffort, maximum)
+			record.ProbeID = probe.ID
+			run.RequestCount += record.Attempts
+			run.CompletedSamples++
+			run.Samples = append(run.Samples, record)
+			if result != nil {
+				run.InputTokens += result.InputTokens
+				run.OutputTokens += result.OutputTokens
+			}
 			if ctxErr := runCtx.Err(); ctxErr != nil {
 				return finish(ctxErr)
 			}
 			if sampleErr != nil {
 				markHardFailure(sampleErr)
 				code := safeOpenAIEvalErrorCode(sampleErr)
+				if run.Error == "" {
+					run.Error = code
+				}
 				samples = append(samples, OpenAIEvalSample{ProbeID: probe.ID, Error: code})
-				run.Samples = append(run.Samples, OpenAIEvalSampleRecord{ProbeID: probe.ID, ErrorCode: code})
 				if run.CompletedSamples%5 == 0 || run.CompletedSamples == required {
 					persistProgress()
 				}
 				continue
 			}
-			run.InputTokens += result.InputTokens
-			run.OutputTokens += result.OutputTokens
 			normalized, valid := NormalizeOpenAIEvalFingerprintAnswer(result.Text, probe)
 			sample := OpenAIEvalSample{ProbeID: probe.ID, Answer: normalized}
 			if !valid {
 				sample.Error = "invalid_probe_answer"
+				record.ErrorMessage = "completed response was not a valid answer for this probe"
 			}
 			samples = append(samples, sample)
-			run.Samples = append(run.Samples, OpenAIEvalSampleRecord{ProbeID: probe.ID, NormalizedAnswer: normalized, Valid: valid, ErrorCode: sample.Error})
+			record.NormalizedAnswer, record.Valid, record.ErrorCode = normalized, valid, sample.Error
+			run.Samples[len(run.Samples)-1] = record
 			if run.CompletedSamples%5 == 0 || run.CompletedSamples == required {
 				persistProgress()
 			}
@@ -839,6 +896,16 @@ func newOpenAIEvalLeaseOwner() (string, error) {
 func safeOpenAIEvalErrorCode(err error) string {
 	if err == nil {
 		return ""
+	}
+	var classified *OpenAIEvalRequestError
+	if errors.As(err, &classified) {
+		return classified.Code
+	}
+	if errors.Is(err, context.Canceled) {
+		return "cancelled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
 	}
 	message := strings.ToLower(err.Error())
 	for _, code := range []string{"rate_limit", "invalid_api_key", "model_not_found", "previous_response_not_found", "timeout", "context_deadline_exceeded", "response_incomplete", "response_failed", "http_401", "http_403", "http_429", "http_5xx"} {

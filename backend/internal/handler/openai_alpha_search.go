@@ -156,6 +156,9 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 				reqLog.Info("openai_alpha_search.account_select_aborted_client_disconnected", zap.Error(err))
 				return
 			}
+			if accountRPMSelectionExhausted(c, failedAccountIDs) {
+				return
+			}
 			if len(failedAccountIDs) == 0 {
 				cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, requestedModel, requestedModel, service.PlatformOpenAI)
 				if !cls.ModelNotFound {
@@ -196,6 +199,12 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 			}
 			return h.gatewayService.ForwardAlphaSearch(c.Request.Context(), c, account, forwardBody)
 		}()
+		if handled, retry := handleAccountRPMError(c, err, failedAccountIDs, true, c.Writer.Size() != writerSizeBeforeForward); handled {
+			if retry {
+				continue
+			}
+			return
+		}
 		service.SetOpsLatencyMs(c, service.OpsResponseLatencyMsKey, time.Since(forwardStart).Milliseconds())
 
 		if err == nil {

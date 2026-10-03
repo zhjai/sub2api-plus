@@ -146,7 +146,8 @@ type FailoverState struct {
 	// SwitchCount 也不前进的活锁。清空后必须把它们放回排除集。
 	profitVetoedAccountIDs map[int64]struct{}
 	// profitVetoCount 本次请求累计的利润否决次数，用于 maxProfitVetoAttempts 上限。
-	profitVetoCount int
+	profitVetoCount     int
+	rpmVetoedAccountIDs map[int64]struct{}
 }
 
 // NewFailoverState 创建 failover 状态
@@ -298,6 +299,9 @@ func (s *FailoverState) HandleSelectionExhausted(ctx context.Context) FailoverAc
 		// 排除列表全由利润门否决贡献时，清空后会被原样恢复：退避重试拿不到
 		// 任何新候选，而利润否决不推进 SwitchCount，退避条件将永远成立。
 		// 这里直接判定耗尽，避免每 2s 空转一轮的活锁。
+		if len(s.rpmVetoedAccountIDs) > 0 && s.allExclusionsAreLocalVetoed() {
+			return FailoverExhausted
+		}
 		if s.allExclusionsAreProfitVetoed() {
 			logger.FromContext(ctx).Warn("gateway.failover_selection_exhausted_by_profit_veto",
 				zap.Int("profit_veto_count", s.profitVetoCount),
@@ -322,6 +326,9 @@ func (s *FailoverState) HandleSelectionExhausted(ctx context.Context) FailoverAc
 		// 利润门否决的账号不参与退避重试的解除：判定依据（冻结的下游倍率）在
 		// 同一请求内不变，放它们回池只会被再次否决。
 		for id := range s.profitVetoedAccountIDs {
+			s.FailedAccountIDs[id] = struct{}{}
+		}
+		for id := range s.rpmVetoedAccountIDs {
 			s.FailedAccountIDs[id] = struct{}{}
 		}
 		return FailoverContinue

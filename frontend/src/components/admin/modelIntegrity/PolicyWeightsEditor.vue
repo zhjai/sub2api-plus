@@ -18,6 +18,7 @@
           @input="update(factor, ($event.target as HTMLInputElement).value)"
           @change="($event.target as HTMLInputElement).value = String(percent(factor))"
         />
+        <span class="weights-help">{{ t(`admin.modelIntegrity.scheduling.policy.custom.help.${factor}`) }}</span>
       </label>
     </div>
     <p v-if="invalid" :id="errorId" class="weights-error" role="alert" data-testid="weights-error">
@@ -34,7 +35,7 @@ let nextId = 0
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { OpenAIEvalPolicyWeights } from '@/api/admin/accounts'
-import { CUSTOM_FACTORS, DEFAULT_CUSTOM_BALANCE, isValidCustomBalance, type CustomFactor } from '@/views/admin/modelIntegrity/modelIntegrity'
+import { CUSTOM_FACTORS, DEFAULT_CUSTOM_BALANCE, foldLegacyStability, isValidCustomBalance, type CustomFactor } from '@/views/admin/modelIntegrity/modelIntegrity'
 
 const props = defineProps<{
   modelValue?: OpenAIEvalPolicyWeights
@@ -57,7 +58,8 @@ function percent(factor: CustomFactor) {
 function update(factor: CustomFactor, value: string) {
   const raw = Number(value)
   const next = Number.isFinite(raw) ? Math.min(Math.max(Math.round(raw), 0), 100) / 100 : 0
-  emit('update:modelValue', { ...(props.modelValue ?? DEFAULT_CUSTOM_BALANCE), [factor]: next })
+  // Fold first so a legacy stability weight never survives next to the edit.
+  emit('update:modelValue', { ...foldLegacyStability(props.modelValue ?? DEFAULT_CUSTOM_BALANCE), [factor]: next })
 }
 </script>
 
@@ -66,6 +68,7 @@ function update(factor: CustomFactor, value: string) {
 .weights-grid { @apply grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-5; }
 .weights-field { @apply flex min-w-0 flex-col gap-1; }
 .weights-label { @apply text-xs text-gray-500 dark:text-gray-400; }
+.weights-help { @apply text-[11px] leading-snug text-gray-500 dark:text-gray-400; }
 .weights-input { @apply h-9 py-1 text-sm; }
 .weights-input[aria-invalid='true'] { @apply border-rose-400 dark:border-rose-500; }
 .weights-error { @apply text-xs text-rose-700 dark:text-rose-300; }

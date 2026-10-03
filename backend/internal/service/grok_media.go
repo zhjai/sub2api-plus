@@ -728,7 +728,10 @@ func (s *OpenAIGatewayService) ForwardGrokMedia(
 		proxyURL = account.Proxy.URL()
 	}
 	upstreamStart := time.Now()
-	resp, err := s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+	resp, err := s.doAccountRPMUpstream(upstreamReq, proxyURL, account)
+	if IsAccountRPMError(err) {
+		return nil, err
+	}
 	SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
 	if err != nil {
 		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)
@@ -831,7 +834,10 @@ func (s *OpenAIGatewayService) forwardGrokMediaVideoContent(
 		proxyURL = account.Proxy.URL()
 	}
 	upstreamStart := time.Now()
-	statusResp, err := s.httpUpstream.Do(statusReq, proxyURL, account.ID, account.Concurrency)
+	statusResp, err := s.doAccountRPMUpstream(statusReq, proxyURL, account)
+	if IsAccountRPMError(err) {
+		return nil, err
+	}
 	if err != nil {
 		SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
 		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)
@@ -890,7 +896,10 @@ func (s *OpenAIGatewayService) forwardGrokMediaVideoContent(
 		account.ApplyHeaderOverrides(contentReq.Header)
 	}
 
-	contentResp, err := s.httpUpstream.Do(contentReq, proxyURL, account.ID, account.Concurrency)
+	contentResp, err := s.doAccountRPMUpstream(contentReq, proxyURL, account)
+	if IsAccountRPMError(err) {
+		return nil, err
+	}
 	SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
 	if err != nil {
 		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)

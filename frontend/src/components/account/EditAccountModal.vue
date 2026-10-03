@@ -1682,6 +1682,23 @@
           <p class="input-hint">{{ t('admin.accounts.priorityHint') }}</p>
         </div>
         <div>
+          <label class="input-label">{{ t('admin.accounts.rpmLimit') }}</label>
+          <input
+            v-model.number="editRpmLimit"
+            type="number"
+            min="0"
+            max="10000"
+            step="1"
+            inputmode="numeric"
+            :class="['input', editRpmLimitInvalid ? 'border-red-500 dark:border-red-500' : '']"
+            :aria-invalid="editRpmLimitInvalid ? 'true' : undefined"
+            :placeholder="t('admin.accounts.rpmLimitPlaceholder')"
+            data-testid="account-rpm-limit"
+          />
+          <p v-if="editRpmLimitInvalid" class="input-error-text" data-testid="account-rpm-limit-error">{{ t('admin.accounts.rpmLimitInvalid', { max: 10000 }) }}</p>
+          <p v-else class="input-hint">{{ t('admin.accounts.rpmLimitHint') }}</p>
+        </div>
+        <div>
           <label class="input-label">{{ t('admin.accounts.billingRateMultiplier') }}</label>
           <input
             v-model.number="form.rate_multiplier"
@@ -3693,6 +3710,22 @@ const umqModeOptions = computed(() => [
   { value: 'throttle', label: t('admin.accounts.quotaControl.rpmLimit.umqModeThrottle') },
   { value: 'serialize', label: t('admin.accounts.quotaControl.rpmLimit.umqModeSerialize') },
 ])
+
+// 账号级 RPM 上限（extra.rpm_limit）：跨分组/模型共享，0 表示不限制，独立于并发与旧 base_rpm。
+const RPM_LIMIT_MAX = 10000
+const editRpmLimit = ref<number | ''>(0)
+const editRpmLimitInvalid = computed(() => {
+  const value = editRpmLimit.value
+  if (value === '' || value == null) return false
+  return !Number.isInteger(value) || value < 0 || value > RPM_LIMIT_MAX
+})
+// 优先读 DTO 顶层 rpm_limit，旧后端回退 extra.rpm_limit；缺省为 0（不限制）。
+const readAccountRpmLimit = (account: Account | null | undefined): number => {
+  if (typeof account?.rpm_limit === 'number') return account.rpm_limit
+  const stored = (account?.extra as Record<string, unknown> | undefined)?.rpm_limit
+  return typeof stored === 'number' ? stored : 0
+}
+
 const tlsFingerprintEnabled = ref(false)
 const tlsFingerprintProfileId = ref<number | null>(null)
 const tlsFingerprintProfiles = ref<{ id: number; name: string }[]>([])
@@ -4184,6 +4217,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 	allowOverages.value = extra?.allow_overages === true
 	upstreamRequestIdHeader.value = readUpstreamRequestIdHeader(extra)
 	openAIImagesUrlToB64JsonEnabled.value = extra?.images_url_to_b64_json === true
+	editRpmLimit.value = readAccountRpmLimit(newAccount)
 	autoPause5hThreshold.value = typeof extra?.auto_pause_5h_threshold === 'number' ? extra.auto_pause_5h_threshold * 100 : null
 	autoPause7dThreshold.value = typeof extra?.auto_pause_7d_threshold === 'number' ? extra.auto_pause_7d_threshold * 100 : null
 	autoPause5hDisabled.value = extra?.auto_pause_5h_disabled === true
@@ -5163,6 +5197,10 @@ const handleSubmit = async () => {
     appStore.showError(t('admin.accounts.pleaseSelectStatus'))
     return
   }
+  if (editRpmLimitInvalid.value) {
+    appStore.showError(t('admin.accounts.rpmLimitInvalid', { max: RPM_LIMIT_MAX }))
+    return
+  }
 	if (autoResetCreditEnabled.value) {
 		const thresholds = [autoResetCredit5hThreshold.value, autoResetCredit7dThreshold.value]
 		if (thresholds.some((value) => !Number.isFinite(value) || value < 0.1 || value > 100)) {
@@ -5887,6 +5925,14 @@ const handleSubmit = async () => {
         delete newExtra.upstream_request_id_header
       }
       updatePayload.extra = newExtra
+    }
+
+    // RPM 上限只在改动时写回。后端在 extra 未携带 rpm_limit 时保留旧值，
+    // 因此改为不限制必须显式发送 rpm_limit: 0，不能删除该键。
+    const nextRpmLimit = typeof editRpmLimit.value === 'number' ? editRpmLimit.value : 0
+    if (nextRpmLimit !== readAccountRpmLimit(props.account)) {
+      const currentExtra = (updatePayload.extra as Record<string, unknown>) || (props.account.extra as Record<string, unknown>) || {}
+      updatePayload.extra = { ...currentExtra, rpm_limit: nextRpmLimit }
     }
 
     const canContinue = await ensureAntigravityMixedChannelConfirmed(async () => {

@@ -18,12 +18,16 @@ import (
 )
 
 // openaiTransportAccountRepoStub records SetTempUnschedulable calls. It embeds the
-// (nil) AccountRepository interface so any other method call would panic — the
-// helper under test must only touch SetTempUnschedulable. tempUnschedCall is shared
+// (nil) AccountRepository interface except for the actual-send RPM reader.
+// Error classification must only mutate SetTempUnschedulable. tempUnschedCall is shared
 // with antigravity_internal500_penalty_test.go (same package).
 type openaiTransportAccountRepoStub struct {
 	AccountRepository
 	tempUnschedCalls []tempUnschedCall
+}
+
+func (r *openaiTransportAccountRepoStub) GetAccountRPMLimit(context.Context, int64) (int, error) {
+	return 0, nil
 }
 
 func (r *openaiTransportAccountRepoStub) SetTempUnschedulable(_ context.Context, id int64, until time.Time, reason string) error {

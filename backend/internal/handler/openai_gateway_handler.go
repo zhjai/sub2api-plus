@@ -85,7 +85,7 @@ func newOpenAIWSUnsupportedModelSwitchError(model string) error {
 }
 
 func shouldReportOpenAIWSProxyAccountFailure(err error) bool {
-	return err != nil && !errors.Is(err, errOpenAIWSUnsupportedModelSwitch) && !service.IsOpenAIWSSessionPreemptedError(err)
+	return err != nil && !service.IsAccountRPMError(err) && !errors.Is(err, errOpenAIWSUnsupportedModelSwitch) && !service.IsOpenAIWSSessionPreemptedError(err)
 }
 
 // openAIWSIngressEndedByClient reports whether a finished ingress WebSocket turn
@@ -789,6 +789,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				zap.Error(openAICompatibleSelectionErrorForLog(err, requestPlatform)),
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
 			)
+			if accountRPMSelectionExhausted(c, failedAccountIDs) {
+				return
+			}
 			if len(failedAccountIDs) == 0 {
 				if legacyCompact && errors.Is(err, service.ErrNoAvailableCompactAccounts) {
 					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
@@ -939,6 +942,12 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			}()
 			return h.gatewayService.Forward(c.Request.Context(), c, account, attemptBody)
 		}()
+		if handled, retry := handleAccountRPMError(c, err, failedAccountIDs, !account.IsOpenAIOpaqueUpstream() && !previousResponseOwnerBound && previousResponseID == "", service.OpenAICompactKeepaliveAdjustedWrittenSize(c) != writerSizeBeforeForward); handled {
+			if retry {
+				continue
+			}
+			return
+		}
 		// Keep the requested model/effort dimensions attached before any
 		// schedule-quality report.  Responses may return a partial result with
 		// an error, so stamping only in the usage-record callback is too late for
@@ -1583,6 +1592,9 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 				zap.Error(openAICompatibleSelectionErrorForLog(err, requestPlatform)),
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
 			)
+			if accountRPMSelectionExhausted(c, failedAccountIDs) {
+				return
+			}
 			if len(failedAccountIDs) == 0 {
 				if err != nil {
 					cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, currentRoutingModel, reqModel)
@@ -1644,6 +1656,12 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			}()
 			return h.gatewayService.ForwardAsAnthropic(c.Request.Context(), c, account, forwardBody, promptCacheKey, defaultMappedModel)
 		}()
+		if handled, retry := handleAccountRPMError(c, err, failedAccountIDs, true, c.Writer.Size() != writerSizeBeforeForward); handled {
+			if retry {
+				continue
+			}
+			return
+		}
 		var cyberBlockBodyMsg []byte
 		if service.GetOpsCyberPolicy(c) != nil {
 			cyberBlockBodyMsg = body
@@ -3071,6 +3089,10 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				zap.Error(openAICompatibleSelectionErrorForLog(err, requestPlatform)),
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
 			)
+			if local := accountRPMSelectionError(c, failedAccountIDs); local != nil {
+				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, local.Error())
+				return
+			}
 			if lastFailoverErr != nil {
 				closeOpenAIWSFailoverExhausted(c, wsConn, lastFailoverErr)
 			} else {
@@ -3383,6 +3405,10 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				return checkSimpleModeTurnBilling()
 			},
 			AfterTurn: func(turn int, result *service.OpenAIForwardResult, turnErr error) {
+				if service.IsAccountRPMError(turnErr) {
+					releaseTurnSlots()
+					return
+				}
 				turnStart := getTurnStart(turn)
 				cyberBlockBody := takeCyberTurnBody(turn)
 				// 每次 attempt 都清 cyber mark；failover 链结束前保留 recorded guard，
@@ -3578,6 +3604,26 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 
 		for {
 			err := h.gatewayService.ProxyResponsesWebSocketFromClient(ctx, c, wsConn, account, token, wsFirstMessage, hooks)
+			if service.IsAccountRPMError(err) {
+				releaseTurnSlots()
+				var local *service.AccountRPMError
+				errors.As(err, &local)
+				if !local.NoMigration && !local.Unavailable && !account.IsOpenAIOpaqueUpstream() && !previousResponseOwnerBound && previousResponseID == "" {
+					vetoes := accountRPMVetoes(c)
+					vetoes.count++
+					vetoes.accounts[account.ID] = struct{}{}
+					vetoes.last = local
+					failedAccountIDs[account.ID] = struct{}{}
+					if vetoes.count < maxAccountRPMVetoes {
+						if !ensureUserSlotHeld() {
+							return
+						}
+						break
+					}
+				}
+				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, local.Error())
+				return
+			}
 			if err == nil {
 				reqLog.Info("openai.websocket_ingress_closed", zap.Int64("account_id", account.ID))
 				return

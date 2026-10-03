@@ -9,7 +9,7 @@ import (
 	"sync"
 )
 
-const openAIEvalModelTraceBankRevision = "df3a0f9d3e054c0dc02d6d586686db8daf8fa7c8"
+const openAIEvalModelTraceBankRevision = "sha256:a4e256c00444179b76f3855578660e66f30659df8c0122f1768dd05a8d705630"
 
 type openAIModelTraceChallenge struct {
 	Prompt        string
@@ -41,7 +41,7 @@ type openAIModelTraceSampleResponse struct {
 	err    error
 }
 
-func (s *OpenAIEvalService) runModelTrace(ctx context.Context, target *OpenAIEvalTarget, effort string) (*OpenAIEvalModelTraceResult, int, int64, int64, error) {
+func (s *OpenAIEvalService) runModelTrace(ctx context.Context, target *OpenAIEvalTarget, effort string, maximum int) (*OpenAIEvalModelTraceResult, int, int64, int64, error) {
 	challenges := openAIModelTraceChallenges()
 	result := &OpenAIEvalModelTraceResult{BankRevision: openAIEvalModelTraceBankRevision, Requests: len(challenges)}
 	outputs := make([]*openAIModelTraceSampleResponse, len(challenges))
@@ -63,18 +63,23 @@ func (s *OpenAIEvalService) runModelTrace(ctx context.Context, target *OpenAIEva
 			for index := range jobs {
 				challenge := challenges[index]
 				value := &openAIModelTraceSampleResponse{sample: OpenAIEvalModelTraceSample{Prompt: challenge.Prompt, ExpectedCount: challenge.ExpectedCount}}
-				response, err := s.accountTest.RunOpenAIEvalSample(ctx, target, challenge.Prompt, effort)
+				response, record, err := s.accountTest.runOpenAIEvalSampleAttempts(ctx, target, challenge.Prompt, effort, maximum)
+				value.sample.Attempts = record.Attempts
+				value.sample.Answer = record.Answer
+				value.sample.AttemptErrors = record.AttemptErrors
+				value.sample.ErrorMessage = record.ErrorMessage
+				value.sample.HTTPStatus = record.HTTPStatus
 				value.output, value.err = response, err
 				if err != nil {
 					value.sample.Error = safeOpenAIEvalErrorCode(err)
 				} else if response != nil {
 					value.sample.Text = response.Text
-					value.sample.Attempts = 1
 					numbers := traceParseNumbers(response.Text)
 					value.sample.Parsed = len(numbers)
 					value.sample.Valid = value.sample.Parsed >= traceMinimumNumbers(challenge.ExpectedCount)
 					if !value.sample.Valid {
 						value.sample.Error = "insufficient_numbers"
+						value.sample.ErrorMessage = fmt.Sprintf("received %d numbers; at least %d required", value.sample.Parsed, traceMinimumNumbers(challenge.ExpectedCount))
 					}
 				}
 				results <- struct {
@@ -94,16 +99,22 @@ func (s *OpenAIEvalService) runModelTrace(ctx context.Context, target *OpenAIEva
 		}
 	}
 	var traceOutputs []traceOutput
+	var requestCount int
+	var requestErrors []error
 	for _, item := range outputs {
 		if item == nil {
 			continue
 		}
 		result.Samples = append(result.Samples, OpenAIEvalModelTraceSample(item.sample))
+		requestCount += item.sample.Attempts
+		if item.err != nil {
+			requestErrors = append(requestErrors, item.err)
+		}
 		traceOutputs = append(traceOutputs, traceOutput{Text: item.sample.Text, ExpectedCount: item.sample.ExpectedCount})
 	}
 	attribution, err := analyzeModelTrace(traceOutputs)
 	if err != nil {
-		return result, len(outputs), inputTokens, outputTokens, err
+		return result, requestCount, inputTokens, outputTokens, errors.Join(append(requestErrors, err)...)
 	}
 	result.UsedOutputs = attribution.Used
 	result.Prediction = attribution.Prediction
@@ -123,14 +134,14 @@ func (s *OpenAIEvalService) runModelTrace(ctx context.Context, target *OpenAIEva
 		result.Diagnostics[i] = OpenAIEvalModelTraceDiagnostic{Index: item.Index, Parsed: item.Parsed, Minimum: item.Minimum, Valid: item.Valid}
 	}
 	if result.UsedOutputs == 0 {
-		return result, len(outputs), inputTokens, outputTokens, errors.New("no valid ModelTrace outputs")
+		return result, requestCount, inputTokens, outputTokens, errors.Join(append(requestErrors, errors.New("no valid ModelTrace outputs"))...)
 	}
-	return result, len(outputs), inputTokens, outputTokens, nil
+	return result, requestCount, inputTokens, outputTokens, nil
 }
 
 func modelTraceSchedulingOutcome(result *OpenAIEvalModelTraceResult, err error) OpenAIEvalOutcome {
 	if err != nil || result == nil || result.UsedOutputs == 0 {
-		return OpenAIEvalOutcome{Status: "insufficient", Reason: "modeltrace_insufficient_outputs", SampleCount: 0, ExpectedCount: OpenAIEvalModelTraceRequests, Confidence: "none", Scheduling: "alert_only"}
+		return OpenAIEvalOutcome{Status: "insufficient", Reason: "modeltrace_insufficient_outputs", SampleCount: 0, ExpectedCount: OpenAIEvalModelTraceRequests, Confidence: "none", Scheduling: "alert_only", ModelTrace: result}
 	}
 	status, reason := openAIEvalAttributionVerdict(result.Prediction)
 	return OpenAIEvalOutcome{Status: status, Reason: reason, SampleCount: result.UsedOutputs, ExpectedCount: OpenAIEvalModelTraceRequests, Confidence: "low", Scheduling: "alert_only", ModelTrace: result}

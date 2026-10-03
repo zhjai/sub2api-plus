@@ -78,6 +78,9 @@ func (s *OpenAIGatewayService) ForwardAlphaSearch(ctx context.Context, c *gin.Co
 
 	upstreamStart := time.Now()
 	resp, err := s.doOpenAIUpstream(req, proxyURL, account)
+	if IsAccountRPMError(err) {
+		return nil, err
+	}
 	SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
 	if err != nil {
 		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, true)
@@ -162,6 +165,9 @@ func (s *OpenAIGatewayService) forwardAlphaSearchViaResponsesWebSearch(
 
 	upstreamStart := time.Now()
 	resp, err := s.doOpenAIUpstream(req, proxyURL, account)
+	if IsAccountRPMError(err) {
+		return nil, err
+	}
 	SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
 	if err != nil {
 		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, true)

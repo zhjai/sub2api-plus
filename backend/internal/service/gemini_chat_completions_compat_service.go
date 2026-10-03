@@ -122,7 +122,10 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 		}
 		requestIDHeader = idHeader
 
-		resp, err = s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+		resp, err = s.doAccountRPMUpstream(upstreamReq, proxyURL, account)
+		if IsAccountRPMError(err) {
+			return nil, err
+		}
 		if err != nil {
 			return nil, s.handleUpstreamTransportError(ctx, c, account, err)
 		}

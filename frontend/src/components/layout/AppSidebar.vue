@@ -481,8 +481,37 @@ const PluginIcon = {
   render: () => h(Icon, { name: 'cube' })
 }
 
+// Integrity icons render a raw <svg> like the icons above instead of wrapping
+// Icon.vue: Icon.vue always adds its default h-5 w-5, which outranks the
+// h-4 w-4 that falls through from child rows and makes them oversized.
 const EvaluationIcon = {
-  render: () => h(Icon, { name: 'beaker' })
+  render: () =>
+    h(
+      'svg',
+      { fill: 'none', viewBox: '0 0 24 24', stroke: 'currentColor', 'stroke-width': '1.5' },
+      [
+        h('path', {
+          'stroke-linecap': 'round',
+          'stroke-linejoin': 'round',
+          d: 'M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0112 15a9.065 9.065 0 00-6.23.693L5 14.5m14.8.8l1.402 1.402c1.232 1.232.65 3.318-1.067 3.611A48.309 48.309 0 0112 21c-2.773 0-5.491-.235-8.135-.687-1.718-.293-2.3-2.379-1.067-3.61L5 14.5'
+        })
+      ]
+    )
+}
+
+const IntegrityTestIcon = {
+  render: () =>
+    h(
+      'svg',
+      { fill: 'none', viewBox: '0 0 24 24', stroke: 'currentColor', 'stroke-width': '1.5' },
+      [
+        h('path', {
+          'stroke-linecap': 'round',
+          'stroke-linejoin': 'round',
+          d: 'M9 12.75L11.25 15 15 9.75M8.25 4.5h-1.5A2.25 2.25 0 004.5 6.75v12A2.25 2.25 0 006.75 21h10.5a2.25 2.25 0 002.25-2.25v-12a2.25 2.25 0 00-2.25-2.25h-1.5m-7.5 0A1.5 1.5 0 019.75 3h4.5a1.5 1.5 0 011.5 1.5 1.5 1.5 0 01-1.5 1.5h-4.5a1.5 1.5 0 01-1.5-1.5z'
+        })
+      ]
+    )
 }
 
 const BellIcon = {
@@ -803,7 +832,7 @@ const adminNavItems = computed((): NavItem[] => {
       icon: EvaluationIcon,
       expandOnly: true,
       children: [
-        { path: '/admin/model-integrity/tests', label: t('nav.modelIntegrityTests'), icon: EvaluationIcon },
+        { path: '/admin/model-integrity/tests', label: t('nav.modelIntegrityTests'), icon: IntegrityTestIcon },
         { path: '/admin/model-integrity/scheduling', label: t('nav.modelIntegrityScheduling'), icon: SignalIcon },
       ],
     },

@@ -116,6 +116,9 @@ func (s *OpenAIGatewayService) forwardGrokResponses(
 		}
 
 		resp, err = s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+		if IsAccountRPMError(err) {
+			return nil, err
+		}
 		SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
 		if err != nil {
 			return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)
@@ -1407,6 +1410,9 @@ func (s *OpenAIGatewayService) describeGrokComposerImage(
 	}
 
 	resp, err := s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+	if IsAccountRPMError(err) {
+		return "", OpenAIUsage{}, err
+	}
 	if err != nil {
 		return "", OpenAIUsage{}, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)
 	}

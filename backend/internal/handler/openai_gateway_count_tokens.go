@@ -125,6 +125,9 @@ func (h *OpenAIGatewayHandler) ResponsesInputTokens(c *gin.Context) {
 
 	setOpsSelectedAccount(c, account.ID, account.Platform)
 	if err := h.gatewayService.ForwardResponsesInputTokens(c.Request.Context(), c, account, forwardBody); err != nil {
+		if handled, _ := handleAccountRPMError(c, err, nil, false, false); handled {
+			return
+		}
 		reqLog.Error("openai_input_tokens.forward_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 	}
 }
@@ -301,6 +304,9 @@ func (h *OpenAIGatewayHandler) CountTokens(c *gin.Context) {
 	defaultMappedModel := preferredMappedModel
 
 	if err := h.gatewayService.ForwardCountTokensAsAnthropic(c.Request.Context(), c, account, forwardBody, defaultMappedModel); err != nil {
+		if handled, _ := handleAccountRPMError(c, err, nil, false, false); handled {
+			return
+		}
 		reqLog.Error("openai_count_tokens.forward_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 	}
 }

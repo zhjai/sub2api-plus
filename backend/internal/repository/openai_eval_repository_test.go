@@ -3,6 +3,8 @@ package repository
 import (
 	"context"
 	"database/sql/driver"
+	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 
@@ -34,6 +36,66 @@ func TestOpenAIEvalUpdateRunProgressPersistsOnlySanitizedCounters(t *testing.T) 
 		WithArgs(int64(71), "running", sqlmock.AnyArg(), sqlmock.AnyArg(), 5, int64(12), int64(7), int64(850), "gpt-upstream", "baseline-v1").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	require.NoError(t, repo.UpdateRunProgress(context.Background(), 71, run))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+type evalJSONArgument struct{ expected any }
+
+func (a evalJSONArgument) Match(value driver.Value) bool {
+	raw, ok := value.([]byte)
+	if !ok {
+		return false
+	}
+	expected, _ := json.Marshal(a.expected)
+	var got, want any
+	return json.Unmarshal(raw, &got) == nil && json.Unmarshal(expected, &want) == nil && reflect.DeepEqual(got, want)
+}
+
+func TestOpenAIEvalFinishAndHistoryPreserveSampleEvidence(t *testing.T) {
+	repo, mock := openAIEvalSaveConfigDB(t)
+	now := time.Now().UTC()
+	run := &service.OpenAIEvalRun{ID: 8, AccountID: 7, TestType: "candy", RequestedModel: "gpt-5.4", UpstreamModel: "gpt-5.4", DataVersion: service.OpenAIEvalDataVersion, Status: "insufficient", RequestCount: 3, StartedAt: now, FinishedAt: now, TriggerSource: "manual", Error: "server_error",
+		Outcome: service.OpenAIEvalOutcome{Status: "insufficient", ExpectedCount: 1},
+		Samples: []service.OpenAIEvalSampleRecord{{ProbeID: "candy-21-v3-1", Answer: "partial answer", Attempts: 3, ErrorCode: "server_error", ErrorMessage: "capacity busy", HTTPStatus: 503, AttemptErrors: []service.OpenAIEvalAttemptError{{Attempt: 1, Code: "server_error", Message: "capacity busy", HTTPStatus: 503}}}},
+	}
+	mock.ExpectExec(`UPDATE\s+openai_eval_runs\s+SET\s+status=\$2`).WithArgs(run.ID, run.Status, evalJSONArgument{run.Outcome}, evalJSONArgument{run.Samples}, 3, int64(0), int64(0), nil, int64(0), now, run.Error, run.UpstreamModel, "").WillReturnResult(sqlmock.NewResult(0, 1))
+	require.NoError(t, repo.FinishRun(context.Background(), run.ID, run))
+	outcome, _ := json.Marshal(run.Outcome)
+	samples, _ := json.Marshal(run.Samples)
+	columns := []string{"id", "account_id", "test_type", "requested_model", "upstream_model", "reasoning_effort", "data_version", "baseline_version", "status", "outcome", "samples", "request_count", "input_tokens", "output_tokens", "cost_estimate_usd", "duration_ms", "started_at", "finished_at", "triggered_by", "trigger_source", "error_code"}
+	rows := sqlmock.NewRows(columns).AddRow(run.ID, 7, "candy", "gpt-5.4", "gpt-5.4", "", run.DataVersion, "", run.Status, outcome, samples, 3, 0, 0, nil, 0, now, now, 0, "manual", run.Error).
+		AddRow(7, 7, "candy", "gpt-5.4", "gpt-5.4", "", "sub2api-candy-29-v2-cpa-fingerprint-5654020c", "", "pass", []byte(`{"status":"pass","expected_count":1,"sample_count":1}`), []byte(`[{"probe_id":"candy-29-v2-1","normalized_answer":"29","valid":true}]`), 1, 0, 0, nil, 0, now, now, 0, "manual", "")
+	mock.ExpectQuery(`SELECT id, account_id, test_type`).WillReturnRows(rows)
+	got, err := repo.ListRuns(context.Background(), service.OpenAIEvalRunFilter{})
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	require.Equal(t, run.Samples, got[0].Samples)
+	require.Equal(t, 1, got[0].CompletedSamples)
+	require.Equal(t, 3, got[0].RequestCount)
+	require.Equal(t, 1, got[0].ExpectedSamples)
+	require.Equal(t, "sub2api-candy-29-v2-cpa-fingerprint-5654020c", got[1].DataVersion)
+	require.Equal(t, "pass", got[1].Status)
+	require.Equal(t, "29", got[1].Samples[0].NormalizedAnswer)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestOpenAIEvalConfigAttemptsPersistInJSONWithoutSchemaChange(t *testing.T) {
+	repo, mock := openAIEvalSaveConfigDB(t)
+	cfg := &service.OpenAIEvalConfig{MaxRequestAttempts: 8, Accounts: []service.OpenAIEvalAccountConfig{}}
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT\s+config\s+FROM\s+openai_eval_configs`).WillReturnRows(sqlmock.NewRows([]string{"config"}).AddRow([]byte(`{"accounts":[]}`)))
+	want := *cfg
+	want.Revision = 1
+	mock.ExpectExec(`UPDATE\s+openai_eval_configs`).WithArgs(evalJSONArgument{want}, int64(1)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT\s+account_id,\s+test_type`).WillReturnRows(scheduleStateRows())
+	expectOpenAIEvalConfigSaveAuditAndCommit(mock, 1)
+	require.NoError(t, repo.SaveConfig(context.Background(), cfg, 1))
+	raw, _ := json.Marshal(cfg)
+	mock.ExpectQuery(`SELECT config FROM openai_eval_configs`).WillReturnRows(sqlmock.NewRows([]string{"config"}).AddRow(raw))
+	mock.ExpectQuery(`SELECT account_id, test_type`).WillReturnRows(sqlmock.NewRows([]string{"account_id", "test_type", "requested_model", "reasoning_effort", "sample_count", "last_run_at", "next_run_at"}))
+	got, err := repo.GetConfig(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 8, got.MaxRequestAttempts)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

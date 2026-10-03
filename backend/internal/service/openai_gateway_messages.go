@@ -420,6 +420,9 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 			}
 		}
 		resp, err = s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+		if IsAccountRPMError(err) {
+			return nil, err
+		}
 		if err != nil {
 			return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)
 		}

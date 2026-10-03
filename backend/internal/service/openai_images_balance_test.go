@@ -23,6 +23,10 @@ type openAIImagesBalanceRepo struct {
 	until  time.Time
 }
 
+func (r *openAIImagesBalanceRepo) GetAccountRPMLimit(context.Context, int64) (int, error) {
+	return 0, nil
+}
+
 func (r *openAIImagesBalanceRepo) SetModelRateLimit(_ context.Context, _ int64, scope string, resetAt time.Time, reason ...string) error {
 	r.scope = scope
 	r.until = resetAt

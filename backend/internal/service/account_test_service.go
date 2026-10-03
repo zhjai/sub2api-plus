@@ -225,9 +225,28 @@ func (s *AccountTestService) ResolveOpenAIEvalTarget(ctx context.Context, accoun
 	}, nil
 }
 
-// RunOpenAIEvalSample performs a bounded, non-streaming Responses request.
+// RunOpenAIEvalSample performs one bounded Responses request.
 // It deliberately never writes account health, rate-limit, or probe metadata.
-func (s *AccountTestService) RunOpenAIEvalSample(ctx context.Context, target *OpenAIEvalTarget, prompt, reasoningEffort string) (*OpenAIEvalSampleResponse, error) {
+func (s *AccountTestService) RunOpenAIEvalSample(ctx context.Context, target *OpenAIEvalTarget, prompt, reasoningEffort string) (result *OpenAIEvalSampleResponse, resultErr error) {
+	var secrets []string
+	if target != nil {
+		secrets = openAIEvalCredentialSecrets(target.Credential)
+	}
+	defer func() {
+		if result != nil {
+			result.Text = sanitizeOpenAIEvalText(result.Text, openAIEvalAnswerLimitFor(ctx), secrets...)
+		}
+		if resultErr != nil {
+			var classified *OpenAIEvalRequestError
+			if !errors.As(resultErr, &classified) {
+				classified = &OpenAIEvalRequestError{Code: "request_invalid", Message: resultErr.Error()}
+			}
+			copy := *classified
+			copy.Message = sanitizeOpenAIEvalText(copy.Message, openAIEvalErrorLimit, secrets...)
+			copy.Code = sanitizeOpenAIEvalText(copy.Code, 80, secrets...)
+			resultErr = &copy
+		}
+	}()
 	if s == nil || target == nil || target.Account == nil || target.Credential == nil {
 		return nil, errors.New("OpenAI evaluation target is required")
 	}
@@ -235,6 +254,9 @@ func (s *AccountTestService) RunOpenAIEvalSample(ctx context.Context, target *Op
 		return nil, errors.New("OpenAI evaluation prompt is required")
 	}
 	account, credential := target.Account, target.Credential
+	if ctx.Err() != nil {
+		return nil, &OpenAIEvalRequestError{Code: "cancelled", Message: ctx.Err().Error()}
+	}
 	if s.httpUpstream == nil {
 		return nil, errors.New("HTTP upstream is unavailable")
 	}
@@ -246,6 +268,21 @@ func (s *AccountTestService) RunOpenAIEvalSample(ctx context.Context, target *Op
 		return nil, errors.New("OpenAI evaluation upstream model is empty")
 	}
 	isOAuth := credential.IsOpenAIOAuthLike()
+	accessToken := ""
+	if isOAuth && !credential.IsOpenAIAgentIdentity() {
+		if s.openaiGatewayService == nil {
+			return nil, errors.New("OAuth token provider is unavailable")
+		}
+		var tokenErr error
+		accessToken, _, tokenErr = s.openaiGatewayService.GetAccessToken(requestCtx, credential)
+		if tokenErr != nil {
+			return nil, &OpenAIEvalRequestError{Code: "credential_unavailable", Message: tokenErr.Error()}
+		}
+		if strings.TrimSpace(accessToken) == "" {
+			return nil, &OpenAIEvalRequestError{Code: "credential_unavailable", Message: "OAuth access token is unavailable"}
+		}
+		secrets = append(secrets, accessToken)
+	}
 	apiURL := chatgptCodexAPIURL
 	if !isOAuth {
 		apiKey := strings.TrimSpace(credential.GetOpenAIProtocolAPIKey())
@@ -278,6 +315,9 @@ func (s *AccountTestService) RunOpenAIEvalSample(ctx context.Context, target *Op
 		}
 		payload["reasoning"] = map[string]string{"effort": effort}
 	}
+	if isOAuth {
+		applyCodexOAuthTransform(payload, true, false)
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("encode OpenAI evaluation request: %w", err)
@@ -290,6 +330,10 @@ func (s *AccountTestService) RunOpenAIEvalSample(ctx context.Context, target *Op
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	if isOAuth {
+		req.Header.Set("Accept", "text/event-stream")
+		if accessToken != "" {
+			req.Header.Set("Authorization", "Bearer "+accessToken)
+		}
 		req.Host = "chatgpt.com"
 		req.Header.Set("OpenAI-Beta", "responses=experimental")
 		canonical := resolveCodexOutboundIdentity("")
@@ -319,6 +363,17 @@ func (s *AccountTestService) RunOpenAIEvalSample(ctx context.Context, target *Op
 	}
 	credential.ApplyHeaderOverrides(req.Header)
 	enforceCodexAcceptLanguage(req.Header)
+	for key, values := range req.Header {
+		lower := strings.ToLower(key)
+		if strings.Contains(lower, "auth") || strings.Contains(lower, "key") || strings.Contains(lower, "cookie") || strings.Contains(lower, "token") || strings.Contains(lower, "state") {
+			for _, value := range values {
+				secrets = append(secrets, value)
+				if strings.HasPrefix(value, "Bearer ") {
+					secrets = append(secrets, strings.TrimPrefix(value, "Bearer "))
+				}
+			}
+		}
+	}
 
 	proxyURL := ""
 	if account.ProxyID != nil && account.Proxy != nil {
@@ -326,71 +381,37 @@ func (s *AccountTestService) RunOpenAIEvalSample(ctx context.Context, target *Op
 	}
 	resp, err := s.doOpenAIEvalUpstream(req, proxyURL, account, credential)
 	if err != nil {
-		return nil, fmt.Errorf("OpenAI evaluation request failed: %w", err)
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		return nil, openAIEvalIOError(requestCtx, err, 0)
+	}
+	if resp == nil || resp.Body == nil {
+		return nil, newOpenAIEvalRequestError("invalid_response", "upstream returned no response body", 0)
+	}
+	secrets = append(secrets, extractOpenAICodexTurnState(resp.Header))
+	for _, cookie := range resp.Cookies() {
+		secrets = append(secrets, cookie.Value)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-	if err != nil {
-		return nil, fmt.Errorf("read OpenAI evaluation response: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("OpenAI evaluation upstream returned HTTP %d", resp.StatusCode)
-	}
-	var response struct {
-		Status string `json:"status"`
-		Output []struct {
-			Type    string `json:"type"`
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"output"`
-		Usage struct {
-			InputTokens  int64 `json:"input_tokens"`
-			OutputTokens int64 `json:"output_tokens"`
-		} `json:"usage"`
-		Error *struct {
-			Code string `json:"code"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(responseBody, &response); err != nil {
-		return nil, fmt.Errorf("decode OpenAI evaluation response: %w", err)
-	}
-	if response.Status != "completed" {
-		code := "unknown"
-		if response.Error != nil && strings.TrimSpace(response.Error.Code) != "" {
-			code = response.Error.Code
-		}
-		return nil, fmt.Errorf("OpenAI evaluation response did not complete (status=%q, code=%q)", response.Status, code)
-	}
-	var output strings.Builder
-	for _, item := range response.Output {
-		if item.Type != "message" {
-			continue
-		}
-		for _, content := range item.Content {
-			if content.Type == "output_text" {
-				output.WriteString(content.Text)
-			}
-		}
-	}
-	if strings.TrimSpace(output.String()) == "" {
-		return nil, errors.New("OpenAI evaluation completed without output text")
-	}
-	return &OpenAIEvalSampleResponse{
-		Text:         output.String(),
-		InputTokens:  response.Usage.InputTokens,
-		OutputTokens: response.Usage.OutputTokens,
-		CompletedAt:  time.Now().UTC(),
-	}, nil
+	stopClose := context.AfterFunc(requestCtx, func() { _ = resp.Body.Close() })
+	defer stopClose()
+	return readOpenAIEvalResponse(requestCtx, resp, isOAuth, true)
 }
 
 func (s *AccountTestService) doOpenAIEvalUpstream(req *http.Request, proxyURL string, account, credential *Account) (*http.Response, error) {
+	req = req.WithContext(WithHTTPUpstreamSingleSend(req.Context()))
 	if credential.IsOpenAIOAuthLike() && s.pluginManager != nil {
 		response, handled, err := s.pluginManager.RoundTripOpenAIOAuth(req.Context(), req, proxyURL, credential)
 		if handled {
 			return response, err
 		}
+	}
+	if transport, ok := s.httpUpstream.(HTTPUpstreamSingleSend); !ok || !transport.SupportsSingleSend() {
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
+		return nil, &HTTPUpstreamSingleSendUnsupportedError{}
 	}
 	return s.httpUpstream.DoWithTLS(
 		req,

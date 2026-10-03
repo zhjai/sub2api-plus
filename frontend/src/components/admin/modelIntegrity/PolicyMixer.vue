@@ -24,7 +24,15 @@
       <span class="mixer-meters">
         <span v-for="factor in FACTORS" :key="factor" class="mixer-meter">
           <span class="mixer-meter-label">{{ t(`admin.modelIntegrity.scheduling.policy.factors.${factor}`) }}</span>
+          <!-- Quality is a strict first filter under avoid degradation and unused by the presets, so it is stated, not metered. -->
           <span
+            v-if="factor === 'quality' && QUALITY_MODE[policy] !== 'weighted'"
+            class="mixer-meter-mode"
+            :class="`mixer-meter-mode-${QUALITY_MODE[policy]}`"
+            :data-testid="`mixer-quality-${policyKey(policy)}`"
+          >{{ t(`admin.modelIntegrity.scheduling.policy.qualityMode.${QUALITY_MODE[policy]}`) }}</span>
+          <span
+            v-else
             class="mixer-meter-track"
             role="img"
             :aria-label="t('admin.modelIntegrity.scheduling.policy.levelAria', { factor: t(`admin.modelIntegrity.scheduling.policy.factors.${factor}`), level: POLICY_EMPHASIS[policy][factor] })"
@@ -45,7 +53,7 @@
 <script setup lang="ts">
 import { useI18n } from 'vue-i18n'
 import type { OpenAIEvalSchedulingPolicy } from '@/api/admin/accounts'
-import { POLICIES, POLICY_EMPHASIS, policyKey, type PolicyFactor } from '@/views/admin/modelIntegrity/modelIntegrity'
+import { POLICIES, POLICY_EMPHASIS, QUALITY_MODE, policyKey, type PolicyFactor } from '@/views/admin/modelIntegrity/modelIntegrity'
 
 withDefaults(defineProps<{
   modelValue: OpenAIEvalSchedulingPolicy
@@ -56,7 +64,7 @@ withDefaults(defineProps<{
 
 const emit = defineEmits<{ (e: 'update:modelValue', value: OpenAIEvalSchedulingPolicy): void }>()
 const { t } = useI18n()
-const FACTORS: PolicyFactor[] = ['price', 'errors', 'speed']
+const FACTORS: PolicyFactor[] = ['quality', 'price', 'errors', 'speed']
 </script>
 
 <style scoped>
@@ -73,10 +81,15 @@ const FACTORS: PolicyFactor[] = ['price', 'errors', 'speed']
 .mixer-meters { @apply mt-auto grid gap-1.5 border-t border-gray-100 pt-3 dark:border-dark-700; }
 .mixer-meter { @apply grid grid-cols-[5.5rem_1fr] items-center gap-2 text-xs text-gray-500 dark:text-gray-400; }
 .mixer-meter-track { @apply grid h-2 grid-cols-4 gap-0.5; }
+.mixer-meter-mode { @apply text-xs leading-none; }
+.mixer-meter-mode-tier { @apply font-semibold text-violet-700 dark:text-violet-300; }
+.mixer-meter-mode-ignored { @apply text-gray-400 dark:text-gray-500; }
 .mixer-segment { @apply rounded-[2px] bg-gray-200 dark:bg-dark-600; }
+.mixer-segment-quality { @apply bg-violet-600 dark:bg-violet-400; }
 .mixer-segment-price { @apply bg-amber-500 dark:bg-amber-400; }
 .mixer-segment-errors { @apply bg-primary-600 dark:bg-primary-500; }
 .mixer-segment-speed { @apply bg-sky-600 dark:bg-sky-500; }
+.mixer-option:not(.mixer-option-active) .mixer-segment-quality,
 .mixer-option:not(.mixer-option-active) .mixer-segment-price,
 .mixer-option:not(.mixer-option-active) .mixer-segment-errors,
 .mixer-option:not(.mixer-option-active) .mixer-segment-speed { @apply opacity-40; }

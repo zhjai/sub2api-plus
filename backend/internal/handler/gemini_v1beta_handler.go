@@ -87,6 +87,9 @@ func (h *GatewayHandler) GeminiV1BetaListModels(c *gin.Context) {
 
 	res, err := h.geminiCompatService.ForwardAIStudioGET(c.Request.Context(), account, "/v1beta/models")
 	if err != nil {
+		if handled, _ := handleAccountRPMError(c, err, nil, false, false); handled {
+			return
+		}
 		googleError(c, http.StatusBadGateway, err.Error())
 		return
 	}
@@ -267,6 +270,9 @@ func (h *GatewayHandler) GeminiV1BetaGetModel(c *gin.Context) {
 
 	res, err := h.geminiCompatService.ForwardAIStudioGET(c.Request.Context(), account, "/v1beta/models/"+modelName)
 	if err != nil {
+		if handled, _ := handleAccountRPMError(c, err, nil, false, false); handled {
+			return
+		}
 		googleError(c, http.StatusBadGateway, err.Error())
 		return
 	}
@@ -535,6 +541,9 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 				googleError(c, cls.Status, message)
 				return
 			}
+			if accountRPMSelectionExhausted(c, fs.FailedAccountIDs) {
+				return
+			}
 			action := fs.HandleSelectionExhausted(c.Request.Context())
 			switch action {
 			case FailoverContinue:
@@ -652,6 +661,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		accountReleaseFunc = wrapReleaseOnDone(c.Request.Context(), accountReleaseFunc)
 
 		// 5) forward (根据平台分流)
+		writerSizeBeforeForward := c.Writer.Size()
 		var result *service.ForwardResult
 		requestCtx := c.Request.Context()
 		if fs.SwitchCount > 0 {
@@ -675,6 +685,12 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		}
 		if accountReleaseFunc != nil {
 			accountReleaseFunc()
+		}
+		if handled, retry := fs.handleAccountRPMError(c, err, c.Writer.Size() != writerSizeBeforeForward); handled {
+			if retry {
+				continue
+			}
+			return
 		}
 		if err != nil {
 			var failoverErr *service.UpstreamFailoverError

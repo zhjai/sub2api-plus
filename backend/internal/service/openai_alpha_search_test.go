@@ -25,6 +25,10 @@ type alphaSearchAccountStateRepo struct {
 	lastError     string
 }
 
+func (r *alphaSearchAccountStateRepo) GetAccountRPMLimit(context.Context, int64) (int, error) {
+	return 0, nil
+}
+
 func (r *alphaSearchAccountStateRepo) SetError(_ context.Context, _ int64, errorMsg string) error {
 	r.setErrorCalls++
 	r.lastError = errorMsg

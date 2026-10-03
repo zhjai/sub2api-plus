@@ -10,6 +10,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type openAIWSStateLookupErrorCache struct {
+	*stubGatewayCache
+	err error
+}
+
+func (c *openAIWSStateLookupErrorCache) GetSessionAccountID(context.Context, int64, string) (int64, error) {
+	return 0, c.err
+}
+
 func TestOpenAIWSStateStore_BindGetDeleteResponseAccount(t *testing.T) {
 	cache := &stubGatewayCache{}
 	store := NewOpenAIWSStateStore(cache)
@@ -57,7 +66,7 @@ func TestOpenAIWSStateStore_ResponseBindingMissIsNotOperationalFailure(t *testin
 			if wrapped {
 				miss = fmt.Errorf("cache miss: %w", miss)
 			}
-			store := NewOpenAIWSStateStore(&openAIOpaqueRouteEpochLookupErrorCache{err: miss})
+			store := NewOpenAIWSStateStore(&openAIWSStateLookupErrorCache{err: miss})
 			accountID, err := store.GetResponseAccount(ctx, 8, "resp_missing")
 			require.NoError(t, err)
 			require.Zero(t, accountID)
@@ -72,7 +81,7 @@ func TestOpenAIWSStateStore_ResponseBindingMissIsNotOperationalFailure(t *testin
 func TestOpenAIWSStateStore_ResponseBindingOperationalErrorPropagates(t *testing.T) {
 	ctx := context.Background()
 	lookupErr := errors.New("cache unavailable")
-	store := NewOpenAIWSStateStore(&openAIOpaqueRouteEpochLookupErrorCache{err: lookupErr})
+	store := NewOpenAIWSStateStore(&openAIWSStateLookupErrorCache{err: lookupErr})
 	accountID, err := store.GetResponseAccount(ctx, 8, "resp_unavailable")
 	require.ErrorIs(t, err, lookupErr)
 	require.Zero(t, accountID)

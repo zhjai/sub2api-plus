@@ -284,6 +284,9 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 				h.errorResponse(c, http.StatusServiceUnavailable, noAccountCode, noAccountMessage)
 				return
 			}
+			if accountRPMSelectionExhausted(c, failedAccountIDs) {
+				return
+			}
 			if len(failedAccountIDs) == 0 {
 				cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, requestModel, routingModel, platform)
 				if !cls.ModelNotFound {
@@ -390,6 +393,12 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 			}
 			return h.gatewayService.ForwardGrokMedia(requestCtx, c, account, endpoint, requestID, body, contentType)
 		}()
+		if handled, retry := handleAccountRPMError(c, err, failedAccountIDs, boundLookupAccountID == 0, c.Writer.Size() != writerSizeBeforeForward); handled {
+			if retry {
+				continue
+			}
+			return
+		}
 
 		forwardDurationMs := time.Since(forwardStart).Milliseconds()
 		upstreamLatencyMs, _ := getContextInt64(c, service.OpsUpstreamLatencyMsKey)

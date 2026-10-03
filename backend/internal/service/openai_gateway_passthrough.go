@@ -398,6 +398,9 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 
 		upstreamStart := time.Now()
 		resp, err = s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+		if IsAccountRPMError(err) {
+			return nil, err
+		}
 		SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
 		if err != nil {
 			// Transport-level failure (proxy/DNS/TCP/TLS — no HTTP response). Convert to
@@ -1282,7 +1285,8 @@ func openAIStreamDataStartsVisibleOutput(data, eventType string) bool {
 		return part.Get("text").String() != "" || part.Get("transcript").String() != ""
 	case "response.output_item.added", "response.output_item.done":
 		return openAIStreamItemHasVisibleOutput(gjson.Get(trimmed, "item"))
-	case "response.completed", "response.done":
+	}
+	if openAIStreamEventTypeIsTerminal(eventType) {
 		for _, item := range gjson.Get(trimmed, "response.output").Array() {
 			if openAIStreamItemHasVisibleOutput(item) {
 				return true
@@ -1984,6 +1988,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	responseStatus := ""
 	incompleteReason := ""
 	semanticOutputSeen := false
+	deliveredVisibleOutput := false
 	toolCallForwarded := false
 	lastSequenceNumber := int64(0)
 	sawSequenceNumber := false
@@ -2051,6 +2056,17 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		flushPending = false
 	}
 	defer flushPendingOutput()
+	deliveredEventType := ""
+	observeDeliveredLine := func(line string) {
+		if line == "" {
+			deliveredEventType = ""
+		} else if strings.HasPrefix(line, "event:") {
+			deliveredEventType = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		} else if data, ok := extractOpenAISSEDataLine(line); ok {
+			eventType := effectiveOpenAISSEEventType([]byte(data), deliveredEventType)
+			deliveredVisibleOutput = deliveredVisibleOutput || openAIStreamDataStartsVisibleOutput(data, eventType)
+		}
+	}
 	writePendingLines := func() bool {
 		for _, pending := range pendingLines {
 			if _, err := fmt.Fprintln(w, pending); err != nil {
@@ -2058,6 +2074,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				logger.LegacyPrintf("service.openai_gateway", "[OpenAI passthrough] Client disconnected during streaming, continue draining upstream for usage: account=%d", account.ID)
 				return false
 			}
+			observeDeliveredLine(pending)
 		}
 		pendingLines = pendingLines[:0]
 		pendingLineBytes = 0
@@ -2107,7 +2124,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			protocolStatus:        protocolStatus,
 			responseStatus:        responseStatus,
 			incompleteReason:      incompleteReason,
-			meaningfulOutput:      semanticOutputSeen && !strongToolLeakRejected,
+			meaningfulOutput:      deliveredVisibleOutput,
 			toolCallForwarded:     toolCallForwarded,
 			clientDisconnected:    clientDisconnected,
 			toolCapabilityFailure: !clientDisconnected && ctx.Err() == nil && (strongToolLeakRejected || openAIToolCapabilityFailure(c, protocolStatus == "completed" && (terminalEventType == "response.completed" || terminalEventType == "response.done"))),
@@ -2396,6 +2413,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				clientDisconnected = true
 				logger.LegacyPrintf("service.openai_gateway", "[OpenAI passthrough] Client disconnected during streaming, continue draining upstream for usage: account=%d", account.ID)
 			} else {
+				observeDeliveredLine(line)
 				clientOutputStarted = true
 				responseDelivered = responseID != ""
 				flushPending = true

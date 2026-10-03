@@ -237,6 +237,7 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 	}
 	redactedCreds, credsStatus := RedactCredentials(a.Credentials)
 	extra := redactAccountManagedExtra(a.Extra)
+	rpmLimit, _ := a.AccountRPMLimit()
 	var ollamaCloudUsage *service.OllamaCloudUsageState
 	if state := service.OllamaCloudUsageStateFromAccount(a); state.Eligible {
 		ollamaCloudUsage = state
@@ -246,6 +247,7 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 		openCodeGoUsage = state
 	}
 	out := &Account{
+		RPMLimit:                rpmLimit,
 		ID:                      a.ID,
 		Name:                    a.Name,
 		Notes:                   a.Notes,
@@ -463,6 +465,7 @@ func AccountListItemFromAccount(a *Account) *AccountListItem {
 		return nil
 	}
 	return &AccountListItem{
+		RPMLimit: a.RPMLimit, RPMCapacity: a.RPMCapacity,
 		ID: a.ID, Name: a.Name, Notes: a.Notes, Platform: a.Platform, Type: a.Type,
 		Credentials: a.Credentials, CredentialsStatus: a.CredentialsStatus, Extra: a.Extra,
 		OllamaCloudUsage: a.OllamaCloudUsage, OpenCodeGoUsage: a.OpenCodeGoUsage,

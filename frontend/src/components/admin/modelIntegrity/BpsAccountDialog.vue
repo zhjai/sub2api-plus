@@ -201,6 +201,7 @@ const TONE: Record<ResultTone, string> = {
   likely: 'text-emerald-700 dark:text-emerald-300',
   attention: 'text-amber-700 dark:text-amber-300',
   neutral: 'text-gray-700 dark:text-gray-300',
+  error: 'text-rose-700 dark:text-rose-300',
   running: 'text-sky-700 dark:text-sky-300'
 }
 

@@ -2,9 +2,56 @@ import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { describe, expect, it } from 'vitest'
+import { mount } from '@vue/test-utils'
+import { describe, expect, it, vi } from 'vitest'
 import zh from '@/i18n/locales/zh'
 import en from '@/i18n/locales/en'
+import AppSidebar from '../AppSidebar.vue'
+
+vi.mock('vue-router', () => ({
+  useRoute: () => ({ path: '/admin/model-integrity/tests' }),
+  useRouter: () => ({ push: vi.fn() })
+}))
+
+vi.mock('vue-i18n', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('vue-i18n')>()),
+  useI18n: () => ({ t: (key: string) => key })
+}))
+
+const mockAppStore = vi.hoisted(() => ({
+  sidebarCollapsed: false,
+  mobileOpen: false,
+  sidebarScrollTop: 0,
+  siteName: 'Sub2API',
+  siteLogo: '',
+  siteVersion: '',
+  publicSettingsLoaded: true,
+  cachedPublicSettings: null,
+  backendModeEnabled: false,
+  setMobileOpen: vi.fn(),
+  toggleSidebar: vi.fn()
+}))
+
+vi.mock('@/stores/app', () => ({ useAppStore: () => mockAppStore }))
+
+vi.mock('@/stores', () => ({
+  useAppStore: () => mockAppStore,
+  useAuthStore: () => ({ isAdmin: true, isSimpleMode: false }),
+  useOnboardingStore: () => ({ isCurrentStep: () => false, nextStep: vi.fn() }),
+  useAdminSettingsStore: () => ({
+    customMenuItems: [],
+    opsMonitoringEnabled: true,
+    paymentEnabled: true,
+    fetch: vi.fn()
+  })
+}))
+
+vi.mock('@/composables/useBatchImageAccess', async () => {
+  const { computed } = await import('vue')
+  return {
+    useBatchImageAccess: () => ({ canUseBatchImage: computed(() => false), refreshBatchImageAccess: vi.fn() })
+  }
+})
 
 const componentPath = resolve(dirname(fileURLToPath(import.meta.url)), '../AppSidebar.vue')
 const componentSource = readFileSync(componentPath, 'utf8')
@@ -118,5 +165,65 @@ describe('AppSidebar model integrity navigation', () => {
 
   it('no longer links the legacy evaluation page directly', () => {
     expect(componentSource).not.toContain("path: '/admin/evaluations'")
+  })
+})
+
+describe('AppSidebar model integrity icons (rendered)', () => {
+  function mountSidebar() {
+    return mount(AppSidebar, {
+      global: {
+        stubs: {
+          VersionBadge: true,
+          RouterLink: { props: ['to'], template: '<a :href="to"><slot /></a>' }
+        }
+      }
+    })
+  }
+
+  function iconFor(wrapper: ReturnType<typeof mountSidebar>, selector: string) {
+    const row = wrapper.find(selector)
+    expect(row.exists()).toBe(true)
+    const svg = row.find('svg')
+    expect(svg.exists()).toBe(true)
+    return svg
+  }
+
+  function sizeClasses(svg: ReturnType<ReturnType<typeof mountSidebar>['find']>) {
+    return svg.classes().filter(c => /^[hw]-\d/.test(c)).sort()
+  }
+
+  function paths(svg: ReturnType<ReturnType<typeof mountSidebar>['find']>) {
+    return svg.findAll('path').map(p => p.attributes('d')).join(' ')
+  }
+
+  it('renders both child icons in the same 16px box with no leftover 20px class', () => {
+    const wrapper = mountSidebar()
+    const tests = iconFor(wrapper, 'a[href="/admin/model-integrity/tests"]')
+    const scheduling = iconFor(wrapper, 'a[href="/admin/model-integrity/scheduling"]')
+
+    expect(sizeClasses(tests)).toEqual(['h-4', 'w-4'])
+    expect(sizeClasses(scheduling)).toEqual(['h-4', 'w-4'])
+    expect(tests.attributes('viewBox')).toBe(scheduling.attributes('viewBox'))
+    expect(tests.attributes('stroke-width')).toBe(scheduling.attributes('stroke-width'))
+
+    const testsRow = wrapper.find('a[href="/admin/model-integrity/tests"]')
+    const schedulingRow = wrapper.find('a[href="/admin/model-integrity/scheduling"]')
+    const rowClasses = (row: typeof testsRow) => row.classes().filter(c => c !== 'sidebar-link-active').sort()
+    expect(rowClasses(testsRow)).toEqual(rowClasses(schedulingRow))
+  })
+
+  it('keeps the group icon at 20px and gives tests a different glyph than the group', () => {
+    const wrapper = mountSidebar()
+    const groupButton = wrapper.findAll('button.sidebar-link').find(b => b.text().includes('nav.modelIntegrity'))
+    expect(groupButton).toBeDefined()
+    const groupIcon = groupButton!.find('svg')
+    expect(sizeClasses(groupIcon)).toEqual(['h-5', 'w-5'])
+
+    const tests = iconFor(wrapper, 'a[href="/admin/model-integrity/tests"]')
+    const scheduling = iconFor(wrapper, 'a[href="/admin/model-integrity/scheduling"]')
+    const groupD = paths(groupIcon)
+    expect(paths(tests)).not.toBe(groupD)
+    expect(paths(scheduling)).not.toBe(groupD)
+    expect(paths(tests)).not.toBe(paths(scheduling))
   })
 })

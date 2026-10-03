@@ -30,6 +30,10 @@ type stubAntigravityAccountRepo struct {
 	extraUpdateCalls    []defaultExtraUpdateCall
 }
 
+func (s *stubAntigravityAccountRepo) GetAccountRPMLimit(context.Context, int64) (int, error) {
+	return 0, nil
+}
+
 func (s *stubAntigravityAccountRepo) SetRateLimited(_ context.Context, id int64, resetAt time.Time) error {
 	s.rateCalls = append(s.rateCalls, defaultRateLimitCall{accountID: id, resetAt: resetAt})
 	return nil

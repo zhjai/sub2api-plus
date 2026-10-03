@@ -207,6 +207,9 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 				h.responsesErrorResponse(c, cls.Status, cls.ErrType, message)
 				return
 			}
+			if accountRPMSelectionExhausted(c, fs.FailedAccountIDs) {
+				return
+			}
 			action := fs.HandleSelectionExhausted(requestCtx)
 			switch action {
 			case FailoverContinue:
@@ -300,6 +303,12 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 			accountReleaseFunc()
 		}
 
+		if handled, retry := fs.handleAccountRPMError(c, err, c.Writer.Size() != writerSizeBeforeForward); handled {
+			if retry {
+				continue
+			}
+			return
+		}
 		if err != nil {
 			var failoverErr *service.UpstreamFailoverError
 			if errors.As(err, &failoverErr) {

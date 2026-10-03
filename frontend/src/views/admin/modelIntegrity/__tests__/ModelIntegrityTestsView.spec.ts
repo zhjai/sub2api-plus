@@ -28,7 +28,7 @@ vi.mock('vue-router', async importOriginal => ({
 import TestsView from '../ModelIntegrityTestsView.vue'
 
 const catalog = {
-  items: [{ id: 'gpt-5' }],
+  items: [{ id: 'gpt-5' }, { id: 'gpt-5.1' }],
   baseline_version: 'cpa-v1',
   baseline_models: [],
   candy: { expected_answer: 29, confidence: 'low', scheduling: 'alert_only' },
@@ -90,6 +90,7 @@ beforeEach(() => {
       test_type: 'candy',
       requested_model: 'gpt-5',
       reasoning_effort: 'high',
+      data_version: 'sub2api-candy-29-v2-cpa-fingerprint-5654020c',
       status: 'warning',
       outcome: { status: 'warning', reason: 'one_or_more_public_candy_variants_failed', sample_count: 5, expected_count: 5, confidence: 'low', scheduling: 'alert_only' },
       request_count: 5,
@@ -123,7 +124,7 @@ describe('ModelIntegrityTestsView', () => {
     expect(candy.text()).toContain('异常')
     expect(candy.text()).toContain('5 次中至少 1 次未答出 29')
     const probe = wrapper.get('[data-testid="test-state_probe"]')
-    expect(probe.text()).toContain('只支持直连 OpenAI OAuth 账号的默认推理强度')
+    expect(probe.text()).toContain('只支持直连 OpenAI OAuth 账号')
     expect(probe.get('[data-testid="run-state_probe"]').attributes('disabled')).toBeDefined()
     expect(wrapper.text()).not.toMatch(/路线资格|硬失败/)
     wrapper.unmount()
@@ -171,7 +172,7 @@ describe('ModelIntegrityTestsView', () => {
     await wrapper.get('[data-testid="history-row"]').trigger('click')
     await flushPromises()
     const note = document.body.querySelector('[data-testid="attribution-note"]')
-    expect(note?.textContent?.trim()).toBe('归因结果仅作提醒，不参与账号调度。')
+    expect(note?.textContent?.trim()).toBe('归因基于回答行为推断，不能证明实际路由。仅自动测试的结果会计入降智通过率，手动测试只用于诊断。')
     expect(document.body.querySelector('[data-testid="detail-status"]')?.textContent?.trim()).toBe('疑似 Luna')
     expect(document.body.textContent).toContain('gpt-5-luna')
     wrapper.unmount()
@@ -251,7 +252,7 @@ describe('ModelIntegrityTestsView', () => {
     document.body.querySelector<HTMLButtonElement>('[data-testid="confirm-fingerprint"]')!.click()
     await flushPromises()
 
-    expect(api.runOpenAIEval).toHaveBeenCalledWith({ account_id: 12, requested_model: 'gpt-5', reasoning_effort: 'high', test_type: 'fingerprint', sample_mode: 'strict' })
+    expect(api.runOpenAIEval).toHaveBeenCalledWith({ account_id: 12, requested_model: 'gpt-5', reasoning_effort: 'high', test_type: 'fingerprint', sample_mode: 'strict', max_attempts: 3 })
     expect(wrapper.text()).not.toContain('有未保存的更改')
     wrapper.unmount()
   })
@@ -289,6 +290,898 @@ describe('ModelIntegrityTestsView', () => {
     expect(payload.effects_enabled).toBe(true)
     expect(payload.accounts.map(route => `${route.account_id}:${route.reasoning_effort}`)).toEqual(['12:high', '11:', '12:'])
     expect(payload.accounts.every(route => !('direct_oauth_eligible' in route))).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('offers State Probe on a new high-effort target only where the server would allow it', async () => {
+    api.list.mockResolvedValue({
+      items: [
+        { id: 21, name: 'direct-oauth', platform: 'openai', type: 'oauth', parent_account_id: null, credentials: { auth_mode: 'chatgpt' } },
+        { id: 22, name: 'shadow-oauth', platform: 'openai', type: 'oauth', parent_account_id: 21 },
+        { id: 23, name: 'synthetic-oauth', platform: 'openai', type: 'oauth', parent_account_id: null, extra: { synthetic_ui_test: true } },
+        { id: 24, name: 'agent-oauth', platform: 'openai', type: 'oauth', parent_account_id: null, credentials: { auth_mode: ' AgentIdentity ' } }
+      ]
+    })
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-testid="open-add"]').trigger('click')
+    await flushPromises()
+    for (const [selector, value] of [['add-model', 'gpt-5'], ['add-effort', 'high']]) {
+      const select = document.body.querySelector<HTMLSelectElement>(`[data-testid="${selector}"]`)!
+      select.value = value
+      select.dispatchEvent(new Event('change'))
+    }
+    for (const box of document.body.querySelectorAll<HTMLInputElement>('[data-testid="add-account"]')) {
+      box.checked = true
+      box.dispatchEvent(new Event('change'))
+      await flushPromises()
+    }
+    document.body.querySelector<HTMLButtonElement>('[data-testid="add-submit"]')!.click()
+    await flushPromises()
+
+    const probeDisabled = async (name: string) => {
+      await wrapper.findAll('[data-testid="target"]').find(target => target.text().includes(name))!.trigger('click')
+      await flushPromises()
+      return wrapper.get('[data-testid="run-state_probe"]').attributes('disabled') !== undefined
+    }
+    // The target tests high effort; State Probe still runs on the account default.
+    expect(await probeDisabled('direct-oauth')).toBe(false)
+    expect(await probeDisabled('shadow-oauth')).toBe(true)
+    expect(await probeDisabled('synthetic-oauth')).toBe(true)
+    expect(await probeDisabled('agent-oauth')).toBe(true)
+    expect(wrapper.get('[data-testid="test-state_probe"]').text()).toContain('只支持直连 OpenAI OAuth 账号')
+
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
+    expect(payload.accounts.map(route => `${route.account_id}:${route.reasoning_effort}`)).toEqual(['12:high', '21:high', '22:high', '23:high', '24:high'])
+    expect(payload.accounts.every(route => !('direct_oauth_eligible' in route))).toBe(true)
+    wrapper.unmount()
+  })
+})
+
+describe('ModelIntegrityTestsView target editing', () => {
+  const bpsAccounts = [{ account_id: 11, probe_model: 'gpt-5', mode: 'auto' as const, failure_threshold: 4, recovery_threshold: 3, interval_seconds: 1800 }]
+
+  function editableConfig(): OpenAIEvalConfig {
+    const config = serverConfig()
+    config.bps_auto_enabled = true
+    config.bps_accounts = bpsAccounts.map(item => ({ ...item }))
+    config.accounts.push({
+      account_id: 11,
+      requested_model: 'gpt-5',
+      reasoning_effort: '',
+      candy_schedule: { ...schedule(1800, true), sample_count: 3 },
+      fingerprint_schedule: { ...schedule(43200, true), sample_mode: 'strict' },
+      modeltrace_schedule: { ...schedule(21600, true), jitter_seconds: 600 },
+      state_probe_schedule: schedule(3600, true),
+      bps_auto: false,
+      bps_mode: 'force_off',
+      direct_oauth_eligible: true
+    })
+    return config
+  }
+
+  // A closed dialog stays in the DOM while its leave transition runs, so only
+  // look inside the dialog that is actually open.
+  const $ = <T extends Element>(selector: string) => document.body.querySelector<T>(`.modal-overlay:not([class*="modal-leave"]) ${selector}`)
+  const editOpen = () => Boolean($('[data-testid="edit-model"]'))
+  async function choose(selector: string, value: string) {
+    const select = $<HTMLSelectElement>(selector)!
+    select.value = value
+    select.dispatchEvent(new Event('change'))
+    await flushPromises()
+  }
+  async function selectTarget(wrapper: ReturnType<typeof mountView>, index: number) {
+    await wrapper.findAll('[data-testid="target"]')[index].trigger('click')
+    await flushPromises()
+  }
+  async function openEdit(wrapper: ReturnType<typeof mountView>) {
+    await wrapper.get('[data-testid="edit-target"]').trigger('click')
+    await flushPromises()
+  }
+  async function apply() {
+    $<HTMLButtonElement>('[data-testid="edit-submit"]')!.click()
+    await flushPromises()
+  }
+
+  beforeEach(() => {
+    api.getOpenAIEvalConfig.mockResolvedValue(editableConfig())
+  })
+
+  it('changes model and explicit effort in place and saves them with schedules, BPS and order intact', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    const before = editableConfig()
+
+    await openEdit(wrapper)
+    expect($('[data-testid="edit-account"]')?.textContent).toContain('apikey-b #12')
+    expect($<HTMLSelectElement>('[data-testid="edit-model"]')!.value).toBe('gpt-5')
+    expect($<HTMLSelectElement>('[data-testid="edit-effort"]')!.value).toBe('high')
+    // Nothing changed yet, so there is nothing to apply.
+    expect($<HTMLButtonElement>('[data-testid="edit-submit"]')!.disabled).toBe(true)
+
+    await choose('[data-testid="edit-model"]', 'gpt-5.1')
+    await choose('[data-testid="edit-effort"]', 'high')
+    await apply()
+
+    expect(editOpen()).toBe(false)
+    expect(wrapper.get('[data-testid="target"][aria-current="true"]').text()).toContain('gpt-5.1 · high')
+    expect(wrapper.text()).toContain('有未保存的更改')
+    expect(api.saveOpenAIEvalConfig).not.toHaveBeenCalled()
+
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
+    expect(payload.revision).toBe(9)
+    expect(payload.accounts.map(route => `${route.account_id}:${route.requested_model}:${route.reasoning_effort}`)).toEqual(['12:gpt-5.1:high', '11:gpt-5:'])
+    const edited = payload.accounts[0]
+    expect(edited.candy_schedule).toEqual(before.accounts[0].candy_schedule)
+    expect(edited.fingerprint_schedule).toEqual(before.accounts[0].fingerprint_schedule)
+    expect(edited.modeltrace_schedule).toEqual(before.accounts[0].modeltrace_schedule)
+    expect(edited.state_probe_schedule).toEqual(before.accounts[0].state_probe_schedule)
+    expect(edited.bps_mode).toBe('force_off')
+    expect(payload.bps_auto_enabled).toBe(true)
+    expect(payload.bps_accounts).toEqual(bpsAccounts)
+    expect(payload.policies).toEqual([{ requested_model: 'gpt-5', reasoning_effort: 'high', policy: 'cost_first' }])
+    wrapper.unmount()
+  })
+
+  it('switches an explicit effort back to the default effort and back again', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    await openEdit(wrapper)
+    await choose('[data-testid="edit-effort"]', '')
+    await apply()
+    expect(wrapper.get('[data-testid="target"][aria-current="true"]').text()).toContain('gpt-5 · 默认强度')
+
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    expect((api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig).accounts[0].reasoning_effort).toBe('')
+    wrapper.unmount()
+  })
+
+  it('keeps the State Probe schedule and eligibility when a direct OAuth target moves to an explicit effort', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    await selectTarget(wrapper, 1)
+    expect(wrapper.get('[data-testid="run-state_probe"]').attributes('disabled')).toBeUndefined()
+
+    await openEdit(wrapper)
+    expect($('[data-testid="edit-state-probe"]')).toBeNull()
+    await choose('[data-testid="edit-effort"]', 'high')
+    // Explains the default-effort behaviour instead of claiming OAuth is unsupported.
+    expect($('[data-testid="edit-state-probe"]')?.textContent).toContain('状态探针会继续按账号的默认推理强度运行')
+    expect($('[data-testid="edit-state-probe"]')?.textContent).not.toContain('只支持')
+    await apply()
+    expect(wrapper.get('[data-testid="run-state_probe"]').attributes('disabled')).toBeUndefined()
+    expect(wrapper.get('[data-testid="state-probe-effort"]').text()).toContain('按账号的默认推理强度运行')
+    expect(wrapper.get('[data-testid="test-state_probe"]').text()).not.toContain('只支持直连')
+
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
+    const before = editableConfig().accounts[1]
+    const edited = payload.accounts[1]
+    expect(edited).toMatchObject({ account_id: 11, requested_model: 'gpt-5', reasoning_effort: 'high', bps_mode: 'force_off' })
+    expect(edited.state_probe_schedule).toEqual(before.state_probe_schedule)
+    expect(edited.candy_schedule).toEqual(before.candy_schedule)
+    expect(edited.fingerprint_schedule).toEqual(before.fingerprint_schedule)
+    expect(edited.modeltrace_schedule).toEqual(before.modeltrace_schedule)
+    expect(payload.bps_accounts).toEqual(bpsAccounts)
+    wrapper.unmount()
+  })
+
+  it('edits a high-effort OAuth target with legacy route BPS without losing schedules or BPS', async () => {
+    const config = editableConfig()
+    config.accounts[1].reasoning_effort = 'high'
+    config.accounts[1].bps_mode = 'auto'
+    config.accounts[1].bps_auto = true
+    api.getOpenAIEvalConfig.mockResolvedValue(config)
+    const wrapper = mountView()
+    await flushPromises()
+    await selectTarget(wrapper, 1)
+    expect(wrapper.get('[data-testid="run-state_probe"]').attributes('disabled')).toBeUndefined()
+
+    await openEdit(wrapper)
+    expect($('[data-testid="edit-bps-locked"]')).toBeNull()
+    expect($<HTMLOptionElement>('[data-testid="edit-effort"] option[value="high"]')!.disabled).toBe(false)
+    expect($<HTMLOptionElement>('[data-testid="edit-effort"] option[value=""]')!.disabled).toBe(false)
+    await choose('[data-testid="edit-model"]', 'gpt-5.1')
+    expect($<HTMLButtonElement>('[data-testid="edit-submit"]')!.disabled).toBe(false)
+    await apply()
+
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
+    const before = config.accounts[1]
+    const edited = payload.accounts[1]
+    expect(edited).toMatchObject({ account_id: 11, requested_model: 'gpt-5.1', reasoning_effort: 'high', bps_mode: 'auto', bps_auto: true })
+    expect(edited.state_probe_schedule).toEqual(before.state_probe_schedule)
+    expect(edited.candy_schedule).toEqual(before.candy_schedule)
+    expect(edited.fingerprint_schedule).toEqual(before.fingerprint_schedule)
+    expect(edited.modeltrace_schedule).toEqual(before.modeltrace_schedule)
+    expect(payload.bps_accounts).toEqual(bpsAccounts)
+    wrapper.unmount()
+  })
+
+  it('keeps a target with route-level BPS editable on the default effort', async () => {
+    const config = editableConfig()
+    config.accounts[1].bps_mode = 'auto'
+    api.getOpenAIEvalConfig.mockResolvedValue(config)
+    const wrapper = mountView()
+    await flushPromises()
+    await selectTarget(wrapper, 1)
+
+    await openEdit(wrapper)
+    await choose('[data-testid="edit-model"]', 'gpt-5.1')
+    await apply()
+
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    const edited = (api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig).accounts[1]
+    expect(edited).toMatchObject({ requested_model: 'gpt-5.1', reasoning_effort: '', bps_mode: 'auto' })
+    expect(edited.state_probe_schedule.enabled).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('rejects a combination the account already tests', async () => {
+    const config = editableConfig()
+    config.accounts.push({ ...config.accounts[0], requested_model: 'GPT-5.1', reasoning_effort: 'high' })
+    api.getOpenAIEvalConfig.mockResolvedValue(config)
+    const wrapper = mountView()
+    await flushPromises()
+
+    await openEdit(wrapper)
+    await choose('[data-testid="edit-model"]', 'gpt-5.1')
+    expect($('[data-testid="edit-duplicate"]')?.textContent).toContain('该账号已有 gpt-5.1 · high 的测试对象')
+    expect($<HTMLButtonElement>('[data-testid="edit-submit"]')!.disabled).toBe(true)
+    await apply()
+    expect(editOpen()).toBe(true)
+
+    // Another account may use the same model and effort.
+    await choose('[data-testid="edit-model"]', 'gpt-5')
+    await choose('[data-testid="edit-effort"]', '')
+    expect($('[data-testid="edit-duplicate"]')).toBeNull()
+    wrapper.unmount()
+  })
+
+  it('leaves the target untouched when the edit is cancelled', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    await openEdit(wrapper)
+    await choose('[data-testid="edit-model"]', 'gpt-5.1')
+    await choose('[data-testid="edit-effort"]', '')
+    $<HTMLButtonElement>('[data-testid="edit-cancel"]')!.click()
+    await flushPromises()
+
+    expect(editOpen()).toBe(false)
+    expect(wrapper.get('[data-testid="target"][aria-current="true"]').text()).toContain('gpt-5 · high')
+    expect(wrapper.text()).not.toContain('有未保存的更改')
+
+    // Reopening starts from the target's current values, not the abandoned draft.
+    await openEdit(wrapper)
+    expect($<HTMLSelectElement>('[data-testid="edit-model"]')!.value).toBe('gpt-5')
+    expect($<HTMLSelectElement>('[data-testid="edit-effort"]')!.value).toBe('high')
+    wrapper.unmount()
+  })
+
+  it('clears the unsaved state when an edit is reverted to the saved values', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    await openEdit(wrapper)
+    await choose('[data-testid="edit-model"]', 'gpt-5.1')
+    await apply()
+    expect(wrapper.text()).toContain('有未保存的更改')
+    await openEdit(wrapper)
+    await choose('[data-testid="edit-model"]', 'gpt-5')
+    await apply()
+    expect(wrapper.text()).not.toContain('有未保存的更改')
+    wrapper.unmount()
+  })
+
+  it('shows history for the new identity only and ignores a late reply for the old one', async () => {
+    const oldRun = {
+      id: 1, account_id: 12, test_type: 'candy', requested_model: 'gpt-5', reasoning_effort: 'high', status: 'warning',
+      outcome: { status: 'warning', reason: 'one_or_more_public_candy_variants_failed', sample_count: 5, expected_count: 5, confidence: 'low', scheduling: 'alert_only' },
+      request_count: 5, input_tokens: 1, output_tokens: 1, duration_ms: 1, started_at: '2026-10-01T07:00:00Z', finished_at: '2026-10-01T07:00:03Z', trigger_source: 'scheduled'
+    }
+    const lateOld: Array<(value: unknown) => void> = []
+    api.listOpenAIEvalRuns.mockImplementation(async (params: { requested_model?: string }) => {
+      if (params.requested_model === 'gpt-5') return new Promise(resolve => { lateOld.push(resolve) })
+      return { items: params.requested_model ? [] : [oldRun] }
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.get('[data-testid="test-candy"]').get('[data-testid="latest-status"]').text()).toBe('异常')
+
+    await openEdit(wrapper)
+    await choose('[data-testid="edit-model"]', 'gpt-5.1')
+    await apply()
+
+    expect(api.listOpenAIEvalRuns).toHaveBeenLastCalledWith({ account_id: 12, requested_model: 'gpt-5.1', limit: 50 })
+    // The old target's pending narrow query resolves after the edit.
+    lateOld.forEach(resolve => resolve({ items: [oldRun] }))
+    await flushPromises()
+    expect(wrapper.get('[data-testid="test-candy"]').find('[data-testid="latest-status"]').exists()).toBe(false)
+    const scopeTarget = wrapper.findAll('.scope-btn')[1]
+    await scopeTarget.trigger('click')
+    expect(wrapper.findAll('[data-testid="history-row"]')).toHaveLength(0)
+    // The run itself still names the model it was made with.
+    await wrapper.findAll('.scope-btn')[0].trigger('click')
+    expect(wrapper.get('[data-testid="history-row"]').text()).toContain('gpt-5 · high')
+    wrapper.unmount()
+  })
+
+  it('lets a run that started before the edit finish on its original model', async () => {
+    let finish!: (value: unknown) => void
+    api.runOpenAIEval.mockImplementation(() => new Promise(resolve => { finish = resolve }))
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    try {
+      const wrapper = mountView()
+      await flushPromises()
+
+      await wrapper.get('[data-testid="run-candy"]').trigger('click')
+      await flushPromises()
+      expect(api.runOpenAIEval).toHaveBeenCalledWith({ account_id: 12, requested_model: 'gpt-5', reasoning_effort: 'high', test_type: 'candy', sample_count: 5, max_attempts: 3 })
+      expect(wrapper.get('[data-testid="run-candy"]').attributes('disabled')).toBeDefined()
+
+      await openEdit(wrapper)
+      await choose('[data-testid="edit-model"]', 'gpt-5.1')
+      await apply()
+      // The edited target is a new identity with no run in flight.
+      expect(wrapper.get('[data-testid="run-candy"]').attributes('disabled')).toBeUndefined()
+
+      api.listOpenAIEvalRuns.mockClear()
+      vi.advanceTimersByTime(1000)
+      await flushPromises()
+      const polls = api.listOpenAIEvalRuns.mock.calls.map(call => call[0]).filter(params => params.test_type === 'candy')
+      expect(polls).toEqual([{ account_id: 12, requested_model: 'gpt-5', reasoning_effort: 'high', test_type: 'candy', limit: 5 }])
+
+      finish({
+        id: 3, account_id: 12, test_type: 'candy', requested_model: 'gpt-5', reasoning_effort: 'high', status: 'pass',
+        outcome: { status: 'pass', reason: 'all_public_candy_variants_passed', sample_count: 5, expected_count: 5, confidence: 'low', scheduling: 'alert_only' },
+        request_count: 5, input_tokens: 1, output_tokens: 1, duration_ms: 900, started_at: '2026-10-01T08:00:00Z', trigger_source: 'manual'
+      })
+      await flushPromises()
+      expect(wrapper.get('[data-testid="target"][aria-current="true"]').text()).toContain('gpt-5.1 · high')
+
+      await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+      await flushPromises()
+      const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
+      expect(payload.accounts[0]).toMatchObject({ account_id: 12, requested_model: 'gpt-5.1', reasoning_effort: 'high' })
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('ModelIntegrityTestsView retries and per-sample diagnostics', () => {
+  const versionedCatalog = { ...catalog, data_version: 'sub2api-candy-21-v3-cpa', candy: { ...catalog.candy, expected_answer: 21 } }
+  const candyRun = (id: number, extra: Record<string, unknown>) => ({
+    id, account_id: 12, test_type: 'candy', requested_model: 'gpt-5', reasoning_effort: 'high', status: 'pass',
+    outcome: { status: 'pass', reason: 'all_public_candy_variants_passed', sample_count: 1, expected_count: 1, confidence: 'low', scheduling: 'alert_only' },
+    request_count: 1, input_tokens: 1, output_tokens: 1, duration_ms: 900,
+    started_at: `2026-10-02T0${id}:00:00Z`, finished_at: `2026-10-02T0${id}:00:05Z`, trigger_source: 'manual', ...extra
+  })
+  const $ = <T extends Element>(selector: string) => document.body.querySelector<T>(`.modal-overlay:not([class*="modal-leave"]) ${selector}`)
+  const $$ = (selector: string) => [...document.body.querySelectorAll(`.modal-overlay:not([class*="modal-leave"]) ${selector}`)]
+  async function openLatest(wrapper: ReturnType<typeof mountView>, type = 'candy') {
+    await wrapper.get(`[data-testid="test-${type}"] .tt-result-btn`).trigger('click')
+    await flushPromises()
+  }
+
+  it('defaults a legacy config to 3 attempts, saves the edited value and clamps invalid input', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    const input = wrapper.get<HTMLInputElement>('[data-testid="max-attempts"]')
+    expect(input.element.value).toBe('3')
+    // Candy 5 samples × 3 attempts; State Probe never retries.
+    expect(wrapper.get('[data-testid="test-candy"] [data-testid="per-run"]').text()).toBe('每次 5 次请求，失败重试时最多 15 次')
+    expect(wrapper.get('[data-testid="budget"]').text()).toContain('失败重试时最多约 360 次')
+    expect(wrapper.text()).not.toContain('有未保存的更改')
+
+    for (const [raw, expected] of [['0', '1'], ['25', '10'], ['abc', '3'], ['4.7', '4']] as const) {
+      await input.setValue(raw)
+      await input.trigger('change')
+      expect(input.element.value).toBe(expected)
+    }
+    expect(wrapper.get('[data-testid="test-modeltrace"] [data-testid="per-run"]').text()).toBe('每次 3 次请求，失败重试时最多 12 次')
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
+    expect(payload.max_request_attempts).toBe(4)
+    wrapper.unmount()
+  })
+
+  it('reads a saved attempts value and sends it with manual runs except State Probe', async () => {
+    const config = serverConfig()
+    config.max_request_attempts = 5
+    config.accounts[0].direct_oauth_eligible = true
+    api.getOpenAIEvalConfig.mockResolvedValue(config)
+    api.runOpenAIEval.mockResolvedValue(candyRun(9, {}))
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.get<HTMLInputElement>('[data-testid="max-attempts"]').element.value).toBe('5')
+    expect(wrapper.get('[data-testid="test-state_probe"] [data-testid="per-run"]').text()).toBe('每次 2 次请求，不重试')
+
+    await wrapper.get('[data-testid="run-modeltrace"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid="run-state_probe"]').trigger('click')
+    await flushPromises()
+    const calls = api.runOpenAIEval.mock.calls.map(call => call[0])
+    expect(calls[0]).toEqual({ account_id: 12, requested_model: 'gpt-5', reasoning_effort: 'high', test_type: 'modeltrace', max_attempts: 5 })
+    expect(calls[1]).toEqual({ account_id: 12, requested_model: 'gpt-5', reasoning_effort: 'high', test_type: 'state_probe' })
+    wrapper.unmount()
+  })
+
+  it('shows logical sample progress and physical upstream requests separately', async () => {
+    let finish!: (value: unknown) => void
+    api.runOpenAIEval.mockImplementation(() => new Promise(resolve => { finish = resolve }))
+    const wrapper = mountView()
+    await flushPromises()
+    api.listOpenAIEvalRuns.mockResolvedValue({
+      items: [{
+        id: 4, account_id: 12, test_type: 'modeltrace', requested_model: 'gpt-5', reasoning_effort: 'high', status: 'running',
+        outcome: { status: 'running', sample_count: 2, expected_count: 3, confidence: 'none', scheduling: 'disabled' },
+        request_count: 7, completed_samples: 2, expected_samples: 3, input_tokens: 1, output_tokens: 1,
+        duration_ms: 500, started_at: '2026-10-02T08:00:00Z', trigger_source: 'manual'
+      }]
+    })
+    await wrapper.get('[data-testid="run-modeltrace"]').trigger('click')
+    await flushPromises()
+    const progress = wrapper.get('[data-testid="test-modeltrace"] [data-testid="test-progress"]')
+    expect(progress.text()).toContain('正在采样 2/3')
+    expect(progress.find('.tt-progress-value').attributes('style')).toContain('67%')
+    expect(progress.get('[data-testid="test-progress-requests"]').text()).toBe('已发出 7 次上游请求')
+    finish(candyRun(4, { test_type: 'modeltrace' }))
+    await flushPromises()
+    wrapper.unmount()
+  })
+
+  it('shows the current Candy expected answer 21 and each extracted answer below the result', async () => {
+    api.getOpenAIEvalModels.mockResolvedValue(versionedCatalog)
+    api.listOpenAIEvalRuns.mockResolvedValue({
+      items: [candyRun(5, {
+        data_version: 'sub2api-candy-21-v3-cpa', request_count: 4,
+        outcome: { status: 'pass', reason: 'all_public_candy_variants_passed', sample_count: 2, expected_count: 2, confidence: 'low', scheduling: 'alert_only' },
+        samples: [
+          { probe_id: 'candy-21-v3-1', valid: true, answer: '最终答案：21 颗', normalized_answer: '21', attempts: 1 },
+          { probe_id: 'candy-21-v3-2', valid: true, normalized_answer: '21', attempts: 3, attempt_errors: [{ attempt: 1, code: 'http_5xx', message: 'bad gateway', http_status: 502 }, { attempt: 2, code: 'timeout', message: 'upstream timeout' }] }
+        ]
+      })]
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    const answers = wrapper.get('[data-testid="test-candy"] [data-testid="latest-answers"]').text()
+    expect(answers).toContain('预期答案 21')
+    const rows = wrapper.findAll('[data-testid="test-candy"] [data-testid="latest-answer-value"]').map(row => row.text())
+    expect(rows).toEqual(['样本 1：提取答案 21', '样本 2：提取答案 21'])
+    // Only the first sample stored a reply; it stays available but collapsed.
+    const replies = wrapper.findAll('[data-testid="test-candy"] .tt-answer-reply')
+    expect(replies).toHaveLength(1)
+    expect((replies[0].element as HTMLDetailsElement).open).toBe(false)
+    expect(replies[0].get('[data-testid="latest-answer-reply"]').text()).toBe('最终答案：21 颗')
+
+    await openLatest(wrapper)
+    expect($('[data-testid="detail-expected"]')?.textContent).toBe('21')
+    expect($('[data-testid="detail-logical"]')?.textContent).toBe('2/2')
+    expect($('[data-testid="detail-physical"]')?.textContent).toBe('4')
+    expect($('[data-testid="detail-historical"]')).toBeNull()
+    const states = $$('[data-testid="sample-state"]').map(node => node.textContent)
+    expect(states).toEqual(['正确', '正确'])
+    expect($$('[data-testid="sample-extracted"]').map(node => node.textContent?.trim())).toEqual(['提取答案 21', '提取答案 21'])
+    expect($$('[data-testid="sample-answer"]').map(node => node.textContent)).toEqual(['最终答案：21 颗'])
+    expect($$('[data-testid="sample-attempt"]').map(node => [...node.children].map(child => child.textContent).join(' '))).toEqual(['第 1 次 HTTP 502 bad gateway', '第 2 次 upstream timeout'])
+    wrapper.unmount()
+  })
+
+  it('keeps 29 for historical Candy runs and never invents an answer the server did not store', async () => {
+    api.getOpenAIEvalModels.mockResolvedValue(versionedCatalog)
+    api.listOpenAIEvalRuns.mockResolvedValue({
+      items: [
+        candyRun(6, {
+          data_version: 'sub2api-candy-29-v2-cpa-fingerprint-5654020c', status: 'warning',
+          outcome: { status: 'warning', reason: 'one_or_more_public_candy_variants_failed', sample_count: 1, expected_count: 1, confidence: 'low', scheduling: 'alert_only' },
+          samples: [{ probe_id: 'candy-29-v2-1', valid: false, error_code: 'single_public_item_failed' }]
+        }),
+        candyRun(5, {
+          status: 'warning',
+          outcome: { status: 'warning', reason: 'one_or_more_public_candy_variants_failed', sample_count: 1, expected_count: 1, confidence: 'low', scheduling: 'alert_only' }
+        })
+      ]
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    const panel = wrapper.get('[data-testid="test-candy"]')
+    expect(panel.get('[data-testid="latest-explanation"]').text()).toContain('未答出 29')
+    expect(panel.text()).not.toContain('21')
+    expect(panel.get('[data-testid="latest-answers"]').text()).toBe('预期答案 29')
+
+    await openLatest(wrapper)
+    expect($('[data-testid="detail-expected"]')?.textContent).toBe('29')
+    expect($('[data-testid="detail-historical"]')?.textContent).toContain('旧版题目')
+    expect($('[data-testid="sample-state"]')?.textContent).toBe('错误')
+    expect($('[data-testid="sample-legacy"]')?.textContent).toContain('未保存回答与错误详情')
+    expect($('[data-testid="sample-extracted"]')).toBeNull()
+    expect($('[data-testid="sample-answer"]')).toBeNull()
+    expect($('[data-testid="sample-error"]')).toBeNull()
+    document.body.querySelector<HTMLButtonElement>('.modal-overlay .btn-secondary')!.click()
+    await flushPromises()
+
+    // An unversioned run on a versioned server has no knowable expected answer.
+    const history = wrapper.findAll('[data-testid="history-row"]')
+    expect(history[1].text()).toContain('至少 1 次回答错误')
+    expect(history[1].text()).not.toMatch(/21|29/)
+    await history[1].trigger('click')
+    await flushPromises()
+    expect($('[data-testid="detail-expected"]')).toBeNull()
+    expect($('[data-testid="detail-historical"]')?.textContent).toContain('无法确定当时的预期答案')
+    expect($('[data-testid="samples-none"]')?.textContent).toContain('未保存逐个样本的结果')
+    wrapper.unmount()
+  })
+
+  it('names the upstream failure behind insufficient evidence and keeps it apart from errors', async () => {
+    api.listOpenAIEvalRuns.mockResolvedValue({
+      items: [
+        candyRun(7, {
+          status: 'insufficient', request_count: 5,
+          outcome: { status: 'insufficient', reason: 'insufficient_valid_samples', sample_count: 1, expected_count: 2, confidence: 'none', scheduling: 'alert_only' },
+          samples: [
+            { probe_id: 'candy-21-v3-1', valid: true, answer: '21', attempts: 1 },
+            {
+              probe_id: 'candy-21-v3-2', valid: false, error_code: 'http_5xx', http_status: 503, attempts: 3,
+              error_message: 'Service Unavailable: upstream overloaded, Authorization: Bearer abc.def-ghi and key sk-proj1234567890abcdef',
+              attempt_errors: [
+                { attempt: 1, code: 'http_5xx', message: 'overloaded', http_status: 503 },
+                { attempt: 2, code: 'http_5xx', message: 'overloaded', http_status: 503 },
+                { attempt: 3, code: 'http_5xx', message: 'overloaded', http_status: 503 }
+              ]
+            }
+          ]
+        }),
+        candyRun(6, { test_type: 'fingerprint', status: 'error', outcome: { status: 'error', reason: 'http_401', sample_count: 0, expected_count: 0, confidence: 'none', scheduling: 'alert_only' } })
+      ]
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    const candy = wrapper.get('[data-testid="test-candy"]')
+    expect(candy.get('[data-testid="latest-status"]').text()).toBe('证据不足')
+    expect(candy.get('footer').classes()).toContain('tt-result-neutral')
+    const explanation = candy.get('[data-testid="latest-explanation"]').text()
+    expect(explanation).toContain('有效回答 1/2')
+    expect(explanation).toContain('1 个样本请求失败：HTTP 503，Service Unavailable: upstream overloaded')
+    expect(explanation).toContain('尝试 3 次')
+    expect(explanation).not.toContain('abc.def-ghi')
+    expect(explanation).not.toContain('sk-proj1234567890abcdef')
+    const fingerprint = wrapper.get('[data-testid="test-fingerprint"]')
+    expect(fingerprint.get('[data-testid="latest-status"]').text()).toBe('失败')
+    expect(fingerprint.get('footer').classes()).toContain('tt-result-error')
+    const statuses = wrapper.findAll('[data-testid="history-status"]')
+    expect(statuses[0].classes()).toContain('tone-neutral')
+    expect(statuses[1].classes()).toContain('tone-error')
+
+    await openLatest(wrapper)
+    const failed = $$('[data-testid="sample"]')[1]
+    expect(failed.querySelector('details')!.open).toBe(true)
+    expect(failed.querySelector('[data-testid="sample-state"]')!.textContent).toBe('请求失败')
+    expect(failed.querySelector('.sample-attempts')!.textContent).toBe('尝试 3 次')
+    expect(failed.textContent).toContain('HTTP 503')
+    expect(failed.querySelector('[data-testid="sample-error"]')!.textContent).toContain('Bearer [redacted]')
+    expect(failed.querySelector('[data-testid="sample-error"]')!.textContent).toContain('sk-[redacted]')
+    expect(failed.querySelectorAll('[data-testid="sample-attempt"]')).toHaveLength(3)
+    expect($$('[data-testid="sample"]')[0].querySelector('details')!.open).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('works with the current server catalog that has no data version: 21 for new runs, 29 for old ones', async () => {
+    api.getOpenAIEvalModels.mockResolvedValue({ ...catalog, candy: { ...catalog.candy, expected_answer: 21 } })
+    api.listOpenAIEvalRuns.mockResolvedValue({
+      items: [
+        candyRun(6, {
+          data_version: 'sub2api-candy-21-v3-97623969-cpa-fingerprint-5654020c',
+          samples: [{ probe_id: 'candy-21-v3-1', valid: true, answer: '21', normalized_answer: '21', attempts: 2 }]
+        }),
+        candyRun(5, {
+          data_version: 'sub2api-candy-29-v2-cpa-fingerprint-5654020c', status: 'warning',
+          outcome: { status: 'warning', reason: 'one_or_more_public_candy_variants_failed', sample_count: 1, expected_count: 1, confidence: 'low', scheduling: 'alert_only' }
+        })
+      ]
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    const answers = wrapper.get('[data-testid="test-candy"] [data-testid="latest-answers"]')
+    expect(answers.get('.tt-answers-expected').text()).toBe('预期答案 21')
+    expect(answers.findAll('[data-testid="latest-answer-value"]').map(row => row.text())).toEqual(['提取答案 21'])
+    expect((answers.get('.tt-answer-reply').element as HTMLDetailsElement).open).toBe(false)
+    const rows = wrapper.findAll('[data-testid="history-row"]')
+    expect(rows[1].text()).toContain('未答出 29')
+    await rows[1].trigger('click')
+    await flushPromises()
+    expect($('[data-testid="detail-expected"]')?.textContent).toBe('29')
+    expect($('[data-testid="detail-historical"]')?.textContent).toContain('旧版题目')
+    wrapper.unmount()
+  })
+
+  it('renders model answers and upstream messages as text, never as HTML', async () => {
+    const hostile = '<img src=x onerror="window.__pwned=1"><b>21</b>'
+    api.listOpenAIEvalRuns.mockResolvedValue({
+      items: [candyRun(8, {
+        status: 'insufficient',
+        outcome: { status: 'insufficient', reason: 'insufficient_valid_samples', sample_count: 1, expected_count: 2, confidence: 'none', scheduling: 'alert_only' },
+        samples: [
+          { probe_id: 'a', valid: true, answer: hostile, attempts: 1 },
+          { probe_id: 'b', valid: false, error_code: 'upstream_error', http_status: 400, attempts: 1, error_message: '<script>alert(1)</script>' + 'x'.repeat(4000) }
+        ]
+      })]
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    // The server extracted nothing, so the reply is the collapsed annotation, shown as text.
+    expect(wrapper.findAll('[data-testid="latest-answer-value"]').map(row => row.text())).toEqual(['样本 1：未提取到答案', '样本 2：请求失败'])
+    expect(wrapper.get('[data-testid="latest-answer-reply"]').text()).toBe(hostile)
+    expect(wrapper.find('[data-testid="latest-answers"] img').exists()).toBe(false)
+    await openLatest(wrapper)
+    expect($('[data-testid="sample-extracted"]')!.textContent?.trim()).toBe('未提取到答案')
+    const answer = $('[data-testid="sample-answer"]')!
+    expect(answer.textContent).toBe(hostile)
+    expect(answer.querySelector('img, b')).toBeNull()
+    const error = $$('[data-testid="sample-error"]')[0]
+    expect(error.querySelector('script')).toBeNull()
+    expect(error.textContent).toContain('<script>alert(1)</script>')
+    expect(error.classList.contains('sample-text')).toBe(true)
+    expect((window as unknown as { __pwned?: number }).__pwned).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  describe('Candy answer annotations', () => {
+    const longReply = `先考虑最坏情况：${'每种颜色各取若干颗，'.repeat(300)}没有给出结论。`
+    const run = (samples: Record<string, unknown>[], extra: Record<string, unknown> = {}) => candyRun(9, {
+      data_version: 'sub2api-candy-21-v3-cpa', status: 'warning', request_count: samples.length,
+      outcome: { status: 'warning', reason: 'one_or_more_public_candy_variants_failed', sample_count: samples.length, expected_count: samples.length, confidence: 'low', scheduling: 'alert_only' },
+      samples, ...extra
+    })
+    const values = (wrapper: ReturnType<typeof mountView>) => wrapper.findAll('[data-testid="test-candy"] [data-testid="latest-answer-value"]').map(row => row.text())
+
+    beforeEach(() => { api.getOpenAIEvalModels.mockResolvedValue(versionedCatalog) })
+
+    it('shows only the extracted integers, each sample on its own, with every full reply collapsed', async () => {
+      api.listOpenAIEvalRuns.mockResolvedValue({
+        items: [run([
+          { probe_id: 'candy-21-v3-1', valid: true, error_code: 'correct_answer', http_status: 200, attempts: 1, normalized_answer: '21', answer: '红色取 9 颗、蓝色取 12 颗还不够。\n最终答案：21' },
+          { probe_id: 'candy-21-v3-2', valid: true, error_code: 'single_public_item_failed', http_status: 200, attempts: 1, normalized_answer: '29', answer: '答案是 29 颗' },
+          { probe_id: 'candy-21-v3-3', valid: true, error_code: 'single_public_item_failed', http_status: 200, attempts: 1, answer: longReply }
+        ])]
+      })
+      const wrapper = mountView()
+      await flushPromises()
+      const panel = wrapper.get('[data-testid="test-candy"]')
+      expect(panel.get('.tt-answers-expected').text()).toBe('预期答案 21')
+      // 9 and 12 in the working are never offered as the answer; the stored final integer is.
+      expect(values(wrapper)).toEqual(['样本 1：提取答案 21', '样本 2：提取答案 29', '样本 3：未提取到答案'])
+      const replies = panel.findAll('.tt-answer-reply')
+      expect(replies.map(node => (node.element as HTMLDetailsElement).open)).toEqual([false, false, false])
+      // The annotation sits outside the button that opens the run details.
+      expect(panel.find('.tt-result-btn details, .tt-result-btn [data-testid="latest-answers"]').exists()).toBe(false)
+
+      const third = replies[2]
+      ;(third.element as HTMLDetailsElement).open = true
+      await third.get('summary').trigger('click')
+      expect(third.get('summary').text()).toBe('模型完整回答')
+      // Expanding shows the whole stored reply, untruncated; the box scrolls instead.
+      expect(third.get('[data-testid="latest-answer-reply"]').text()).toBe(longReply)
+      expect(third.get('[data-testid="latest-answer-reply"]').classes()).toContain('tt-answer-text')
+
+      await openLatest(wrapper)
+      expect($$('[data-testid="sample-state"]').map(node => node.textContent)).toEqual(['正确', '错误', '错误'])
+      expect($$('[data-testid="sample-extracted"]').map(node => node.textContent?.trim())).toEqual(['提取答案 21', '提取答案 29', '未提取到答案'])
+      expect($$('[data-testid="sample"]').every(row => !row.querySelector('details')!.open)).toBe(true)
+      const detailReplies = $$('[data-testid="sample-reply"]') as HTMLDetailsElement[]
+      expect(detailReplies.map(node => node.open)).toEqual([false, false, false])
+      expect(detailReplies[2].querySelector('summary')!.textContent).toBe('模型完整回答')
+      expect(detailReplies[2].querySelector('[data-testid="sample-answer"]')!.textContent).toBe(longReply)
+      wrapper.unmount()
+    })
+
+    it('keeps the first failure open but the unextracted reply collapsed', async () => {
+      api.listOpenAIEvalRuns.mockResolvedValue({
+        items: [run([
+          { probe_id: 'candy-21-v3-1', valid: false, error_code: 'http_5xx', http_status: 503, attempts: 3, error_message: 'upstream overloaded', answer: '部分回答：我认为', attempt_errors: [{ attempt: 1, code: 'http_5xx', message: 'overloaded', http_status: 503 }] },
+          { probe_id: 'candy-21-v3-2', valid: true, error_code: 'single_public_item_failed', http_status: 200, attempts: 1, answer: '无法确定' }
+        ])]
+      })
+      const wrapper = mountView()
+      await flushPromises()
+      expect(values(wrapper)).toEqual(['样本 1：请求失败', '样本 2：未提取到答案'])
+
+      await openLatest(wrapper)
+      const [failed, unextracted] = $$('[data-testid="sample"]')
+      expect(failed.querySelector('details')!.open).toBe(true)
+      expect(failed.querySelector('[data-testid="sample-error"]')!.textContent).toBe('upstream overloaded')
+      expect(failed.querySelectorAll('[data-testid="sample-attempt"]')).toHaveLength(1)
+      expect((failed.querySelector('[data-testid="sample-reply"]') as HTMLDetailsElement).open).toBe(false)
+      expect(unextracted.querySelector('details')!.open).toBe(false)
+      expect((unextracted.querySelector('[data-testid="sample-reply"]') as HTMLDetailsElement).open).toBe(false)
+      wrapper.unmount()
+    })
+
+    it('uses the run\'s expected answer only for a legacy correct sample, never for an unknown reply', async () => {
+      api.listOpenAIEvalRuns.mockResolvedValue({
+        items: [run([
+          { probe_id: 'candy-21-v3-1', valid: true, error_code: 'correct_answer', http_status: 200, attempts: 1, answer: '共需 21 颗' },
+          { probe_id: 'candy-21-v3-2', valid: true, error_code: 'single_public_item_failed', http_status: 200, attempts: 1, answer: '也许是 21 颗，也许不是' }
+        ])]
+      })
+      const wrapper = mountView()
+      await flushPromises()
+      expect(values(wrapper)).toEqual(['样本 1：提取答案 21', '样本 2：未提取到答案'])
+      wrapper.unmount()
+    })
+
+    it('redacts secrets in the full reply and renders it as text', async () => {
+      const reply = '<b>21</b> Authorization: Bearer abc.def-ghi key sk-proj1234567890abcdef'
+      api.listOpenAIEvalRuns.mockResolvedValue({
+        items: [run([{ probe_id: 'candy-21-v3-1', valid: true, error_code: 'single_public_item_failed', http_status: 200, attempts: 1, answer: reply }])]
+      })
+      const wrapper = mountView()
+      await flushPromises()
+      const footer = wrapper.get('[data-testid="latest-answer-reply"]')
+      expect(footer.text()).toContain('<b>21</b>')
+      expect(footer.text()).toContain('Bearer [redacted]')
+      expect(footer.text()).toContain('sk-[redacted]')
+      expect(footer.find('b').exists()).toBe(false)
+      await openLatest(wrapper)
+      const detail = $('[data-testid="sample-answer"]')!
+      expect(detail.textContent).toContain('sk-[redacted]')
+      expect(detail.querySelector('b')).toBeNull()
+      expect(document.body.textContent).not.toContain('abc.def-ghi')
+      expect(document.body.textContent).not.toContain('sk-proj1234567890abcdef')
+      wrapper.unmount()
+    })
+  })
+})
+
+describe('ModelIntegrityTestsView State Probe diagnostics', () => {
+  const probeRun = (probe: Record<string, unknown>, extra: Record<string, unknown> = {}) => {
+    const verdict = (probe.verdict as string) ?? 'inconclusive'
+    return {
+      id: 20, account_id: 12, test_type: 'state_probe', requested_model: 'gpt-5', reasoning_effort: '', status: verdict,
+      outcome: {
+        status: verdict, reason: probe.failure, sample_count: probe.request_count ?? 0, expected_count: 2, confidence: 'low', scheduling: 'alert_only',
+        state_probe: { version: 'v1', verdict, request_count: 0, new_ticket: false, latency_ms: 800, retry_policy: 'unsupported_linked_ticket_chain', ...probe }
+      },
+      request_count: probe.request_count ?? 0, input_tokens: 0, output_tokens: 0, duration_ms: 800,
+      started_at: '2026-10-02T09:00:00Z', finished_at: '2026-10-02T09:00:01Z', trigger_source: 'manual', ...extra
+    }
+  }
+  const mint = (extra: Record<string, unknown> = {}) => ({ probe_id: 'state-probe-mint', valid: true, attempts: 1, http_status: 200, ...extra })
+  const linked = (extra: Record<string, unknown> = {}) => ({ probe_id: 'state-probe-continue', valid: true, attempts: 1, http_status: 200, ...extra })
+  const $ = <T extends Element>(selector: string) => document.body.querySelector<T>(`.modal-overlay:not([class*="modal-leave"]) ${selector}`)
+  const $$ = (selector: string) => [...document.body.querySelectorAll(`.modal-overlay:not([class*="modal-leave"]) ${selector}`)]
+  async function openProbe(wrapper: ReturnType<typeof mountView>) {
+    await wrapper.get('[data-testid="test-state_probe"] .tt-result-btn').trigger('click')
+    await flushPromises()
+  }
+
+  it('names the HTTP 503 capacity failure from the outcome records instead of a bare verdict', async () => {
+    // Older records keep the request records only inside outcome.state_probe.
+    api.listOpenAIEvalRuns.mockResolvedValue({
+      items: [probeRun({
+        failure: 'upstream_error', request_count: 1, mint_status: 503,
+        samples: [mint({
+          valid: false, http_status: 503, error_code: 'server_is_overloaded',
+          error_message: 'Service Unavailable: capacity busy, Authorization: Bearer abc.def-ghi',
+          attempt_errors: [{ attempt: 1, code: 'server_is_overloaded', message: 'Service Unavailable: capacity busy', http_status: 503 }]
+        })]
+      })]
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    const panel = wrapper.get('[data-testid="test-state_probe"]')
+    expect(panel.get('[data-testid="latest-status"]').text()).toBe('证据不足')
+    expect(panel.get('footer').classes()).not.toContain('tt-result-ok')
+    const explanation = panel.get('[data-testid="latest-explanation"]').text()
+    expect(explanation).toContain('上游返回未知错误')
+    expect(explanation).toContain('首次请求失败：HTTP 503，Service Unavailable: capacity busy')
+    expect(explanation).toContain('Bearer [redacted]')
+    expect(explanation).not.toContain('abc.def-ghi')
+    // The linked requests never retry, so no attempt count is reported.
+    expect(explanation).not.toContain('尝试')
+
+    await openProbe(wrapper)
+    expect($('[data-testid="detail-samples"]')).not.toBeNull()
+    const rows = $$('[data-testid="sample"]')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].querySelector('.sample-index')!.textContent).toBe('首次请求')
+    expect(rows[0].querySelector('[data-testid="sample-state"]')!.textContent).toBe('请求失败')
+    expect(rows[0].querySelector('details')!.open).toBe(true)
+    expect(rows[0].querySelector('.sample-brief')!.textContent).toBe('HTTP 503')
+    expect(rows[0].querySelector('[data-testid="sample-error"]')!.textContent).toContain('Bearer [redacted]')
+    expect(rows[0].textContent).not.toContain('abc.def-ghi')
+    expect(rows[0].querySelector('.sample-attempts')).toBeNull()
+    expect(rows[0].querySelector('[data-testid="sample-attempt"]')).toBeNull()
+    const metric = $$('p').find(node => node.textContent?.includes('两次请求状态码'))!.textContent!
+    expect(metric).toContain('503 / —')
+    expect(metric).toContain('未能判断线路是否切换')
+    expect(metric).not.toContain('线路未变')
+    wrapper.unmount()
+  })
+
+  it('shows a stream that ended without a terminal event as a failed linked request, not as HTTP 200', async () => {
+    api.listOpenAIEvalRuns.mockResolvedValue({
+      items: [probeRun({ failure: 'missing_terminal', request_count: 2, mint_status: 200, continue_status: 200 }, {
+        samples: [
+          mint(),
+          linked({ valid: false, error_code: 'missing_terminal', error_message: 'premature EOF before response.completed', attempt_errors: [{ attempt: 1, code: 'missing_terminal', message: 'premature EOF before response.completed', http_status: 200 }] })
+        ]
+      })]
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    const explanation = wrapper.get('[data-testid="test-state_probe"] [data-testid="latest-explanation"]').text()
+    expect(explanation).toContain('上游响应流在完成前中断')
+    expect(explanation).toContain('关联请求失败：premature EOF before response.completed')
+    expect(explanation).not.toContain('HTTP 200')
+
+    await openProbe(wrapper)
+    const rows = $$('[data-testid="sample"]')
+    expect(rows.map(row => row.querySelector('.sample-index')!.textContent)).toEqual(['首次请求', '关联请求'])
+    expect(rows.map(row => row.querySelector('[data-testid="sample-state"]')!.textContent)).toEqual(['已完成', '请求失败'])
+    expect(rows[0].querySelector('.sample-brief')!.textContent).toBe('HTTP 200')
+    expect(rows[0].querySelector('[data-testid="sample-completed"]')).not.toBeNull()
+    expect(rows[1].querySelector('details')!.open).toBe(true)
+    expect(rows[1].querySelector('.sample-brief')!.textContent).not.toBe('HTTP 200')
+    expect(rows[1].querySelector('[data-testid="sample-error"]')!.textContent).toBe('premature EOF before response.completed')
+    expect($('[data-testid="detail-status"]')!.classList.contains('tone-ok')).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('explains an unusable OAuth credential as zero requests sent and redacts the message', async () => {
+    api.listOpenAIEvalRuns.mockResolvedValue({
+      items: [probeRun({ failure: 'credential_unavailable', request_count: 0 }, {
+        samples: [mint({ valid: false, attempts: 0, http_status: undefined, error_code: 'credential_unavailable', error_message: 'OAuth access token is unavailable: refresh failed for sess-abcdefgh12345678' })]
+      })]
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    const explanation = wrapper.get('[data-testid="test-state_probe"] [data-testid="latest-explanation"]').text()
+    expect(explanation).toContain('OAuth 凭据不可用')
+    expect(explanation).toContain('未发送请求：OAuth access token is unavailable: refresh failed for sess-[redacted]')
+    expect(explanation).not.toContain('sess-abcdefgh12345678')
+
+    await openProbe(wrapper)
+    expect($('[data-testid="detail-physical"]')!.textContent).toBe('0')
+    const row = $$('[data-testid="sample"]')[0]
+    expect(row.querySelector('[data-testid="sample-state"]')!.textContent).toBe('请求失败')
+    expect(row.querySelector('[data-testid="sample-not-sent"]')!.textContent).toBe('未发送')
+    expect(row.querySelector('[data-testid="sample-error"]')!.textContent).toContain('sess-[redacted]')
+    expect(document.body.textContent).not.toContain('sess-abcdefgh12345678')
+    wrapper.unmount()
+  })
+
+  it('shows a successful probe without inventing an error', async () => {
+    api.listOpenAIEvalRuns.mockResolvedValue({
+      items: [probeRun({ verdict: 'healthy', request_count: 2, mint_status: 200, continue_status: 200 }, { samples: [mint(), linked()] })]
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    const panel = wrapper.get('[data-testid="test-state_probe"]')
+    expect(panel.get('[data-testid="latest-status"]').text()).toBe('正常')
+    expect(panel.get('[data-testid="latest-explanation"]').text()).toBe('两次请求使用同一线路。')
+
+    await openProbe(wrapper)
+    const rows = $$('[data-testid="sample"]')
+    expect(rows.map(row => row.querySelector('[data-testid="sample-state"]')!.textContent)).toEqual(['已完成', '已完成'])
+    expect(rows.every(row => !row.querySelector('details')!.open)).toBe(true)
+    expect($('[data-testid="sample-error"]')).toBeNull()
+    expect($('[data-testid="sample-answer"]')).toBeNull()
+    expect($$('[data-testid="sample-completed"]')).toHaveLength(2)
+    expect($$('p').find(node => node.textContent?.includes('两次请求状态码'))!.textContent).toContain('200 / 200，线路未变')
     wrapper.unmount()
   })
 })

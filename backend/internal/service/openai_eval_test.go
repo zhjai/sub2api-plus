@@ -19,17 +19,88 @@ import (
 )
 
 func TestScoreOpenAIEvalCandyRequiresCorrectLeadingAnswer(t *testing.T) {
-	for _, answer := range []string{"29", "答案：29 颗。", "二十九颗"} {
+	for _, answer := range []string{
+		"因此，最少需要取出 21 个糖果", "综上，最少取出21颗", "所以最少要取 **21** 个", "最少需要取出 **21** 个",
+		"先考虑圆形9个、星形12个。\n因此，最少需要取出 21 个糖果。", "分析中的20只是反例。\n综上所述，至少抽取 **21** 颗。",
+		"至少需要取出9颗圆形糖果，再取12颗五角星形糖果。最终答案：21颗。",
+		"至少9个圆形桃子。\n因此，最少需要取出21个。",
+		"最少9个圆形糖果。至少12颗星形糖果。\n答案：21。",
+		"所以答案是21。", "因此答案为21颗。", "综上，答案：21。",
+		"所以答案是 **21**。",
+		"如果只取20颗，可能拿到全部西瓜和圆形。因此20颗不够，所以最少需要21颗。",
+		"所以20颗时可能失败。\n因此最少需要21颗。",
+		"综上，20个不够，最少需要21个。",
+	} {
+		require.Equal(t, "pass", ScoreOpenAIEvalCandy(answer).Status, answer)
+	}
+	for _, answer := range []string{
+		"因此，最少需要取出 21 个糖果不够。", "综上，最少取出21.5颗", "所以最少要取 **21** 个不是正确答案。",
+		"分析中出现21颗。\n最后一个数字是21。", "答案：21。\n因此，最少需要取出 29 个。",
+	} {
+		require.Equal(t, "warning", ScoreOpenAIEvalCandy(answer).Status, answer)
+	}
+	for _, answer := range []string{"21", "答案：21 颗。", "二十一颗", "**21** 颗。", "21颗。不同形状可以区分。", "21. Explanation follows.", "最终答案：21 颗", "最少需要 21 颗。", "先取9颗圆形，再取12颗星形。\n最终答案：21颗。", "Reasoning with 9 and 12.\nFinal answer: 21."} {
 		outcome := ScoreOpenAIEvalCandy(answer)
 		require.Equal(t, "pass", outcome.Status, answer)
 		require.Equal(t, "neutral", outcome.Scheduling)
 		require.Equal(t, "low", outcome.Confidence)
 	}
 
-	for _, answer := range []string{"21", "至少 30 颗，29 颗不够。", "答案是 20，29 才是最大反例。", "二十颗", "29.5"} {
+	for _, answer := range []string{"29", "至少 30 颗，21 颗不够。", "答案是 20，21 才是最大反例。", "二十颗", "21.5", "不是21，而是29", "21不够，答案29", "这里讨论21，最终29", "121", "-21", "21/29", "21e3", "21%", "答案：21。\n最终答案：29。", "题中有21这个数，但不能据此作答。", "最终答案：21.5", "最终答案：21不够。"} {
 		outcome := ScoreOpenAIEvalCandy(answer)
 		require.Equal(t, "warning", outcome.Status, answer)
 		require.Equal(t, "alert_only", outcome.Scheduling)
+	}
+}
+
+func TestOpenAIEvalCandyExtractedAnswer(t *testing.T) {
+	for _, test := range []struct {
+		answer string
+		want   int
+		ok     bool
+	}{
+		{"至少9颗圆形，至少12颗星形。最终答案：21颗。", 21, true},
+		{"先取9颗圆形，再取12颗星形。最终答案：29颗。", 29, true},
+		{"Final answer: 21.", 21, true},
+		{"所以答案是21。", 21, true},
+		{"因此答案为29颗。", 29, true},
+		{"因此20颗不够，所以最少需要21颗。", 21, true},
+		{"因此需要取9颗圆形，再取12颗星形。最终答案：21颗。", 21, true},
+		{"所以要取9个圆形糖果，再取12个五角星形糖果。答案：21。", 21, true},
+		{"综上需要取9颗圆形，再取12颗星形。最终答案：29颗。", 29, true},
+		{"综上，20个不够，最少需要29个。", 29, true},
+		{"所以21颗时可能失败。最终答案：29颗。", 29, true},
+		{"因此21颗不能保证。", 0, false},
+		{"最终答案：21仍然不能保证。", 0, false},
+		{"最终答案：21颗糖果仍不能保证。", 0, false},
+		{"因此21颗还是不够。最终答案：29颗。", 29, true},
+		{"因此21颗依然不足。最终答案：29颗。", 29, true},
+		{"答案：21。最终答案：29。", 0, false},
+		{"答案：21不是正确答案。", 0, false},
+		{"最终答案：21.5。", 0, false},
+		{"推导包含9、12和21，但没有明确结论。", 0, false},
+		{"最终答案：21。至少需要取29个。", 0, false},
+		{"最终答案：21。至少需要29个。", 0, false},
+		{"答案：29。最少需要21颗。", 0, false},
+		{"所以取21个也不够，需要22个。", 0, false},
+		{"因此21颗并不能保证。", 0, false},
+		{"最终答案：21是不够的。", 0, false},
+		{"所以21个无法确保。", 0, false},
+		{"最终答案：21也仍然不够。", 0, false},
+		{"Final answer: 21 IS NOT enough.", 0, false},
+		{"最终答案：21颗圆形糖果。", 0, false},
+		{"21颗圆形糖果。", 0, false},
+	} {
+		t.Run(test.answer, func(t *testing.T) {
+			got, ok := leadingOpenAIEvalCandyAnswer(test.answer)
+			require.Equal(t, test.ok, ok)
+			require.Equal(t, test.want, got)
+			if !test.ok || test.want != OpenAIEvalCandyExpectedAnswer {
+				require.Equal(t, "warning", ScoreOpenAIEvalCandy(test.answer).Status)
+			} else {
+				require.Equal(t, "pass", ScoreOpenAIEvalCandy(test.answer).Status)
+			}
+		})
 	}
 }
 
@@ -63,7 +134,7 @@ func TestOpenAIEvalFingerprintJSD(t *testing.T) {
 
 func TestOpenAIEvalPinnedFingerprintDataAndPlans(t *testing.T) {
 	require.Len(t, OpenAIEvalFingerprintProbes, 16)
-	require.Len(t, OpenAIEvalFingerprintBaselines, 7)
+	require.Len(t, OpenAIEvalFingerprintBaselines, 8)
 	for _, probe := range OpenAIEvalFingerprintProbes {
 		for _, baseline := range OpenAIEvalFingerprintBaselines {
 			require.GreaterOrEqual(t, len(baseline.Cells[probe.ID]), 10, "%s/%s", baseline.Model, probe.ID)
@@ -123,6 +194,8 @@ type openAIEvalUpstreamStub struct {
 	request  *http.Request
 	profile  *tlsfingerprint.Profile
 }
+
+func (*openAIEvalUpstreamStub) SupportsSingleSend() bool { return true }
 
 func (s *openAIEvalUpstreamStub) Do(*http.Request, string, int64, int) (*http.Response, error) {
 	return nil, errors.New("unexpected non-TLS transport")
@@ -198,6 +271,55 @@ func TestRunOpenAIEvalSampleDoesNotMutateAccountHealth(t *testing.T) {
 	require.Zero(t, repo.rateLimitedID)
 	require.Nil(t, repo.updatedExtra)
 	require.Zero(t, repo.clearedErrorID)
+}
+
+func TestRunOpenAIEvalSampleOAuthUsesBearerAndSSE(t *testing.T) {
+	stream := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"safe answer\"}\n\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"model\":\"gpt-6-astra\",\"usage\":{\"input_tokens\":7,\"output_tokens\":2}}}\n\n"
+	upstream := &openAIEvalUpstreamStub{response: &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(stream))}}
+	account := &Account{ID: 45, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"access_token": "oauth-eval-token"}, Extra: map[string]any{}}
+	svc := &AccountTestService{httpUpstream: upstream, openaiGatewayService: &OpenAIGatewayService{}, tlsFPProfileService: &TLSFingerprintProfileService{}}
+	target := &OpenAIEvalTarget{Account: account, Credential: account, RequestedModel: "gpt-6-astra", UpstreamModel: "gpt-6-astra"}
+	result, err := svc.RunOpenAIEvalSample(context.Background(), target, "answer this", "high")
+	require.NoError(t, err)
+	require.Equal(t, "safe answer", result.Text)
+	require.EqualValues(t, 7, result.InputTokens)
+	require.Equal(t, "Bearer oauth-eval-token", upstream.request.Header.Get("Authorization"))
+	require.Equal(t, "text/event-stream", upstream.request.Header.Get("Accept"))
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(upstream.request.Body).Decode(&body))
+	require.Equal(t, true, body["stream"])
+	require.NotContains(t, body, "max_output_tokens")
+	require.IsType(t, []any{}, body["input"])
+	require.Equal(t, "en-US,en;q=0.9", upstream.request.Header.Get("Accept-Language"))
+}
+
+func TestRunOpenAIEvalSampleRejectsPrematureOAuthEOF(t *testing.T) {
+	upstream := &openAIEvalUpstreamStub{response: &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n"))}}
+	account := &Account{ID: 46, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"access_token": "oauth-eof-token"}}
+	svc := &AccountTestService{httpUpstream: upstream, openaiGatewayService: &OpenAIGatewayService{}, tlsFPProfileService: &TLSFingerprintProfileService{}}
+	_, err := svc.RunOpenAIEvalSample(context.Background(), &OpenAIEvalTarget{Account: account, Credential: account, UpstreamModel: "gpt-6-astra"}, "answer this", "")
+	require.Error(t, err)
+	var classified *OpenAIEvalRequestError
+	require.ErrorAs(t, err, &classified)
+	require.Equal(t, "missing_terminal", classified.Code)
+}
+
+func TestOpenAIEvalSampleAttemptsRetryOnlyRecoverableFailures(t *testing.T) {
+	completed := "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1},\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"recovered\"}]}]}}\n\n"
+	upstream := &queuedHTTPUpstream{responses: []*http.Response{
+		newJSONResponse(http.StatusServiceUnavailable, `{"error":{"code":"server_error","message":"temporary"}}`),
+		newJSONResponse(http.StatusTooManyRequests, `{"error":{"code":"rate_limit","message":"slow down"}}`),
+		&http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(completed))},
+	}}
+	account := &Account{ID: 47, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"access_token": "retry-token"}}
+	svc := &AccountTestService{httpUpstream: upstream, openaiGatewayService: &OpenAIGatewayService{}, tlsFPProfileService: &TLSFingerprintProfileService{}}
+	result, record, err := svc.runOpenAIEvalSampleAttempts(context.Background(), &OpenAIEvalTarget{Account: account, Credential: account, UpstreamModel: "gpt-6-astra"}, "retry", "", 3)
+	require.NoError(t, err)
+	require.Equal(t, "recovered", result.Text)
+	require.Equal(t, 3, record.Attempts)
+	require.Len(t, record.AttemptErrors, 2)
+	require.Equal(t, http.StatusTooManyRequests, record.AttemptErrors[1].HTTPStatus)
 }
 
 func TestOpenAIEvalTargetRequiresModelCatalogAndResponsesSupport(t *testing.T) {

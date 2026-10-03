@@ -34,10 +34,64 @@
               </div>
               <PolicyWeightsEditor v-model="config.custom_balance" :legend="t('admin.modelIntegrity.scheduling.policy.custom.title')" />
             </div>
+            <p v-if="foldedLegacyStability" class="sched-note" data-testid="legacy-stability-folded">{{ t('admin.modelIntegrity.scheduling.policy.custom.legacyFolded') }}</p>
             <p class="sched-note">
               {{ t('admin.modelIntegrity.scheduling.policy.sharedNote') }}
               <template v-if="usesAvoidDegradation"> {{ t('admin.modelIntegrity.scheduling.policy.avoidNote') }}</template>
             </p>
+            <p v-if="usesQuality && !config.effects_enabled" class="sched-warn" role="note" data-testid="quality-effects-off">{{ t('admin.modelIntegrity.scheduling.quality.effectsOff') }}</p>
+
+            <div class="refresh" data-testid="quality-refresh">
+              <div class="refresh-head">
+                <div class="min-w-0">
+                  <h3 class="sched-h3">{{ t('admin.modelIntegrity.scheduling.quality.title') }}</h3>
+                  <p class="sched-hint">{{ t('admin.modelIntegrity.scheduling.quality.hint') }}</p>
+                </div>
+                <button
+                  type="button"
+                  class="btn btn-secondary btn-sm shrink-0"
+                  :disabled="refreshing"
+                  :aria-busy="refreshing ? 'true' : undefined"
+                  data-testid="quality-refresh-now"
+                  @click="refreshQuality"
+                >
+                  <Icon name="refresh" size="sm" :class="refreshing ? 'motion-safe:animate-spin' : ''" />
+                  {{ refreshing ? t('admin.modelIntegrity.scheduling.quality.refreshing') : t('admin.modelIntegrity.scheduling.quality.refreshNow') }}
+                </button>
+              </div>
+              <div class="refresh-controls">
+                <label class="rule-field">
+                  <span class="rule-label">{{ t('admin.modelIntegrity.scheduling.quality.interval') }}</span>
+                  <select v-model="refreshChoice" class="input rule-input refresh-select" data-testid="quality-interval">
+                    <option v-for="seconds in QUALITY_REFRESH_INTERVALS" :key="seconds" :value="seconds">{{ intervalText(seconds) }}</option>
+                    <option :value="CUSTOM_INTERVAL">{{ t('admin.modelIntegrity.tests.interval.customOption') }}</option>
+                  </select>
+                </label>
+                <label v-if="refreshCustom" class="rule-field">
+                  <span class="rule-label">{{ t('admin.modelIntegrity.tests.interval.customMinutes', { max: MAX_INTERVAL_MINUTES.toLocaleString() }) }}</span>
+                  <input
+                    v-model.number="refreshMinutes"
+                    type="number"
+                    min="5"
+                    :max="MAX_INTERVAL_MINUTES"
+                    step="1"
+                    inputmode="numeric"
+                    class="input rule-input refresh-minutes tabular-nums"
+                    data-testid="quality-interval-minutes"
+                    @change="commitRefreshMinutes"
+                  />
+                </label>
+              </div>
+              <p class="refresh-status" data-testid="quality-refresh-status" aria-live="polite">
+                <span v-if="config.quality_refreshed_at">{{ t('admin.modelIntegrity.scheduling.quality.lastRefresh', { time: formatDateTime(config.quality_refreshed_at) }) }}</span>
+                <span v-else>{{ t('admin.modelIntegrity.scheduling.quality.neverRefreshed') }}</span>
+                <span v-if="config.quality_next_refresh_at">{{ t('admin.modelIntegrity.scheduling.quality.nextRefresh', { time: formatDateTime(config.quality_next_refresh_at) }) }}</span>
+                <span v-if="lastRefreshRoutes !== null" data-testid="quality-refresh-routes">{{ t('admin.modelIntegrity.scheduling.quality.routes', { count: lastRefreshRoutes }) }}</span>
+              </p>
+              <p v-if="intervalPending" class="refresh-pending" data-testid="quality-interval-pending">{{ t('admin.modelIntegrity.scheduling.quality.pending', { interval: intervalText(savedQualityRefreshInterval) }) }}</p>
+              <p v-if="refreshError" class="refresh-error" role="alert" data-testid="quality-refresh-error">{{ refreshError }}</p>
+              <p class="sched-note">{{ t('admin.modelIntegrity.scheduling.quality.liveChecks') }}</p>
+            </div>
 
             <div class="rules">
               <div class="rules-head">
@@ -246,7 +300,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { onBeforeRouteLeave } from 'vue-router'
 import AppLayout from '@/components/layout/AppLayout.vue'
@@ -261,7 +315,7 @@ import PolicyWeightsEditor from '@/components/admin/modelIntegrity/PolicyWeights
 import { accountsAPI, listSchedulerDecisions, type OpenAIEvalBPSAccountConfig, type OpenAIEvalSchedulingPolicy, type OpenAIEvalSchedulingPolicyRule, type SchedulerDecisionTrace } from '@/api/admin/accounts'
 import { useAppStore } from '@/stores/app'
 import { extractApiErrorMessage } from '@/utils/apiError'
-import { CUSTOM_FACTORS, DAY, HOUR, bpsAccountLane, bpsDisabledKey, bpsModeOf, canResetBPSAccount, customBalanceShares, isDirectOAuthRoute, isValidCustomBalance, normalizeBPSAccount, normalizeCustomBalance, type BPSLane } from './modelIntegrity'
+import { CUSTOM_FACTORS, CUSTOM_INTERVAL, DAY, HOUR, MAX_INTERVAL_MINUTES, QUALITY_REFRESH_INTERVALS, bpsAccountLane, bpsDisabledKey, bpsModeOf, canResetBPSAccount, customBalanceShares, isDirectOAuthRoute, isValidCustomBalance, normalizeBPSAccount, normalizeCustomBalance, normalizeQualityRefreshInterval, type BPSLane } from './modelIntegrity'
 import { useModelIntegrityConfig } from './useModelIntegrityConfig'
 
 const TRACE_LIMIT = 50
@@ -270,7 +324,7 @@ const GATES = ['session', 'model', 'status', 'features', 'privacy', 'capacity'] 
 
 const { t } = useI18n()
 const appStore = useAppStore()
-const { config, catalog, accounts, loading, loaded, saving, conflict, dirty, load, reloadConfig, save, accountName, accountLabel } = useModelIntegrityConfig()
+const { config, catalog, accounts, loading, loaded, saving, conflict, dirty, load, reloadConfig, save, accountName, accountLabel, savedQualityRefreshInterval, applyQualityRefresh, foldedLegacyStability } = useModelIntegrityConfig()
 
 const traces = ref<SchedulerDecisionTrace[]>([])
 const tracesLoading = ref(false)
@@ -288,6 +342,62 @@ const defaultPolicy = computed<OpenAIEvalSchedulingPolicy>({
 const rules = computed(() => config.policies as OpenAIEvalSchedulingPolicyRule[])
 const efforts = computed(() => catalog.value?.reasoning_efforts?.length ? catalog.value.reasoning_efforts : [''])
 const usesAvoidDegradation = computed(() => defaultPolicy.value === 'avoid_degradation' || rules.value.some(rule => rule.policy === 'avoid_degradation'))
+/** Any saved policy that reads the integrity pass rate. */
+const usesQuality = computed(() => usesAvoidDegradation.value ||
+  (defaultPolicy.value === 'custom_balance' && Number(config.custom_balance?.quality) > 0) ||
+  rules.value.some(rule => rule.policy === 'custom_balance' && Number(rule.custom_balance?.quality) > 0))
+
+// 调度评估间隔: how often the pass-rate snapshot is rebuilt, not how often tests run.
+const refreshing = ref(false)
+const refreshError = ref('')
+const lastRefreshRoutes = ref<number | null>(null)
+const refreshCustom = ref(false)
+const qualityInterval = computed(() => normalizeQualityRefreshInterval(config.quality_refresh_interval_seconds))
+const refreshChoice = computed<number | string>({
+  get: () => (refreshCustom.value || !QUALITY_REFRESH_INTERVALS.includes(qualityInterval.value) ? CUSTOM_INTERVAL : qualityInterval.value),
+  set: value => {
+    if (value === CUSTOM_INTERVAL) {
+      refreshCustom.value = true
+      return
+    }
+    refreshCustom.value = false
+    config.quality_refresh_interval_seconds = normalizeQualityRefreshInterval(Number(value))
+  }
+})
+const refreshMinutes = ref<number | string>(qualityInterval.value / 60)
+watch(qualityInterval, value => {
+  refreshMinutes.value = value / 60
+  if (!QUALITY_REFRESH_INTERVALS.includes(value)) refreshCustom.value = true
+}, { immediate: true })
+function commitRefreshMinutes() {
+  const seconds = normalizeQualityRefreshInterval(Number(refreshMinutes.value) * 60)
+  config.quality_refresh_interval_seconds = seconds
+  refreshMinutes.value = seconds / 60
+}
+/** The edited interval is not live until the config is saved. */
+const intervalPending = computed(() => qualityInterval.value !== savedQualityRefreshInterval.value)
+
+/**
+ * Rebuilds the ranking snapshot on the server from stored automatic results
+ * with the saved config. Unsaved edits on this page are left as they are.
+ */
+async function refreshQuality() {
+  if (refreshing.value) return
+  refreshing.value = true
+  refreshError.value = ''
+  try {
+    const result = await accountsAPI.refreshOpenAIEvalQuality()
+    applyQualityRefresh(result)
+    lastRefreshRoutes.value = Number(result.route_count) || 0
+    appStore.showSuccess(t('admin.modelIntegrity.scheduling.quality.refreshDone', { count: lastRefreshRoutes.value }))
+    void loadTraces()
+  } catch (error) {
+    refreshError.value = extractApiErrorMessage(error, t('admin.modelIntegrity.scheduling.quality.refreshFailed'))
+    appStore.showError(refreshError.value)
+  } finally {
+    refreshing.value = false
+  }
+}
 // Rules whose weight editor is open. Holds the reactive rule objects, so it
 // follows a rule when another one above it is removed.
 const editingWeights = ref<OpenAIEvalSchedulingPolicyRule[]>([])
@@ -513,6 +623,15 @@ onMounted(initialLoad)
 .rule-weights-invalid { @apply text-rose-700 dark:text-rose-300; }
 .rule-weights-title { @apply font-medium text-gray-800 dark:text-gray-200; }
 .bps-head { @apply flex flex-wrap items-start justify-between gap-4; }
+.sched-warn { @apply max-w-[80ch] rounded-md bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-900 dark:bg-amber-950/30 dark:text-amber-200; }
+.refresh { @apply space-y-3 border-t border-gray-100 pt-5 dark:border-dark-700; }
+.refresh-head { @apply flex flex-wrap items-start justify-between gap-3; }
+.refresh-controls { @apply flex flex-wrap items-end gap-3; }
+.refresh-select { @apply w-auto min-w-[9rem]; }
+.refresh-minutes { @apply w-32; }
+.refresh-status { @apply flex flex-wrap gap-x-4 gap-y-1 text-xs tabular-nums text-gray-600 dark:text-gray-300; }
+.refresh-pending { @apply text-xs text-amber-800 dark:text-amber-300; }
+.refresh-error { @apply break-words text-xs text-rose-700 [overflow-wrap:anywhere] dark:text-rose-300; }
 .custom-balance { @apply mt-4 rounded-lg border border-gray-200 bg-gray-50/70 p-4 dark:border-dark-600 dark:bg-dark-800/60; }
 .custom-balance-head { @apply mb-3 flex flex-wrap items-baseline justify-between gap-2; }
 .bps-master { @apply flex max-w-sm cursor-pointer items-start gap-3 text-sm; }

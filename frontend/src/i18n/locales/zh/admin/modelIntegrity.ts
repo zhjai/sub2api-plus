@@ -38,7 +38,7 @@ export default {
     reason: {
       stateProbe: {
         healthy: '两次请求使用同一线路。',
-        degraded: '两次请求之间线路发生切换。本次结果仅作提醒，不改变 BPS 状态；账号的 BPS 自动切换由「调度策略」中该账号的独立探测决定。',
+        degraded: '两次请求之间线路发生切换。本次结果不改变 BPS 状态；账号的 BPS 自动切换由「调度策略」中该账号的独立探测决定。',
         inconclusive: '本次无法判断线路是否切换。'
       },
       running: '测试进行中，请稍后刷新查看结果。',
@@ -47,7 +47,8 @@ export default {
       correct_answer: '糖果题回答正确。',
       all_public_candy_variants_passed: '{count} 次回答均正确。',
       single_public_item_failed: '本次回答错误。题目公开，单次错误不能说明模型降级，建议复测。',
-      one_or_more_public_candy_variants_failed: '{count} 次中至少 1 次未答出 {answer}。仅作提醒，建议稍后复测。',
+      one_or_more_public_candy_variants_failed: '{count} 次中至少 1 次未答出 {answer}。题目公开，建议复测确认。',
+      one_or_more_public_candy_variants_failed_unversioned: '{count} 次中至少 1 次回答错误。题目公开，建议复测确认。',
       insufficient_valid_samples: '有效回答 {valid}/{required}，不足以得出结论。上游可能不稳定，请稍后重试。',
       insufficient_cells: '有效采样不足，本次不作判定。',
       no_versioned_baseline: '该模型暂无参考样本，无法比对。',
@@ -71,15 +72,32 @@ export default {
       response_incomplete: '上游响应中断，本次不作判定。',
       response_failed: '上游响应失败，本次不作判定。',
       previous_response_not_found: '上游未找到上一条响应，本次不作判定。',
-      upstream_error: '上游返回未知错误，本次不作判定。'
+      upstream_error: '上游返回未知错误，本次不作判定。',
+      rate_limited: '上游限流，测试未完成，请稍后重试。',
+      account_error: '上游拒绝该账号，请检查账号凭据与权限。',
+      network_error: '无法连接上游，测试未完成。',
+      stream_error: '上游响应流出错，本次不作判定。',
+      missing_terminal: '上游响应流在完成前中断，本次不作判定。',
+      missing_ticket: '上游未返回线路票据，无法判断线路是否切换。',
+      credential_unavailable: '账号的 OAuth 凭据不可用，未发送请求。请检查账号授权。',
+      unsupported_account: '状态探针仅支持直连 OpenAI OAuth 账号。',
+      unavailable: '服务器当前无法运行状态探针，未发送请求。',
+      cancelled: '测试在完成前被取消。',
+      request_invalid: '无法构造探测请求，未发送请求。'
     },
     tests: {
       title: '降智测试',
-      headerDescription: '检测账号是否提供所请求的模型，结果仅作提醒。',
-      description: '使用固定题目与采样，定期检测账号是否提供所请求的模型，并检测请求线路是否稳定。测试结果仅作提醒，不参与账号排序，也不改变 BPS 状态；BPS 自动切换由「调度策略」中各账号的独立探测决定。',
+      headerDescription: '检测账号是否降智，自动测试结果可参与排序。',
+      description: '使用固定题目与采样，定期检测账号是否提供所请求的模型，并检测请求线路是否稳定。开启评测影响后，自动测试的降智通过率会用于「避免降智」和设置了降智通过率权重的「自定义平衡」排序；手动测试只用于诊断，不影响排序。测试结果不改变 BPS 状态，BPS 自动切换由「调度策略」中各账号的独立探测决定。',
       budget: '自动测试预计每天发出约 {requests} 次上游请求（{plans} 个自动计划）。',
       budgetNone: '未开启自动测试，仅手动测试会产生请求。',
       budgetHint: '测试请求与正常请求同样计费。',
+      budgetRetry: '失败重试时最多约 {max} 次。',
+      maxAttempts: {
+        label: '每个样本最多请求',
+        unit: '次（含首次）',
+        hint: '适用于糖果题、行为指纹和 ModelTrace 的手动与自动测试，范围 1–10，默认 3。请求失败时自动重试，重试同样计费。状态探针的两次请求相互关联，不重试。'
+      },
       targets: '测试对象',
       targetsHint: '每个测试对象为「账号 + 模型 + 推理强度」组合，独立测试。',
       search: '搜索账号或模型',
@@ -96,7 +114,7 @@ export default {
       types: {
         candy: {
           name: '糖果题',
-          what: '对一道有标准答案的公开题目提问 {count} 次，检查是否均回答正确。回答错误仅提示需要复测。'
+          what: '对一道有标准答案的公开题目提问 {count} 次，检查是否均回答正确。题目公开，单次错误建议复测确认。'
         },
         fingerprint: {
           name: '行为指纹',
@@ -104,19 +122,19 @@ export default {
         },
         modeltrace: {
           name: 'ModelTrace 归因',
-          what: '发送 3 次请求，根据回答行为推断最接近的模型。归因为非 Luna 模型时判定为疑似正常，仅供参考。'
+          what: '发送 {count} 次请求，根据回答行为在 {candidates} 个参考模型中推断最接近的模型。归因为非 Luna 模型时判定为疑似正常，归因为 Luna 时判定为疑似异常。'
         },
         state_probe: {
           name: '状态探针',
-          what: '连续发送两次关联请求，检测线路是否在中途切换。结果仅作提醒，不改变 BPS 状态；BPS 自动切换由「调度策略」中的账号探测决定。'
+          what: '连续发送两次关联请求，检测线路是否在中途切换。结果不计入降智通过率，也不改变 BPS 状态；BPS 自动切换由「调度策略」中的账号探测决定。'
         }
       },
-      alertOnly: '仅作提醒',
       runNow: '立即测试',
       running: '测试中…',
       progress: {
         starting: '正在启动测试',
-        samples: '正在采样 {done}/{total}'
+        samples: '正在采样 {done}/{total}',
+        requests: '已发出 {count} 次上游请求'
       },
       runDone: '测试完成',
       runFailed: '测试启动失败',
@@ -151,12 +169,15 @@ export default {
         custom: '当前：{mode}'
       },
       perRun: '每次 {count} 次请求',
+      perRunRetry: '每次 {count} 次请求，失败重试时最多 {max} 次',
+      perRunNoRetry: '每次 {count} 次请求，不重试',
       perDay: '每天约 {count} 次请求',
       perDayOff: '未开启自动运行',
       nextRun: '下次 {time}',
       lastRun: '上次 {time}',
       neverRun: '尚未测试',
-      onlyDirectOAuth: '只支持直连 OpenAI OAuth 账号的默认推理强度。',
+      onlyDirectOAuth: '只支持直连 OpenAI OAuth 账号。',
+      stateProbeDefaultEffort: '状态探针按账号的默认推理强度运行，与该测试对象的推理强度无关。',
       goScheduling: '在调度策略页配置 BPS',
       manualSampleTitle: '选择本次采样量',
       manualSampleHint: '仅影响本次手动测试，不修改自动计划。采样越多结论越可靠，请求量也越大。',
@@ -202,10 +223,54 @@ export default {
         modeltraceMetric: '归因模型 {model}，概率 {probability}。',
         fingerprintNearest: '最接近的参考模型为 {model}。',
         nearestModel: '最接近的参考模型',
-        attributionNote: '归因结果仅作提醒，不参与账号调度。',
+        attributionNote: '归因基于回答行为推断，不能证明实际路由。仅自动测试的结果会计入降智通过率，手动测试只用于诊断。',
         stateProbeMetric: '两次请求状态码 {mint} / {cont}，{ticket}',
         newTicket: '线路已切换',
-        sameTicket: '线路未变'
+        sameTicket: '线路未变',
+        ticketUnknown: '未能判断线路是否切换',
+        logicalSamples: '有效样本 / 计划样本',
+        physicalRequests: '上游请求（含重试）',
+        expected: '预期答案',
+        expectedUnknown: '该记录未标明题目版本，无法确定当时的预期答案。',
+        historical: '该记录使用旧版题目（数据版本 {version}），预期答案为当时题目的答案。'
+      },
+      samples: {
+        title: '逐个样本',
+        index: '样本 {n}',
+        state: {
+          correct: '正确',
+          wrong: '错误',
+          valid: '有效',
+          invalid: '无效回答',
+          error: '请求失败'
+        },
+        attempts: '尝试 {count} 次',
+        http: 'HTTP {status}',
+        errorNoCode: '请求失败',
+        answer: '模型回答',
+        answers: '模型回答：',
+        noAnswer: '未返回回答',
+        extractedAnswer: '提取答案',
+        noExtractedAnswer: '未提取到答案',
+        fullModelReply: '模型完整回答',
+        labelSeparator: '：',
+        error: '错误信息',
+        attemptLog: '每次尝试',
+        attempt: '第 {attempt} 次',
+        legacy: '旧版本记录，未保存回答与错误详情。',
+        none: '该记录未保存逐个样本的结果。',
+        failureSummary: '{count} 个样本请求失败：{error}（尝试 {attempts} 次）。',
+        separator: '，',
+        showAll: '显示全部 {count} 个样本',
+        stateProbe: {
+          mint: '首次请求',
+          continue: '关联请求',
+          completed: '已完成',
+          completedNote: '请求已完成。该测试只比较线路票据，不保存回答内容。',
+          notSent: '未发送',
+          failure: '{request}失败：{error}。',
+          notSentFailure: '未发送请求：{error}。'
+        }
       },
       add: {
         title: '添加测试对象',
@@ -221,6 +286,16 @@ export default {
         added: '已添加 {count} 个测试对象，保存后生效。',
         skipped: '{count} 个组合已存在，已跳过。'
       },
+      edit: {
+        open: '编辑',
+        title: '编辑测试对象',
+        account: '账号',
+        submit: '应用',
+        updated: '已应用，保存后生效。',
+        duplicate: '该账号已有 {target} 的测试对象。',
+        hint: '自动测试计划保持不变，修改只影响之后的测试。历史记录仍按原模型和推理强度保留。',
+        stateProbeDefault: '状态探针会继续按账号的默认推理强度运行，自动计划不变。'
+      },
       baselineNote: '行为指纹参考样本版本 {version}。'
     },
     scheduling: {
@@ -232,11 +307,16 @@ export default {
         hint: '仅决定多个账号均满足调度条件时的优先顺序；账号能否参与调度由调度条件决定。',
         defaultLabel: '默认策略',
         factors: {
+          quality: '降智通过率',
           price: '价格',
           errors: '错误率',
           speed: '首包延迟'
         },
         levelAria: '{factor}：{level} / 4',
+        qualityMode: {
+          tier: '优先筛选',
+          ignored: '不参考'
+        },
         options: {
           legacy: {
             name: '系统默认',
@@ -248,29 +328,53 @@ export default {
           },
           stability_first: {
             name: '优先稳定',
-            effect: '优先调度错误率低、首包延迟短的账号；价格权重沿用系统设置，不参考降智测试结果。'
+            effect: '优先调度请求错误率低、首包延迟短的账号；价格权重沿用系统设置，不参考降智通过率。'
           },
           avoid_degradation: {
             name: '避免降智',
-            effect: '大幅降低价格权重，优先调度错误率低、响应稳定的账号。'
+            effect: '先从降智通过率最高的一档中选择，同一档内按价格与运行稳定性排序；该档没有可用容量时再依次尝试下一档。'
           },
           custom_balance: {
             name: '自定义平衡',
-            effect: '按自定义的价格、稳定性、错误率、首包延迟与负载权重排序。'
+            effect: '按自定义的价格、错误率、首包延迟、负载与降智通过率权重加权排序。'
           },
         },
         custom: {
           title: '自定义权重',
           hint: '按百分比填写，保存时自动归一化；权重越高，对排序影响越大。',
           cost: '价格',
-          stability: '稳定性',
           error_rate: '错误率',
           ttft: '首包延迟',
           load: '并发负载',
+          quality: '降智通过率',
+          help: {
+            cost: '账号计费倍率，越低越优先。',
+            error_rate: '真实请求的出错比例，与降智无关。',
+            ttft: '首个输出的等待时间，不代表完整回答的耗时。',
+            load: '当前并发与排队占用。',
+            quality: '已勾选的自动测试中，结论为通过或疑似通过的项数 ÷ 勾选项数。'
+          },
+          legacyFolded: '旧版「稳定性」权重已按 60% 错误率、40% 首包延迟并入，排序结果不变。',
           zeroTotal: '权重合计须大于 0，请至少为一项设置权重。'
         },
-        avoidNote: '降智测试结果目前仅作提醒，不参与账号排序，因此「避免降智」与「优先稳定」的区别主要在于价格权重更低。',
+        avoidNote: '降智通过率按测试项计算：已勾选的糖果题、行为指纹、ModelTrace 中，最近一次自动测试结论为通过或疑似通过的项数 ÷ 勾选项数。例如勾选两项、通过一项为 50%，勾选三项、通过一项为 33.3%。每项只看最终结论，与采样次数和重试无关。任一勾选项缺少有效结论（证据不足、请求失败或已过期）时，通过率为未知，既不算通过也不算降智。「避免降智」先从通过率最高的一档中选择，同一档内按价格与运行稳定性排序；该档没有可用容量时再依次尝试下一档。账号停用、模型支持、容量和续写响应的账号绑定仍实时判断。',
         sharedNote: '账号优先级权重在各策略下保持不变；负载权重仅在「自定义平衡」下按设置调整，其余策略沿用系统设置。'
+      },
+      quality: {
+        title: '调度评估间隔',
+        hint: '降智通过率按此间隔从已保存的自动测试结果重新汇总，用于「避免降智」和「自定义平衡」。它与测试频率无关，不会发出新的测试请求。',
+        interval: '评估间隔',
+        refreshNow: '立即刷新',
+        refreshing: '正在刷新…',
+        refreshDone: '已刷新 {count} 个测试对象的降智通过率。',
+        refreshFailed: '刷新失败，排序仍使用上一次的通过率。',
+        lastRefresh: '上次刷新 {time}',
+        nextRefresh: '下次 {time}',
+        neverRefreshed: '尚未刷新',
+        routes: '本次刷新 {count} 个测试对象',
+        pending: '新的间隔在保存后生效；当前仍按{interval}刷新。「立即刷新」使用已保存的配置。',
+        effectsOff: '评测影响已关闭：降智通过率不会影响排序，「避免降智」与「自定义平衡」中的通过率权重暂不生效。',
+        liveChecks: '账号停用、模型支持、限流冷却、并发和续写响应的账号绑定始终实时判断，不受评估间隔影响。'
       },
       rules: {
         title: '模型规则',
@@ -423,8 +527,14 @@ export default {
           errors: '错误率',
           ttft: '首包延迟',
           load: '负载',
+          quality: '降智通过率',
           score: '分数'
         },
+        qualityCounts: '{passed}/{evaluated} 项测试通过',
+        qualitySplit: '通过 {pass} 项，疑似通过 {suspected} 项',
+        qualityContribution: '分数贡献 {value}',
+        qualityUnknown: '未知',
+        qualityHint: '已勾选的自动测试中，最终结论为通过或疑似通过的项数 ÷ 勾选项数，每项权重相同。任一勾选项缺少有效结论时显示未知，不等于 100%。',
         verdict: {
           selected: '选中',
           topK: '候选',
@@ -442,6 +552,7 @@ export default {
         rate_ladder_same_rate: '切换账号时优先选择相同倍率的账号。',
         rate_ladder_upgrade: '无相同倍率的可用账号，已切换至更高倍率的账号。',
         rate_ladder_lower_rate_fallback: '已切换至更低倍率的账号。',
+        quality_tier_selection: '先在降智通过率最高的一档中选择；同一档内按价格与运行稳定性评分。',
         no_selection: '无可用账号，请求未发出。',
         selection_error: '账号选择出错。',
         unknown: '其他原因（{code}）。'
@@ -476,7 +587,9 @@ export default {
         ranked_below_top_k: '可用，但分数排名未进入候选列表。',
         same_rate_candidate: '倍率与原账号相同。',
         higher_rate_candidate: '倍率高于原账号。',
-        below_migration_rate: '倍率低于原账号，本次切换不考虑。'
+        below_migration_rate: '倍率低于原账号，本次切换不考虑。',
+        quality_tier_top_k_candidate: '属于降智通过率最高的一档，按分数进入候选。',
+        quality_lower_tier_fallback: '更高通过率档位暂无可用容量，改从此档位选择。'
       }
     }
   }

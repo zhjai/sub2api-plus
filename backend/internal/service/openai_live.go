@@ -246,6 +246,10 @@ func (s *OpenAIGatewayService) CreateLiveCall(
 }
 
 func (s *OpenAIGatewayService) shouldFailoverLiveCreateError(account *Account, err error) bool {
+	var local *AccountRPMError
+	if errors.As(err, &local) {
+		return !local.Unavailable && !local.NoMigration
+	}
 	var upstreamErr *UpstreamFailoverError
 	if !errors.As(err, &upstreamErr) {
 		// 凭证读取和网络传输错误都可能只影响当前账号或代理。
@@ -460,7 +464,9 @@ func (s *OpenAIGatewayService) dialLiveSideband(ctx context.Context, record *Liv
 		_ = conn.Close()
 		return nil, errors.New("live sideband transport does not support raw frames")
 	}
-	return raw, nil
+	return &accountRPMLiveFrameConn{liveFrameConn: raw, admit: func(sendCtx context.Context) error {
+		return s.admitAccountRPM(sendCtx, account)
+	}}, nil
 }
 
 func (s *OpenAIGatewayService) GetLiveCallForIdentity(
@@ -560,6 +566,9 @@ func (s *OpenAIGatewayService) ProxyLiveSideband(
 
 	runErr := s.runLiveController(proxyCtx, record, upstream, errCh)
 	cancel()
+	if IsAccountRPMError(runErr) {
+		_ = downstream.Close(coderws.StatusTryAgainLater, "account RPM admission denied; retry later")
+	}
 	_, _ = store.ReleaseLiveController(context.Background(), record.CallHash, owner)
 	if liveSessionEnded(runErr) || !time.Now().Before(record.ExpiresAt) {
 		s.finalizeLiveCall(record)

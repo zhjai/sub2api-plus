@@ -172,6 +172,9 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 	})
 	if err != nil {
 		// 检查是否是账号切换信号，转换为 UpstreamFailoverError 让 Handler 切换账号
+		if IsAccountRPMError(err) {
+			return nil, err
+		}
 		if switchErr, ok := IsAntigravityAccountSwitchError(err); ok {
 			return nil, &UpstreamFailoverError{
 				StatusCode:        http.StatusServiceUnavailable,
@@ -210,7 +213,10 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 				if err == nil {
 					fallbackReq, err := antigravity.NewAPIRequest(ctx, upstreamAction, accessToken, fallbackWrapped)
 					if err == nil {
-						fallbackResp, err := s.httpUpstream.Do(fallbackReq, proxyURL, account.ID, account.Concurrency)
+						fallbackResp, err := s.doAccountRPMUpstream(fallbackReq, proxyURL, account)
+						if IsAccountRPMError(err) {
+							return nil, err
+						}
 						if err == nil && fallbackResp.StatusCode < 400 {
 							_ = resp.Body.Close()
 							resp = fallbackResp
@@ -272,6 +278,9 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 					groupID:         forwardOpts.groupID,
 					sessionHash:     forwardOpts.sessionHash,
 				})
+				if IsAccountRPMError(retryErr) {
+					return nil, retryErr
+				}
 				if retryErr == nil {
 					retryResp := retryResult.resp
 					if retryResp.StatusCode < 400 {

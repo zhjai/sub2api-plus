@@ -40,6 +40,16 @@ type grokQuotaAccountRepo struct {
 	recoveryClearResult   bool
 }
 
+func (r *grokQuotaAccountRepo) GetAccountRPMLimit(_ context.Context, id int64) (int, error) {
+	if r.mockAccountRepoForPlatform == nil {
+		return 0, nil
+	}
+	if account := r.accountsByID[id]; account != nil {
+		return account.AccountRPMLimit()
+	}
+	return 0, ErrAccountNotFound
+}
+
 func (r *grokQuotaAccountRepo) UpdateExtra(_ context.Context, id int64, updates map[string]any) error {
 	r.updateCalls++
 	if r.updates == nil {

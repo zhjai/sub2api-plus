@@ -366,6 +366,9 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					h.handleStreamingAwareError(c, cls.Status, cls.ErrType, message, streamStarted)
 					return
 				}
+				if accountRPMSelectionExhausted(c, fs.FailedAccountIDs) {
+					return
+				}
 				action := fs.HandleSelectionExhausted(c.Request.Context())
 				switch action {
 				case FailoverContinue:
@@ -508,6 +511,12 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			}
 			if accountReleaseFunc != nil {
 				accountReleaseFunc()
+			}
+			if handled, retry := fs.handleAccountRPMError(c, err, c.Writer.Size() != writerSizeBeforeForward); handled {
+				if retry {
+					continue
+				}
+				return
 			}
 			if err != nil {
 				var failoverErr *service.UpstreamFailoverError
@@ -699,6 +708,9 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 						message = "No available accounts: " + err.Error()
 					}
 					h.handleStreamingAwareError(c, cls.Status, cls.ErrType, message, streamStarted)
+					return
+				}
+				if accountRPMSelectionExhausted(c, fs.FailedAccountIDs) {
 					return
 				}
 				action := fs.HandleSelectionExhausted(c.Request.Context())
@@ -929,6 +941,14 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				accountReleaseFunc()
 			}
 
+			if handled, retry := fs.handleAccountRPMError(c, err, c.Writer.Size() != writerSizeBeforeForward); handled {
+				h.gatewayService.ReleaseAccountSession(context.Background(), account, sessionKey)
+				delete(sessionSlotAccounts, account.ID)
+				if retry {
+					continue
+				}
+				return
+			}
 			// 提交 usage 记录。成功路径与"流中断但 Forward 已观测到 usage 的部分结果"
 			// 错误路径共用：后者若不入账，上游已计量的请求会完全漏记漏计费（#5148）。
 			submitForwardUsage := func(result *service.ForwardResult) {
@@ -2203,6 +2223,12 @@ func (h *GatewayHandler) CountTokens(c *gin.Context) {
 
 	// 转发请求（不记录使用量）
 	if err := h.gatewayService.ForwardCountTokens(c.Request.Context(), c, account, parsedReq); err != nil {
+		if service.IsAccountRPMError(err) {
+			h.gatewayService.ReleaseAccountSession(context.Background(), account, sessionHash)
+		}
+		if handled, _ := handleAccountRPMError(c, err, nil, false, false); handled {
+			return
+		}
 		reqLog.Error("gateway.count_tokens_forward_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 		// 错误响应已在 ForwardCountTokens 中处理
 		// 上游未服务该会话，立即释放选号时注册的会话槽（客户端可能已断开，用独立 ctx）

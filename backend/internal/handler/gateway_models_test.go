@@ -22,6 +22,17 @@ type gatewayModelsAccountRepoStub struct {
 	byGroup map[int64][]service.Account
 }
 
+func (s *gatewayModelsAccountRepoStub) GetAccountRPMLimit(_ context.Context, id int64) (int, error) {
+	for _, accounts := range s.byGroup {
+		for _, account := range accounts {
+			if account.ID == id {
+				return account.AccountRPMLimit()
+			}
+		}
+	}
+	return 0, service.ErrAccountNotFound
+}
+
 type gatewayModelsResponseForTest struct {
 	Object string                    `json:"object"`
 	Data   []gatewayModelItemForTest `json:"data"`

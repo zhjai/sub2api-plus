@@ -125,6 +125,11 @@ func newAccountRepositoryWithSQL(client *dbent.Client, sqlq sqlExecutor, schedul
 }
 
 func (r *accountRepository) Create(ctx context.Context, account *service.Account) error {
+	if account != nil {
+		if err := service.ValidateAccountRPMExtra(account.Extra); err != nil {
+			return err
+		}
+	}
 	if err := createAccountRecord(ctx, r.client, account); err != nil {
 		return err
 	}
@@ -207,6 +212,11 @@ func createAccountRecord(ctx context.Context, client *dbent.Client, account *ser
 // CreateWithAccountGroups atomically persists an account, its exact per-group priorities,
 // and the scheduler outbox event used to publish the new routing snapshot.
 func (r *accountRepository) CreateWithAccountGroups(ctx context.Context, account *service.Account, groups []service.AccountGroup) error {
+	if account != nil {
+		if err := service.ValidateAccountRPMExtra(account.Extra); err != nil {
+			return err
+		}
+	}
 	if account == nil {
 		return service.ErrAccountNilInput
 	}
@@ -464,6 +474,9 @@ func (r *accountRepository) updateAccount(
 ) error {
 	if account == nil {
 		return nil
+	}
+	if err := service.ValidateAccountRPMExtra(account.Extra); err != nil {
+		return err
 	}
 
 	baseCtx := ctx
@@ -2731,6 +2744,9 @@ func (r *accountRepository) AutoPauseExpiredAccounts(ctx context.Context, now ti
 }
 
 func (r *accountRepository) UpdateExtra(ctx context.Context, id int64, updates map[string]any) error {
+	if err := service.ValidateAccountRPMExtra(updates); err != nil {
+		return err
+	}
 	updates = stripCodexFingerprintSeedFromExtraUpdate(updates)
 	if len(updates) == 0 {
 		return nil
@@ -3005,6 +3021,9 @@ func ollamaCloudUsageSnapshotClearRequested(extra map[string]any) bool {
 }
 
 func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates service.AccountBulkUpdate) (int64, error) {
+	if err := service.ValidateAccountRPMExtra(updates.Extra); err != nil {
+		return 0, err
+	}
 	if len(ids) == 0 {
 		return 0, nil
 	}

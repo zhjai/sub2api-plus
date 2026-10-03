@@ -560,6 +560,9 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		}
 		setOpenAIExecContract(c, body, true)
 		resp, err = s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+		if IsAccountRPMError(err) {
+			return nil, accountRPMWSTurnError(err, turn)
+		}
 		if err != nil {
 			if turn == 1 {
 				return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, true)

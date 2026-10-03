@@ -75,6 +75,20 @@ export interface SchedulerDecisionCandidate {
   error_rate?: number
   ttft_ms?: number
   evaluation_penalty?: number
+  /**
+   * Selected automatic test types (Candy / Fingerprint / ModelTrace) with a
+   * fresh final verdict. Each type counts once, whatever its sample count.
+   */
+  evaluated_count?: number
+  /** Test types whose final verdict passed. */
+  pass_count?: number
+  /** Test types whose final verdict was a suspected (likely) pass; counted as passed. */
+  suspected_pass_count?: number
+  /** (pass + suspected pass) / evaluated test types; absent while any selected type lacks fresh evidence. */
+  quality_ratio?: number
+  /** 'unassessed' means the pass rate is unknown, not 100 %. */
+  quality_state?: 'assessed' | 'unassessed' | string
+  quality_contribution?: number
   exclusion_reason?: string
   decision_reason?: string
 }
@@ -109,10 +123,16 @@ export type OpenAIEvalSchedulingPolicy = '' | 'cost_first' | 'stability_first' |
 
 export interface OpenAIEvalPolicyWeights {
   cost: number
-  stability: number
+  /**
+   * Legacy composite (60% error rate, 40% first-token latency). New configs
+   * keep it at 0; the UI folds any saved value into error_rate/ttft.
+   */
+  stability?: number
   error_rate: number
   ttft: number
   load: number
+  /** Weight of the evaluated integrity pass rate; older servers omit it (0). */
+  quality?: number
 }
 
 export type OpenAIEvalBPSMode = 'auto' | 'force_on' | 'force_off'
@@ -138,6 +158,20 @@ export interface OpenAIEvalConfig {
    * test targets in `accounts`. Older servers omit the field.
    */
   bps_accounts?: OpenAIEvalBPSAccountConfig[]
+  /**
+   * Upstream attempts per logical sample, including the first one (1–10).
+   * Applies to Candy, Fingerprint and ModelTrace; older servers omit it and
+   * the UI treats it as 3.
+   */
+  max_request_attempts?: number
+  /**
+   * How often the integrity ranking snapshot used by scheduling is rebuilt
+   * (seconds). Older servers omit it; the UI treats it as 3600.
+   */
+  quality_refresh_interval_seconds?: number
+  /** Read-only projection of the last and next snapshot rebuild. */
+  quality_refreshed_at?: string | null
+  quality_next_refresh_at?: string | null
   accounts: OpenAIEvalRouteConfig[]
 }
 
@@ -186,6 +220,39 @@ export interface OpenAIEvalFingerprintResult {
   evaluated_at: string
 }
 
+export interface OpenAIEvalAttemptError {
+  attempt: number
+  code: string
+  message: string
+  http_status?: number
+}
+
+/** One logical sample. Diagnostic fields are absent on records written by older servers. */
+export interface OpenAIEvalSampleRecord {
+  probe_id: string
+  normalized_answer?: string
+  valid: boolean
+  error_code?: string
+  answer?: string
+  attempts?: number
+  error_message?: string
+  http_status?: number
+  attempt_errors?: OpenAIEvalAttemptError[]
+}
+
+/** ModelTrace keeps its own sample shape inside the outcome. */
+export interface OpenAIEvalModelTraceSample {
+  expected_count?: number
+  attempts?: number
+  answer?: string
+  error_message?: string
+  attempt_errors?: OpenAIEvalAttemptError[]
+  http_status?: number
+  error?: string
+  parsed_numbers?: number
+  accepted?: boolean
+}
+
 export interface OpenAIEvalRun {
   id: number
   account_id: number
@@ -193,6 +260,8 @@ export interface OpenAIEvalRun {
   requested_model: string
   upstream_model?: string
   reasoning_effort: string
+  /** Question/data revision the run was scored against. */
+  data_version?: string
   baseline_version?: string
   status: string
   outcome: {
@@ -219,6 +288,7 @@ export interface OpenAIEvalRun {
   finished_at?: string
   trigger_source: string
   error?: string
+  samples?: OpenAIEvalSampleRecord[]
 }
 
 export interface OpenAIStateProbeResult {
@@ -241,6 +311,7 @@ export interface OpenAIEvalModelTraceResult {
   family_probability?: number
   used_outputs: number
   requests: number
+  samples?: OpenAIEvalModelTraceSample[]
   candidates?: Array<{ model: string; display_name: string; family: string; family_name: string; probability: number; profile_similarity: number; score: number }>
 }
 
@@ -248,6 +319,8 @@ export interface OpenAIEvalModelCatalog {
   items: Array<{ id: string; display_name?: string }>
   baseline_version: string
   baseline_models: string[]
+  /** Current question/data revision; runs with another value used older questions. */
+  data_version?: string
   candy: { expected_answer: number; confidence: string; scheduling: string }
   evaluation_notice: string
   reasoning_efforts: string[]
@@ -277,6 +350,8 @@ export async function runOpenAIEval(request: {
   reasoning_effort: string
   sample_mode?: string
   sample_count?: number
+  /** Attempts per sample including the first; ignored by State Probe. */
+  max_attempts?: number
 }): Promise<OpenAIEvalRun> {
   // Fingerprint runs can make 60-400 upstream requests; the shared 30s UI
   // timeout would cancel a healthy run and incorrectly show an error.
@@ -292,6 +367,21 @@ export async function listOpenAIEvalRuns(params?: {
   limit?: number
 }): Promise<{ items: OpenAIEvalRun[] }> {
   const { data } = await apiClient.get<{ items: OpenAIEvalRun[] }>('/admin/accounts/evaluations/runs', { params })
+  return data
+}
+
+export interface OpenAIEvalQualityRefreshResult {
+  refreshed_at: string
+  next_refresh_at?: string | null
+  route_count: number
+}
+
+/**
+ * Rebuilds the integrity ranking snapshot from stored automatic results using
+ * the saved config. It sends no upstream requests and runs no new tests.
+ */
+export async function refreshOpenAIEvalQuality(): Promise<OpenAIEvalQualityRefreshResult> {
+  const { data } = await apiClient.post<OpenAIEvalQualityRefreshResult>('/admin/accounts/evaluations/quality/refresh', {})
   return data
 }
 
@@ -1484,6 +1574,7 @@ export const accountsAPI = {
   ,saveOpenAIEvalConfig
   ,runOpenAIEval
   ,listOpenAIEvalRuns
+  ,refreshOpenAIEvalQuality
   ,listOpenAIEvalAudit
   ,resetOpenAIBPSState
 }

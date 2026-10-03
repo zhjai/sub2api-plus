@@ -196,6 +196,19 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 		if err == nil {
 			break
 		}
+		if service.IsAccountRPMError(err) {
+			if accountReleaseFunc != nil {
+				accountReleaseFunc()
+				accountReleaseFunc = nil
+			}
+			_, retry := handleAccountRPMError(c, err, failedAccounts, true, false)
+			if retry {
+				account = nil
+				attempt--
+				continue
+			}
+			return
+		}
 		var failoverErr *service.UpstreamFailoverError
 		if !errors.As(err, &failoverErr) || !failoverErr.ShouldRetryNextAccount() {
 			break
@@ -208,6 +221,9 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 		account = nil
 	}
 	if err != nil || nativeResp == nil {
+		if accountRPMSelectionExhausted(c, failedAccounts) {
+			return
+		}
 		msg := "web search failed"
 		if err != nil {
 			msg = err.Error()

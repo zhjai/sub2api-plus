@@ -1000,6 +1000,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			return nil, rekeyErr
 		}
 		payloadBytes = len(wirePayload)
+		if err := s.admitAccountRPM(ctx, account); err != nil {
+			return nil, accountRPMWSTurnError(err, turn)
+		}
 		if err := lease.WriteJSONWithContextTimeout(ctx, json.RawMessage(wirePayload), s.openAIWSWriteTimeout()); err != nil {
 			return nil, wrapOpenAIWSIngressTurnError(
 				"write_upstream",
@@ -1886,6 +1889,12 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		}
 
 		result, relayErr := sendAndRelay(turn, sessionLease, currentPayload, currentPayloadBytes, currentOriginalModel, currentImageBillingModel, currentImageSizeTier, currentImageInputSize, currentRequestedReasoningEffort)
+		if IsAccountRPMError(relayErr) {
+			if hooks != nil && hooks.AfterTurn != nil {
+				hooks.AfterTurn(turn, nil, relayErr)
+			}
+			return accountRPMWSTurnError(relayErr, turn)
+		}
 		if relayErr != nil {
 			lastTurnClean = false
 			if isOpenAIWSSessionPreempted(ctx) {

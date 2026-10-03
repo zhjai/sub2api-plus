@@ -23,7 +23,7 @@ func (h *AccountHandler) GetOpenAIEvalConfig(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load evaluation config"})
 		return
 	}
-	c.JSON(http.StatusOK, config)
+	c.JSON(http.StatusOK, openAIEvalConfigQualityStatus(config))
 }
 
 func (h *AccountHandler) UpdateOpenAIEvalConfig(c *gin.Context) {
@@ -44,6 +44,14 @@ func (h *AccountHandler) UpdateOpenAIEvalConfig(c *gin.Context) {
 	var config service.OpenAIEvalConfig
 	if err := json.Unmarshal(payload, &config); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid evaluation config"})
+		return
+	}
+	if _, present := fields["max_request_attempts"]; present && (config.MaxRequestAttempts < 1 || config.MaxRequestAttempts > 10) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "max_request_attempts must be between 1 and 10"})
+		return
+	}
+	if _, present := fields["quality_refresh_interval_seconds"]; present && (config.QualityRefreshIntervalSeconds < 300 || int64(config.QualityRefreshIntervalSeconds) > service.OpenAIEvalMaxIntervalSeconds) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "quality_refresh_interval_seconds must be at least 300 and fit integer storage"})
 		return
 	}
 	// Whole-object saves from older admin clients predate revision, policy, and
@@ -73,12 +81,18 @@ func (h *AccountHandler) UpdateOpenAIEvalConfig(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to reload evaluation config"})
 		return
 	}
-	c.JSON(http.StatusOK, saved)
+	c.JSON(http.StatusOK, openAIEvalConfigQualityStatus(saved))
 }
 
 func mergeOpenAIEvalConfigOmittedFields(incoming, current *service.OpenAIEvalConfig, fields map[string]json.RawMessage) {
 	if incoming == nil || current == nil {
 		return
+	}
+	if _, ok := fields["quality_refresh_interval_seconds"]; !ok {
+		incoming.QualityRefreshIntervalSeconds = current.QualityRefreshIntervalSeconds
+	}
+	if _, ok := fields["max_request_attempts"]; !ok {
+		incoming.MaxRequestAttempts = current.MaxRequestAttempts
 	}
 	if _, ok := fields["revision"]; !ok {
 		incoming.Revision = current.Revision
@@ -97,6 +111,24 @@ func mergeOpenAIEvalConfigOmittedFields(incoming, current *service.OpenAIEvalCon
 	}
 	if _, ok := fields["custom_balance"]; !ok {
 		incoming.CustomBalance = current.CustomBalance
+	} else {
+		mergeOpenAIEvalQualityWeight(&incoming.CustomBalance, current.CustomBalance, fields["custom_balance"])
+	}
+	if raw, ok := fields["policies"]; ok {
+		var rawRules []map[string]json.RawMessage
+		if json.Unmarshal(raw, &rawRules) == nil {
+			previous := make(map[string]*service.OpenAIEvalPolicyWeights)
+			for _, rule := range current.Policies {
+				previous[service.OpenAIEvalRouteHealthKey(rule.RequestedModel, rule.ReasoningEffort)] = rule.CustomBalance
+			}
+			for i := range incoming.Policies {
+				rule := &incoming.Policies[i]
+				old := previous[service.OpenAIEvalRouteHealthKey(rule.RequestedModel, rule.ReasoningEffort)]
+				if old != nil && rule.CustomBalance != nil && i < len(rawRules) {
+					mergeOpenAIEvalQualityWeight(rule.CustomBalance, *old, rawRules[i]["custom_balance"])
+				}
+			}
+		}
 	}
 	if _, ok := fields["bps_accounts"]; !ok {
 		incoming.BPSAccounts = current.BPSAccounts
@@ -116,6 +148,16 @@ func mergeOpenAIEvalConfigOmittedFields(incoming, current *service.OpenAIEvalCon
 				}
 			}
 		}
+	}
+}
+
+func mergeOpenAIEvalQualityWeight(incoming *service.OpenAIEvalPolicyWeights, current service.OpenAIEvalPolicyWeights, raw json.RawMessage) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || fields == nil {
+		return
+	}
+	if _, present := fields["quality"]; !present {
+		incoming.Quality = current.Quality
 	}
 }
 
@@ -250,6 +292,7 @@ func (h *AccountHandler) ListOpenAIEvalAudit(c *gin.Context) {
 }
 
 func (h *AccountHandler) ListOpenAIEvalModels(c *gin.Context) {
+	bankRevision, candidateCount := service.OpenAIEvalModelTraceBankInfo()
 	c.JSON(http.StatusOK, gin.H{
 		"items":            service.OpenAIEvalSupportedModels(),
 		"baseline_version": service.OpenAIEvalBaselineVersion,
@@ -260,9 +303,9 @@ func (h *AccountHandler) ListOpenAIEvalModels(c *gin.Context) {
 			}
 			return out
 		}(),
-		"candy":             gin.H{"expected_answer": service.OpenAIEvalCandyExpectedAnswer, "confidence": "low", "scheduling": "alert_only"},
-		"modeltrace":        gin.H{"requests": service.OpenAIEvalModelTraceRequests, "bank_revision": "df3a0f9d3e054c0dc02d6d586686db8daf8fa7c8", "candidate_count": 16, "scheduling": "alert_only"},
-		"evaluation_notice": "Fingerprint and ModelTrace are behavioral attribution evidence, not intelligence verdicts. Candy is a low-confidence public canary. Insufficient or uncertain results never change scheduling.",
+		"candy":             gin.H{"expected_answer": service.OpenAIEvalCandyExpectedAnswer, "confidence": "low", "scheduling": "automatic_quality"},
+		"modeltrace":        gin.H{"requests": service.OpenAIEvalModelTraceRequests, "bank_revision": bankRevision, "candidate_count": candidateCount, "scheduling": "automatic_quality"},
+		"evaluation_notice": "Valid automatic results contribute observed quality fractions when evaluation effects are enabled. Manual diagnostics and operational failures do not become routing evidence. Behavioral attribution does not prove model identity.",
 		"reasoning_efforts": []string{"", "minimal", "low", "medium", "high", "xhigh", "max"},
 		"fingerprint_modes": []gin.H{
 			{"id": "quick", "samples": service.OpenAIEvalFingerprintQuickSamples},

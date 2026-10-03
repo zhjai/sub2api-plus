@@ -16,6 +16,7 @@ type openAIWSIntegrityEvidence struct {
 	status              string
 	reason              string
 	deliveredResponseID string
+	deliveredTerminal   string
 	meaningful          bool
 	tool                bool
 	committed           bool
@@ -38,7 +39,7 @@ func (e *openAIWSIntegrityEvidence) observe(eventType string, payload []byte) {
 	if e.protocolGuard.observe(eventType, payload, openAIStreamDataStartsClientOutput(string(payload), eventType), e.capability.ExecCallObserved) == openAIExecProtocolLeak {
 		e.capability.ProtocolLeakObserved = true
 	}
-	if isOpenAIWSTerminalEvent(eventType) {
+	if openAIStreamEventTypeIsTerminal(eventType) {
 		e.status, _, e.reason = classifyOpenAIResponsesOutcome(eventType, payload)
 	}
 }
@@ -56,7 +57,8 @@ func (e *openAIWSIntegrityEvidence) delivered(eventType string, payload []byte) 
 	itemType := gjson.GetBytes(payload, "item.type").String()
 	e.tool = e.tool || strings.Contains(eventType, "tool_call") || strings.Contains(eventType, "function_call") ||
 		itemType == "function_call" || itemType == "custom_tool_call" || itemType == "tool_search_call"
-	if isOpenAIWSTerminalEvent(eventType) {
+	if openAIStreamEventTypeIsTerminal(eventType) {
+		e.deliveredTerminal = eventType
 		for _, item := range gjson.GetBytes(payload, "response.output").Array() {
 			switch item.Get("type").String() {
 			case "function_call", "custom_tool_call", "tool_search_call":
@@ -64,6 +66,24 @@ func (e *openAIWSIntegrityEvidence) delivered(eventType string, payload []byte) 
 			}
 		}
 	}
+}
+
+// Binary delivery commits the turn, so any held text must precede it on the wire.
+func (e *openAIWSIntegrityEvidence) takePendingFrames() [][]byte {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	frames := e.pendingFrames
+	e.pendingFrames, e.pendingBytes = nil, 0
+	return frames
+}
+
+func (e *openAIWSIntegrityEvidence) terminalWasDelivered(eventType string) bool {
+	if e == nil {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.deliveredTerminal == eventType
 }
 
 // Only potentially structured initial output is held. Once delivered, later

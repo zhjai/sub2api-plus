@@ -22,6 +22,10 @@ type transportTempUnschedRepoStub struct {
 	lastReason string
 }
 
+func (r *transportTempUnschedRepoStub) GetAccountRPMLimit(context.Context, int64) (int, error) {
+	return 0, nil
+}
+
 func (r *transportTempUnschedRepoStub) SetTempUnschedulable(_ context.Context, id int64, until time.Time, reason string) error {
 	r.calls++
 	r.lastID = id

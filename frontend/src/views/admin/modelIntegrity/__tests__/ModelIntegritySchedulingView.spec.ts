@@ -8,6 +8,7 @@ const api = vi.hoisted(() => ({
   getOpenAIEvalConfig: vi.fn(),
   saveOpenAIEvalConfig: vi.fn(),
   resetOpenAIBPSState: vi.fn(),
+  refreshOpenAIEvalQuality: vi.fn(),
   listOpenAIEvalRuns: vi.fn(),
   listOpenAIEvalAudit: vi.fn(),
   list: vi.fn(),
@@ -146,7 +147,15 @@ describe('ModelIntegritySchedulingView', () => {
     await flushPromises()
 
     await wrapper.get('[data-testid="policy-avoid_degradation"]').setValue(true)
-    expect(wrapper.text()).toContain('区别主要在于价格权重更低')
+    expect(wrapper.text()).toContain('勾选两项、通过一项为 50%，勾选三项、通过一项为 33.3%')
+    expect(wrapper.text()).toContain('从通过率最高的一档中选择')
+    expect(wrapper.text()).toContain('该档没有可用容量时再依次尝试下一档')
+    expect(wrapper.text()).toContain('账号停用、模型支持、容量和续写响应的账号绑定仍实时判断')
+    expect(wrapper.text()).not.toMatch(/实际有效回答的样本数/)
+    expect(wrapper.text()).not.toMatch(/仅作提醒|不参与账号排序/)
+    // A strict tier is stated, never drawn as a weight price could trade against.
+    expect(wrapper.get('[data-testid="mixer-quality-avoid_degradation"]').text()).toBe('优先筛选')
+    expect(wrapper.get('[data-testid="mixer-quality-stability_first"]').text()).toBe('不参考')
     await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
     await flushPromises()
 
@@ -156,6 +165,9 @@ describe('ModelIntegritySchedulingView', () => {
     expect(payload.accounts).toHaveLength(2)
     expect(payload.accounts[1].candy_schedule.enabled).toBe(true)
     expect(payload.accounts[0]).not.toHaveProperty('bps_state')
+    // Legacy config without the field gets the 1-hour default.
+    expect(payload.quality_refresh_interval_seconds).toBe(3600)
+    expect(payload).not.toHaveProperty('quality_refreshed_at')
   })
 
   it('adds per-model overrides and blocks duplicates before saving', async () => {
@@ -225,7 +237,7 @@ describe('ModelIntegritySchedulingView', () => {
     await flushPromises()
 
     const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
-    const defaults = { cost: 0.2, stability: 0.3, error_rate: 0.25, ttft: 0.15, load: 0.1 }
+    const defaults = { cost: 0.2, error_rate: 0.43, ttft: 0.27, load: 0.1, quality: 0, stability: 0 }
     expect(payload.custom_balance).toEqual(defaults)
     expect(payload.policies?.[0].custom_balance).toEqual(defaults)
   })
@@ -247,7 +259,8 @@ describe('ModelIntegritySchedulingView', () => {
     // The site default is not custom, so only the rule-level editor exists.
     expect(wrapper.find('[data-testid="custom-balance"]').exists()).toBe(false)
     const rules = () => wrapper.findAll('[data-testid="policy-rule"]')
-    expect(rules()[0].get('[data-testid="rule-weights-summary"]').text()).toBe('价格 10%，稳定性 10%，错误率 10%，首包延迟 10%，并发负载 60%')
+    // Legacy stability 10% is folded 60/40 into error rate and first-token latency.
+    expect(rules()[0].get('[data-testid="rule-weights-summary"]').text()).toBe('价格 10%，错误率 16%，首包延迟 14%，并发负载 60%，降智通过率 0%')
     expect(rules()[0].find('[data-testid="weight-cost"]').exists()).toBe(false)
     expect(rules()[1].find('[data-testid="rule-weights"]').exists()).toBe(false)
 
@@ -256,7 +269,7 @@ describe('ModelIntegritySchedulingView', () => {
     const seeded = rules()[1]
     expect((seeded.get('[data-testid="weight-cost"]').element as HTMLInputElement).value).toBe('50')
     await seeded.get('[data-testid="weight-ttft"]').setValue('40')
-    expect(seeded.get('[data-testid="rule-weights-summary"]').text()).toContain('首包延迟 31%')
+    expect(seeded.get('[data-testid="rule-weights-summary"]').text()).toContain('首包延迟 33%')
 
     await rules()[0].get('[data-testid="rule-weights-toggle"]').trigger('click')
     await rules()[0].get('[data-testid="weight-error_rate"]').setValue('30')
@@ -264,10 +277,11 @@ describe('ModelIntegritySchedulingView', () => {
     await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
     await flushPromises()
     const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
+    const folded = (weights: typeof global) => ({ ...weights, error_rate: Number((weights.error_rate + weights.stability * 0.6).toFixed(6)), ttft: Number((weights.ttft + weights.stability * 0.4).toFixed(6)), stability: 0, quality: 0 })
     expect(payload.scheduling_policy).toBe('cost_first')
-    expect(payload.custom_balance).toEqual(global)
-    expect(payload.policies?.[0]).toMatchObject({ requested_model: 'gpt-5-mini', policy: 'custom_balance', custom_balance: { ...other, error_rate: 0.3 } })
-    expect(payload.policies?.[1]).toMatchObject({ requested_model: 'gpt-5', reasoning_effort: 'high', policy: 'custom_balance', custom_balance: { ...global, ttft: 0.4 } })
+    expect(payload.custom_balance).toEqual(folded(global))
+    expect(payload.policies?.[0]).toMatchObject({ requested_model: 'gpt-5-mini', policy: 'custom_balance', custom_balance: { ...folded(other), error_rate: 0.3 } })
+    expect(payload.policies?.[1]).toMatchObject({ requested_model: 'gpt-5', reasoning_effort: 'high', policy: 'custom_balance', custom_balance: { ...folded(global), ttft: 0.4 } })
   })
 
   it('keeps each rule weight object separate from the site default after a rule is seeded', async () => {
@@ -323,7 +337,7 @@ describe('ModelIntegritySchedulingView', () => {
     await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
     await flushPromises()
     const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
-    expect(payload.policies?.[0].custom_balance).toEqual({ cost: 0, stability: 0, error_rate: 0, ttft: 0, load: 0.1 })
+    expect(payload.policies?.[0].custom_balance).toEqual({ cost: 0, stability: 0, error_rate: 0, ttft: 0, load: 0.1, quality: 0 })
   })
 
   it('restores a locked BPS route through the reset API without touching unsaved config', async () => {
@@ -358,6 +372,66 @@ describe('ModelIntegritySchedulingView', () => {
     expect(candidates[0].text()).toContain('选中')
     expect(candidates[1].text()).toContain('账号不支持该模型')
     expect(wrapper.text()).not.toMatch(/路线资格|硬失败/)
+    // No candidate carries integrity evidence, so the column stays hidden.
+    expect(wrapper.find('[data-testid="candidate-quality"]').exists()).toBe(false)
+  })
+
+  it('shows the pass rate as passed-plus-likely test verdicts over selected tests', async () => {
+    const decisions = await api.listSchedulerDecisions()
+    const trace = { ...decisions.items[0], scheduling_policy: 'avoid_degradation' }
+    trace.candidates = [
+      // Candy + Fingerprint + ModelTrace selected: Candy passed, ModelTrace likely passed, Fingerprint did not.
+      { ...trace.candidates[0], quality_state: 'assessed', evaluated_count: 3, pass_count: 1, suspected_pass_count: 1, quality_ratio: 2 / 3, quality_contribution: 2 },
+      { account_id: 13, eligible: true, selected: false, in_top_k: true, score: 0.4 }
+    ]
+    api.listSchedulerDecisions.mockResolvedValue({ limit: 50, items: [trace] })
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('[data-testid="decision-row"] .ledger-toggle').trigger('click')
+    expect(wrapper.text()).toContain('降智通过率')
+    const cells = wrapper.findAll('[data-testid="candidate-quality"]')
+    expect(cells[0].text()).toContain('66.7%')
+    expect(cells[0].text()).toContain('2/3 项测试通过')
+    expect(cells[0].text()).toContain('通过 1 项，疑似通过 1 项')
+    expect(cells[0].text()).not.toContain('样本')
+    expect(cells[0].get('[data-testid="candidate-quality-contribution"]').text()).toBe('分数贡献 +2')
+    // An eligible candidate without a pass rate is explicitly unknown, never 100 %.
+    expect(cells[1].text()).toBe('未知')
+    expect(cells[1].text()).not.toContain('100')
+  })
+
+  it('weighs each selected test equally: 2 selected 1 passed is 50%, 3 selected 1 passed is 33.3%', async () => {
+    const decisions = await api.listSchedulerDecisions()
+    const trace = { ...decisions.items[0], scheduling_policy: 'avoid_degradation' }
+    trace.candidates = [
+      // Candy (10 samples) + ModelTrace (3 samples): one verdict each, so sample counts never matter.
+      { ...trace.candidates[0], quality_state: 'assessed', evaluated_count: 2, pass_count: 1, suspected_pass_count: 0, quality_ratio: 0.5, quality_contribution: 0 },
+      { account_id: 13, eligible: true, selected: false, in_top_k: true, score: 0.4, quality_state: 'assessed', evaluated_count: 3, pass_count: 0, suspected_pass_count: 1, quality_ratio: 1 / 3 },
+      // A stale ratio next to an unassessed state is still unknown.
+      { account_id: 14, eligible: true, selected: false, in_top_k: false, score: 0.2, quality_state: 'unassessed', evaluated_count: 2, pass_count: 2, suspected_pass_count: 0, quality_ratio: 1 }
+    ]
+    api.listSchedulerDecisions.mockResolvedValue({ limit: 50, items: [trace] })
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('[data-testid="decision-row"] .ledger-toggle').trigger('click')
+    const cells = wrapper.findAll('[data-testid="candidate-quality"]')
+    expect(cells[0].text()).toContain('50.0%')
+    expect(cells[0].text()).toContain('1/2 项测试通过')
+    expect(cells[1].text()).toContain('33.3%')
+    expect(cells[1].text()).toContain('1/3 项测试通过')
+    expect(cells[1].text()).toContain('通过 0 项，疑似通过 1 项')
+    expect(cells[2].text()).toBe('未知')
+  })
+
+  it('marks every candidate unknown under avoid degradation when no pass rate exists yet', async () => {
+    const decisions = await api.listSchedulerDecisions()
+    const trace = { ...decisions.items[0], scheduling_policy: 'avoid_degradation' }
+    api.listSchedulerDecisions.mockResolvedValue({ limit: 50, items: [trace] })
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('[data-testid="decision-row"] .ledger-toggle').trigger('click')
+    const cells = wrapper.findAll('[data-testid="candidate-quality"]')
+    expect(cells.map(cell => cell.text())).toEqual(['未知', '—'])
   })
 
   it('shows a reload prompt instead of overwriting when the server reports a conflict', async () => {
@@ -372,5 +446,161 @@ describe('ModelIntegritySchedulingView', () => {
     expect(wrapper.text()).toContain('该配置已在其他页面或由其他管理员修改')
     expect(wrapper.get('[data-testid="model-integrity-save"]').attributes('disabled')).toBeDefined()
     expect(store.showError).not.toHaveBeenCalled()
+  })
+})
+
+describe('ModelIntegritySchedulingView integrity pass rate controls', () => {
+  it('edits only cost, error rate, latency, load and pass rate, and saves a quality-only balance', async () => {
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ scheduling_policy: 'custom_balance', custom_balance: { cost: 0.2, error_rate: 0.43, ttft: 0.27, load: 0.1, quality: 0 } }))
+    const wrapper = mountView()
+    await flushPromises()
+    const editor = wrapper.get('[data-testid="custom-balance"]')
+    expect(editor.find('[data-testid="weight-stability"]').exists()).toBe(false)
+    expect(editor.findAll('input').map(input => input.attributes('data-testid'))).toEqual(['weight-cost', 'weight-error_rate', 'weight-ttft', 'weight-load', 'weight-quality'])
+    expect(editor.text()).toContain('降智通过率')
+    expect(editor.text()).toContain('与降智无关')
+    expect(editor.text()).not.toContain('稳定性')
+    expect(wrapper.find('[data-testid="legacy-stability-folded"]').exists()).toBe(false)
+
+    for (const factor of ['cost', 'error_rate', 'ttft', 'load']) await editor.get(`[data-testid="weight-${factor}"]`).setValue('0')
+    expect(editor.find('[data-testid="weights-error"]').exists()).toBe(true)
+    await editor.get('[data-testid="weight-quality"]').setValue('100')
+    expect(editor.find('[data-testid="weights-error"]').exists()).toBe(false)
+
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
+    expect(payload.custom_balance).toEqual({ cost: 0, error_rate: 0, ttft: 0, load: 0, quality: 1, stability: 0 })
+  })
+
+  it('folds a legacy stability weight on load, says so, and saves it without double folding', async () => {
+    const legacy = { cost: 0.2, stability: 0.3, error_rate: 0.25, ttft: 0.15, load: 0.1 }
+    const config = serverConfig()
+    api.getOpenAIEvalConfig.mockResolvedValue({
+      ...config,
+      scheduling_policy: 'custom_balance',
+      custom_balance: legacy,
+      policies: [{ requested_model: 'gpt-5', reasoning_effort: 'high', policy: 'custom_balance', custom_balance: { ...legacy, quality: 0.5 } }]
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.get('[data-testid="legacy-stability-folded"]').text()).toContain('60% 错误率、40% 首包延迟')
+    expect((wrapper.get('[data-testid="custom-balance"] [data-testid="weight-error_rate"]').element as HTMLInputElement).value).toBe('43')
+    // Folding on read alone is not an unsaved change: the scheduler already applies the same split.
+    expect(wrapper.text()).not.toContain('有未保存的更改')
+
+    await wrapper.get('[data-testid="custom-balance"] [data-testid="weight-load"]').setValue('20')
+    // After saving, the server returns the folded weights.
+    api.saveOpenAIEvalConfig.mockImplementation(async (payload: OpenAIEvalConfig) => ({ ...payload, revision: (payload.revision ?? 0) + 1 }))
+    api.getOpenAIEvalConfig.mockImplementation(async () => ({ ...(api.saveOpenAIEvalConfig.mock.calls.at(-1)![0] as OpenAIEvalConfig), revision: 5 }))
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    const first = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
+    const folded = { cost: 0.2, error_rate: 0.43, ttft: 0.27, load: 0.1, quality: 0, stability: 0 }
+    expect(first.custom_balance).toEqual({ ...folded, load: 0.2 })
+    expect(first.policies?.[0]).toMatchObject({ requested_model: 'gpt-5', reasoning_effort: 'high', custom_balance: { ...folded, quality: 0.5 } })
+    expect(wrapper.find('[data-testid="legacy-stability-folded"]').exists()).toBe(false)
+
+    // A second save from the echoed config must send the same folded values, not fold again.
+    await wrapper.get('[data-testid="custom-balance"] [data-testid="weight-load"]').setValue('10')
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    const second = api.saveOpenAIEvalConfig.mock.calls.at(-1)![0] as OpenAIEvalConfig
+    expect(second.custom_balance).toEqual(folded)
+    expect(second.policies?.[0].custom_balance).toEqual({ ...folded, quality: 0.5 })
+  })
+
+  it('offers the shared interval presets plus whole-minute custom values and saves them', async () => {
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ quality_refresh_interval_seconds: 21600 }))
+    const wrapper = mountView()
+    await flushPromises()
+    const select = wrapper.get('[data-testid="quality-interval"]')
+    expect((select.element as HTMLSelectElement).value).toBe('21600')
+    expect(select.findAll('option').map(option => option.text())).toEqual(['每 5 分钟', '每 10 分钟', '每 30 分钟', '每 1 小时', '每 6 小时', '每 12 小时', '每 24 小时', '自定义'])
+    expect(wrapper.find('[data-testid="quality-interval-pending"]').exists()).toBe(false)
+
+    await select.setValue('custom')
+    const minutes = wrapper.get('[data-testid="quality-interval-minutes"]')
+    await minutes.setValue('2')
+    await minutes.trigger('change')
+    expect((minutes.element as HTMLInputElement).value).toBe('5')
+    await minutes.setValue('95')
+    await minutes.trigger('change')
+    expect(wrapper.get('[data-testid="quality-interval-pending"]').text()).toContain('当前仍按每 6 小时刷新')
+
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    expect((api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig).quality_refresh_interval_seconds).toBe(95 * 60)
+  })
+
+  it('refreshes the ranking now, shows the result and keeps unsaved edits unsaved', async () => {
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ quality_refreshed_at: null }))
+    let finish!: (value: unknown) => void
+    api.refreshOpenAIEvalQuality.mockImplementation(() => new Promise(resolve => { finish = resolve }))
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.get('[data-testid="quality-refresh-status"]').text()).toContain('尚未刷新')
+
+    await wrapper.get('[data-testid="quality-interval"]').setValue('600')
+    expect(wrapper.text()).toContain('有未保存的更改')
+    const button = wrapper.get('[data-testid="quality-refresh-now"]')
+    await button.trigger('click')
+    expect(button.attributes('disabled')).toBeDefined()
+    expect(button.text()).toContain('正在刷新')
+    await button.trigger('click')
+    expect(api.refreshOpenAIEvalQuality).toHaveBeenCalledTimes(1)
+
+    finish({ refreshed_at: '2026-10-03T08:00:00Z', next_refresh_at: '2026-10-03T09:00:00Z', route_count: 7 })
+    await flushPromises()
+    expect(store.showSuccess).toHaveBeenCalledWith('已刷新 7 个测试对象的降智通过率。')
+    expect(wrapper.get('[data-testid="quality-refresh-routes"]').text()).toBe('本次刷新 7 个测试对象')
+    expect(wrapper.get('[data-testid="quality-refresh-status"]').text()).toContain('上次刷新')
+    expect(wrapper.get('[data-testid="quality-refresh-status"]').text()).toContain('下次')
+    expect(button.attributes('disabled')).toBeUndefined()
+    // The unsaved interval is untouched and still pending; nothing was saved.
+    expect((wrapper.get('[data-testid="quality-interval"]').element as HTMLSelectElement).value).toBe('600')
+    expect(wrapper.text()).toContain('有未保存的更改')
+    expect(wrapper.find('[data-testid="quality-interval-pending"]').exists()).toBe(true)
+    expect(api.saveOpenAIEvalConfig).not.toHaveBeenCalled()
+  })
+
+  it('reports a failed refresh with the server message and keeps the last refresh time', async () => {
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ quality_refreshed_at: '2026-10-03T07:00:00Z' }))
+    api.refreshOpenAIEvalQuality.mockRejectedValue({ message: 'quality refresh is already running' })
+    const wrapper = mountView()
+    await flushPromises()
+    const before = wrapper.get('[data-testid="quality-refresh-status"]').text()
+    await wrapper.get('[data-testid="quality-refresh-now"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="quality-refresh-error"]').text()).toBe('quality refresh is already running')
+    expect(store.showError).toHaveBeenCalledWith('quality refresh is already running')
+    expect(wrapper.get('[data-testid="quality-refresh-status"]').text()).toBe(before)
+    expect(wrapper.get('[data-testid="quality-refresh-now"]').attributes('disabled')).toBeUndefined()
+    expect(wrapper.text()).not.toContain('有未保存的更改')
+  })
+
+  it('warns that the pass rate is inactive while evaluation effects are off', async () => {
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ effects_enabled: false, scheduling_policy: 'stability_first' }))
+    const wrapper = mountView()
+    await flushPromises()
+    // Stability first ignores the pass rate, so there is nothing to warn about.
+    expect(wrapper.find('[data-testid="quality-effects-off"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="policy-avoid_degradation"]').setValue(true)
+    expect(wrapper.get('[data-testid="quality-effects-off"]').text()).toContain('评测影响已关闭')
+  })
+
+  it('keeps request errors and first-token latency apart from the pass rate in the ledger', async () => {
+    const decisions = await api.listSchedulerDecisions()
+    const trace = { ...decisions.items[0], scheduling_policy: 'avoid_degradation' }
+    trace.candidates = [{ ...trace.candidates[0], error_rate: 0.4, ttft_ms: 3000, evaluated_count: 3, pass_count: 3, suspected_pass_count: 0, quality_ratio: 1, quality_contribution: 0 }]
+    api.listSchedulerDecisions.mockResolvedValue({ limit: 50, items: [trace] })
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('[data-testid="decision-row"] .ledger-toggle').trigger('click')
+    const row = wrapper.get('[data-testid="candidate-row"]')
+    expect(row.text()).toContain('40.0%')
+    expect(row.get('[data-testid="candidate-quality"]').text()).toContain('100.0%')
+    expect(row.get('[data-testid="candidate-quality"]').text()).toContain('3/3 项测试通过')
+    expect(row.find('[data-testid="candidate-quality-contribution"]').exists()).toBe(false)
   })
 })
