@@ -183,6 +183,8 @@ func (s *OpenAIGatewayService) buildOpenAIWSHeaders(
 	// 账号级请求头覆写（仅 openai api_key 账号启用时生效；OAuth 路径 no-op）。
 	// 覆盖所有 WS 模式（ctx_pool/dedicated/passthrough）的握手头。
 	account.ApplyHeaderOverrides(headers)
+	applyOpenAIOpaqueRouteEpochHeaders(c, account, headers, strings.TrimSpace(promptCacheKey) != "")
+	s.enforceCodexAcceptLanguageForRequest(c, account, headers)
 	setOpenAICodexRoutingHint(headers, account, routingModel, routingServiceTier)
 	logOpenAIRoutingDiagnostics(
 		ctx,
@@ -405,6 +407,7 @@ func openAIWSPayloadCodexWindowID(payload []byte) string {
 func normalizeOpenAIWSContextWindowBoundary(
 	payload []byte,
 	previousWindowID string,
+	opaqueUpstream ...bool,
 ) ([]byte, openAIWSContextWindowBoundary, error) {
 	currentWindowID := openAIWSPayloadCodexWindowID(payload)
 	boundary := openAIWSContextWindowBoundary{WindowID: currentWindowID}
@@ -412,6 +415,10 @@ func normalizeOpenAIWSContextWindowBoundary(
 		return payload, boundary, nil
 	}
 	boundary.Changed = true
+	if len(opaqueUpstream) > 0 && opaqueUpstream[0] {
+		// A local context-window change does not make opaque server state portable.
+		return payload, boundary, nil
+	}
 	updated, removed, err := dropPreviousResponseIDFromRawPayload(payload)
 	if err != nil {
 		return payload, boundary, err

@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	coderws "github.com/coder/websocket"
@@ -12,6 +14,73 @@ type openAIWSClientReadResult struct {
 	messageType coderws.MessageType
 	payload     []byte
 	err         error
+}
+
+var ErrOpenAIWSClientQueueOverflow = errors.New("openai websocket client input queue is full")
+
+// One connection reader survives account attempts and observes disconnects
+// while an upstream turn is running. The queue is bounded to one future frame.
+type OpenAIWSClientReader struct {
+	conn          *coderws.Conn
+	frames        chan openAIWSClientReadResult
+	done          chan struct{}
+	stop          chan struct{}
+	once          sync.Once
+	serverClosing atomic.Bool
+}
+
+func NewOpenAIWSClientReader(conn *coderws.Conn, disconnected func(error)) *OpenAIWSClientReader {
+	r := &OpenAIWSClientReader{conn: conn, frames: make(chan openAIWSClientReadResult, 1), done: make(chan struct{}), stop: make(chan struct{})}
+	go func() {
+		defer close(r.done)
+		for {
+			typ, payload, err := conn.Read(context.Background())
+			if err != nil && disconnected != nil && !r.serverClosing.Load() {
+				disconnected(err)
+			}
+			select {
+			case r.frames <- openAIWSClientReadResult{messageType: typ, payload: payload, err: err}:
+			case <-r.stop:
+				return
+			default:
+				// Reject excess input instead of blocking the only disconnect reader.
+				if disconnected != nil && !r.serverClosing.Load() {
+					disconnected(ErrOpenAIWSClientQueueOverflow)
+				}
+				r.MarkServerClose()
+				_ = conn.CloseNow()
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return r
+}
+
+func (r *OpenAIWSClientReader) read() openAIWSClientReadResult {
+	select {
+	case result := <-r.frames:
+		return result
+	case <-r.done:
+		select {
+		case result := <-r.frames:
+			return result
+		default:
+			return openAIWSClientReadResult{err: errOpenAIWSConnClosed}
+		}
+	}
+}
+
+func (r *OpenAIWSClientReader) Close() {
+	r.once.Do(func() { r.MarkServerClose(); close(r.stop); _ = r.conn.CloseNow(); <-r.done })
+}
+
+func (r *OpenAIWSClientReader) MarkServerClose() {
+	if r != nil {
+		r.serverClosing.Store(true)
+	}
 }
 
 // ReadOpenAIWSClientMessage keeps one reader alive while control events send
@@ -45,6 +114,7 @@ func readOpenAIWSClientMessageWithTimeoutStart(
 	timeoutReason string,
 	timeoutStart <-chan struct{},
 	timeoutActive func() bool,
+	sharedReader ...*OpenAIWSClientReader,
 ) (coderws.MessageType, []byte, error) {
 	if conn == nil {
 		return 0, nil, errors.New("openai websocket client connection is nil")
@@ -55,6 +125,10 @@ func readOpenAIWSClientMessageWithTimeoutStart(
 
 	readDone := make(chan openAIWSClientReadResult, 1)
 	go func() {
+		if len(sharedReader) > 0 && sharedReader[0] != nil {
+			readDone <- sharedReader[0].read()
+			return
+		}
 		messageType, payload, err := conn.Read(context.Background())
 		readDone <- openAIWSClientReadResult{messageType: messageType, payload: payload, err: err}
 	}()

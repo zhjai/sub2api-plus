@@ -48,6 +48,37 @@ func TestOpenAIGatewayService_SelectAccountByPreviousResponseID_Hit(t *testing.T
 	}
 }
 
+func TestOpenAIGatewayService_ResolveOpenAIPreviousResponseOwnerIgnoresSchedulability(t *testing.T) {
+	ctx := context.Background()
+	groupID := int64(23)
+	account := Account{
+		ID:          91,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusDisabled,
+		Schedulable: false,
+		Extra: map[string]any{
+			"openai_opaque_upstream": true,
+		},
+	}
+	cache := &stubGatewayCache{}
+	store := NewOpenAIWSStateStore(cache)
+	svc := &OpenAIGatewayService{
+		accountRepo:        stubOpenAIAccountRepo{accounts: []Account{account}},
+		cache:              cache,
+		cfg:                newOpenAIWSV2TestConfig(),
+		openaiWSStateStore: store,
+	}
+
+	require.NoError(t, store.BindResponseAccount(ctx, groupID, "resp_opaque_owner", account.ID, time.Hour))
+	owner, bound, err := svc.ResolveOpenAIPreviousResponseOwner(ctx, &groupID, "resp_opaque_owner")
+	require.NoError(t, err)
+	require.True(t, bound)
+	require.NotNil(t, owner)
+	require.Equal(t, account.ID, owner.ID)
+	require.True(t, owner.IsOpenAIOpaqueUpstream())
+}
+
 func TestOpenAIGatewayService_SelectAccountByPreviousResponseID_QuotaAutoPausedMiss(t *testing.T) {
 	ctx := context.Background()
 	groupID := int64(23)
@@ -122,7 +153,7 @@ func TestOpenAIGatewayService_SelectAccountByPreviousResponseID_RateLimitedMiss(
 	require.Nil(t, selection, "限额中的账号不应继续命中 previous_response_id 粘连")
 	boundAccountID, getErr := store.GetResponseAccount(ctx, groupID, "resp_prev_rl")
 	require.NoError(t, getErr)
-	require.Zero(t, boundAccountID)
+	require.Equal(t, account.ID, boundAccountID, "eligibility changes must not erase response ownership")
 }
 
 func TestOpenAIGatewayService_SelectAccountByPreviousResponseID_DBRuntimeRecheckRateLimitedMiss(t *testing.T) {
@@ -174,7 +205,7 @@ func TestOpenAIGatewayService_SelectAccountByPreviousResponseID_DBRuntimeRecheck
 	require.Nil(t, selection, "DB 中已限流的账号不应继续命中 previous_response_id 粘连")
 	boundAccountID, getErr := store.GetResponseAccount(ctx, groupID, "resp_prev_db_rl")
 	require.NoError(t, getErr)
-	require.Zero(t, boundAccountID)
+	require.Equal(t, dbAccount.ID, boundAccountID, "DB eligibility changes must not erase response ownership")
 }
 
 func TestOpenAIGatewayService_SelectAccountByPreviousResponseID_Excluded(t *testing.T) {

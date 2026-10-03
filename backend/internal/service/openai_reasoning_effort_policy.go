@@ -407,9 +407,7 @@ func WithRequestedReasoningEffort(ctx context.Context, effort string) context.Co
 		ctx = context.Background()
 	}
 	effort = strings.TrimSpace(effort)
-	if effort == "" {
-		return ctx
-	}
+	// An empty effort must shadow a previous turn's value on long-lived connections.
 	return context.WithValue(ctx, requestedReasoningEffortContextKey{}, effort)
 }
 

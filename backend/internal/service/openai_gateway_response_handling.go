@@ -42,6 +42,23 @@ type openaiStreamingResult struct {
 	responsesToolCallForwarded bool
 	toolCapabilityFailure      bool
 	execCallObserved           bool
+	clientDisconnected         bool
+}
+
+func (r *openaiStreamingResult) applyForwardOutcome(result *OpenAIForwardResult) {
+	if r == nil || result == nil {
+		return
+	}
+	result.ResponsesOutcomeObserved = r.responsesOutcomeObserved
+	result.UpstreamTerminalEvent = r.responsesTerminalEvent
+	result.ResponsesProtocolStatus = r.responsesProtocolStatus
+	result.ResponsesStatus = r.responsesStatus
+	result.ResponsesIncompleteReason = r.responsesIncompleteReason
+	result.ResponsesMeaningfulOutput = r.responsesMeaningfulOutput
+	result.ResponsesToolCallForwarded = r.responsesToolCallForwarded
+	result.ToolCapabilityFailure = r.toolCapabilityFailure
+	result.ExecCallObserved = r.execCallObserved
+	result.ClientDisconnect = r.clientDisconnected
 }
 
 type openaiNonStreamingResult struct {
@@ -51,6 +68,64 @@ type openaiNonStreamingResult struct {
 	imageCount       int
 	imageOutputSizes []string
 	searchCount      int
+	outcome          *openaiStreamingResult
+}
+
+// JSON Responses and buffered SSE use the same completed tool contract as streams.
+func observeOpenAINonStreamingOutcome(c *gin.Context, body []byte) *openaiStreamingResult {
+	if !isNativeOpenAIResponsesRequest(c) {
+		return nil
+	}
+	evidence := &openAIWSIntegrityEvidence{capability: openAIToolCapabilityStateFromContext(c)}
+	outcome := &openaiStreamingResult{}
+	observe := func(eventType string, payload []byte) {
+		evidence.observe(eventType, payload)
+		evidence.delivered(eventType, payload)
+		if openAIStreamEventTypeIsTerminal(eventType) {
+			outcome.responsesTerminalEvent = eventType
+			_, outcome.responsesStatus, outcome.responsesIncompleteReason = classifyOpenAIResponsesOutcome(eventType, payload)
+		}
+	}
+	sse := bodyHasSSEFraming(body)
+	if sse {
+		forEachOpenAISSEFrame(string(body), observe)
+	} else {
+		eventType := strings.TrimSpace(gjson.GetBytes(body, "type").String())
+		if openAIStreamEventTypeIsTerminal(eventType) && gjson.GetBytes(body, "response").IsObject() {
+			observe(eventType, body)
+		} else {
+			if eventType != "" && eventType != "response" {
+				return nil
+			}
+			switch strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "status").String())) {
+			case "completed", "incomplete", "failed", "cancelled", "canceled":
+				eventType = "response." + strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "status").String()))
+			default:
+				return nil
+			}
+			payload, err := json.Marshal(struct {
+				Type     string          `json:"type"`
+				Response json.RawMessage `json:"response"`
+			}{Type: eventType, Response: body})
+			if err != nil {
+				return nil
+			}
+			observe(eventType, payload)
+		}
+	}
+	c.Set(openAIToolCapabilityContextKey, evidence.capability)
+	result := &OpenAIForwardResult{}
+	evidence.apply(result, sse && outcome.responsesTerminalEvent == "", c.Request.Context().Err() != nil)
+	outcome.responseID = evidence.deliveredID()
+	outcome.responsesOutcomeObserved = result.ResponsesOutcomeObserved
+	outcome.responsesProtocolStatus = result.ResponsesProtocolStatus
+	outcome.responsesIncompleteReason = result.ResponsesIncompleteReason
+	outcome.responsesMeaningfulOutput = result.ResponsesMeaningfulOutput
+	outcome.responsesToolCallForwarded = result.ResponsesToolCallForwarded
+	outcome.toolCapabilityFailure = result.ToolCapabilityFailure
+	outcome.execCallObserved = evidence.capability.ClientExecDeclared && evidence.capability.OutboundExecDeclared && result.ExecCallObserved
+	outcome.clientDisconnected = result.ClientDisconnect
+	return outcome
 }
 
 func (s *OpenAIGatewayService) handleStreamingResponse(ctx context.Context, resp *http.Response, c *gin.Context, account *Account, startTime time.Time, originalModel, mappedModel string) (*openaiStreamingResult, error) {
@@ -375,7 +450,8 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		capability := openAIToolCapabilityStateFromContext(c)
 		completedTerminal := strings.EqualFold(responsesProtocolStatus, "completed") &&
 			(terminalEventType == "response.completed" || terminalEventType == "response.done")
-		toolCapabilityFailure := strongToolLeakRejected || capability.ProtocolLeakObserved || openAIToolCapabilityFailure(c, completedTerminal)
+		toolCapabilityFailure := !clientDisconnected && ctx.Err() == nil &&
+			(strongToolLeakRejected || openAIToolCapabilityFailure(c, completedTerminal))
 		if toolCapabilityFailure {
 			logOpenAIToolCapabilityFailure(c, account, originalModel)
 		}
@@ -395,6 +471,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			responsesToolCallForwarded: responsesToolCallForwarded,
 			toolCapabilityFailure:      toolCapabilityFailure,
 			execCallObserved:           isNativeOpenAIResponsesRequest(c) && capability.ClientExecDeclared && capability.OutboundExecDeclared && capability.ExecCallObserved,
+			clientDisconnected:         clientDisconnected,
 		}
 	}
 	flushPending := func(disconnectMessage string) {
@@ -602,6 +679,12 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				suppressCurrentEvent = true
 			}
 			observer.ObserveOpenAI(dataBytes, eventType)
+			if responseModel, mismatch := openAIPreCommitResponseModelMismatch(dataBytes, mappedModel); account != nil && account.IsOpenAIOpaqueUpstream() && mismatch &&
+				!openAIStreamClientOutputStarted(c, clientOutputStarted) && !clientDisconnected {
+				streamEarlyErr = newOpenAIPreCommitModelMismatchFailoverError(mappedModel, responseModel)
+				_ = resp.Body.Close()
+				return
+			}
 			// 初始上游 data 的 type 只解析一次：原始值保持终止事件的精确匹配，规范化值供后续分支复用。
 			if openAIStreamEventIsTerminalWithType(data, eventType) {
 				sawTerminalEvent = true
@@ -799,13 +882,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 						zap.Bool("semantic_output_committed", false),
 						zap.Bool("exec_call_observed", capability.ExecCallObserved),
 					)
-					streamEarlyErr = &UpstreamFailoverError{
-						StatusCode:               http.StatusBadGateway,
-						ResponseBody:             []byte(`{"error":{"type":"upstream_error","code":"exec_protocol_leak","message":"Upstream emitted an exec call as text"}}`),
-						SafeToFailoverAfterWrite: true,
-						SessionAccountEscape:     true,
-						Reason:                   OpenAIExecProtocolLeakReason,
-					}
+					streamEarlyErr = newOpenAIExecProtocolLeakFailoverError()
 					_ = resp.Body.Close()
 					return
 				}
@@ -1620,6 +1697,9 @@ func (s *OpenAIGatewayService) ValidateOpenAIHTTPResponseOwner(
 		return false, nil
 	}
 	ownerUserID, ownerAPIKeyID, found, err := s.getOpenAIWSStateStore().GetHTTPResponseOwner(ctx, groupID, responseID)
+	if errors.Is(err, ErrStickySessionNotFound) {
+		return false, nil
+	}
 	if err != nil || !found {
 		return false, err
 	}
@@ -1668,6 +1748,7 @@ func (s *OpenAIGatewayService) bindHTTPResponseAccount(ctx context.Context, c *g
 	groupID := getOpenAIGroupIDFromContext(c)
 	ttl := s.openAIWSResponseStickyTTL()
 	logOpenAIWSBindResponseAccountWarn(groupID, account.ID, responseID, store.BindResponseAccount(bindCtx, groupID, responseID, account.ID, ttl))
+	s.bindOpenAIResponseRouteEpoch(bindCtx, c, account, responseID)
 	if rawOwner, ok := c.Get(openAIHTTPResponseOwnerContextKey); ok {
 		if owner, ok := rawOwner.(openAIHTTPResponseOwner); ok && owner.userID > 0 && owner.apiKeyID > 0 {
 			if err := s.BindOpenAIHTTPResponseOwner(bindCtx, groupID, responseID, owner.userID, owner.apiKeyID); err != nil {
@@ -1782,6 +1863,13 @@ func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, r
 	} else {
 		observer.ObserveOpenAI(body, strings.TrimSpace(gjson.GetBytes(body, "type").String()))
 	}
+	if account != nil && account.IsOpenAIOpaqueUpstream() {
+		if responseModel := observedUpstreamResponseModel(c); responseModel != "" {
+			if openAIPreCommitObservedResponseModelMismatch(mappedModel, responseModel) {
+				return nil, newOpenAIPreCommitModelMismatchFailoverError(mappedModel, responseModel)
+			}
+		}
+	}
 
 	// Detect SSE responses for ALL account types via Content-Type header.
 	// Some OpenAI-compatible upstreams (including other sub2api instances)
@@ -1839,6 +1927,10 @@ func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, r
 		return nil, fmt.Errorf("restore OpenAI namespace response: %w", err)
 	}
 	body = restoreCodexToolNamesFromContext(c, body)
+	outcome := observeOpenAINonStreamingOutcome(c, body)
+	if outcome != nil && !outcome.clientDisconnected && openAIToolCapabilityStrongLeak(c) {
+		return nil, newOpenAIExecProtocolLeakFailoverError()
+	}
 	responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
 	// Codex 协议要求 /responses/compact JSON 响应携带 x-codex-turn-state
 	// （codex-api/src/endpoint/compact.rs 从响应头捕获），显式回传。
@@ -1862,6 +1954,7 @@ func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, r
 		imageCount:       countOpenAIResponseImageOutputsFromJSONBytes(body),
 		imageOutputSizes: collectOpenAIResponseImageOutputSizesFromJSONBytes(body),
 		searchCount:      countGrokNativeSearchCallsFromJSONBytes(body),
+		outcome:          outcome,
 	}, nil
 }
 
@@ -1947,6 +2040,10 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 		body = []byte(bodyText)
 	}
 
+	outcome := observeOpenAINonStreamingOutcome(c, body)
+	if outcome != nil && !outcome.clientDisconnected && openAIToolCapabilityStrongLeak(c) {
+		return nil, newOpenAIExecProtocolLeakFailoverError()
+	}
 	responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
 	logOpenAISuccessMissingUsage(c.Request.Context(), c, account, resp, usage, terminalType, false)
 	s.relayOpenAICodexTurnState(c, account, resp.Header)
@@ -1969,6 +2066,7 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 		imageCount:       countOpenAIImageOutputsFromSSEBody(bodyText),
 		imageOutputSizes: collectOpenAIImageOutputSizesFromSSEBody(bodyText),
 		searchCount:      countGrokNativeSearchCallsFromSSEBody(bodyText),
+		outcome:          outcome,
 	}, nil
 }
 

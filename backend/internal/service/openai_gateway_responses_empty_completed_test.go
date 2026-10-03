@@ -166,3 +166,33 @@ func TestOpenAIResponsesCompletedEventIsEmpty(t *testing.T) {
 		})
 	}
 }
+
+func TestOpenAIResponsesModelMismatchFailsOverBeforeOutput(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body: io.NopCloser(strings.NewReader(
+			"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_wrong\",\"model\":\"gpt-4.1-mini\",\"status\":\"in_progress\"}}\n\n",
+		)),
+	}}
+	svc := newOpenAIImageGenerationControlTestService(upstream)
+	c, recorder := newOpenAIImageGenerationControlTestContext(true, "codex_cli_rs/0.144.1")
+	account := newOpenAIImageGenerationControlTestAccount()
+	if account.Extra == nil {
+		account.Extra = make(map[string]any)
+	}
+	account.Extra["openai_opaque_upstream"] = true
+	body := []byte(`{"model":"gpt-6-astra","stream":true,"input":"continue"}`)
+
+	_, err := svc.Forward(context.Background(), c, account, body)
+	require.Error(t, err)
+	var failoverErr *UpstreamFailoverError
+	require.True(t, errors.As(err, &failoverErr))
+	require.True(t, failoverErr.OpaqueRouteEpochEligible)
+	require.Equal(t, OpenAIIntegritySignalModelMismatch, failoverErr.IntegritySignal)
+	require.Equal(t, "gpt-6-astra", failoverErr.IntegritySentModel)
+	require.Equal(t, "gpt-4.1-mini", failoverErr.IntegrityResponseModel)
+	require.Empty(t, recorder.Body.String())
+}

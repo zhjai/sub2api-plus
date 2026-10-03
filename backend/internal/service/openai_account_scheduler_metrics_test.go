@@ -43,6 +43,35 @@ func TestOpenAIAccountRuntimeStatsAreIsolatedByModelAndReasoningEffort(t *testin
 	require.Equal(t, 0.0, coldError)
 }
 
+func TestOpenAIRequestResultReporterPreservesPublicModelAndReasoningEffort(t *testing.T) {
+	t.Cleanup(resetOpenAIAdvancedSchedulerSettingCacheForTest)
+	stats := newOpenAIAccountRuntimeStats()
+	svc := &OpenAIGatewayService{
+		cfg: &config.Config{}, openaiAccountStats: stats,
+		rateLimitService: newOpenAIAdvancedSchedulerRateLimitService("true"),
+	}
+	account := &Account{ID: 7}
+	high, low := "high", "low"
+	ttft := 42
+	svc.ReportOpenAIAccountScheduleResultForRequest(account, "mapped-model", &OpenAIForwardResult{
+		Model: "public-model", RequestedReasoningEffort: &high,
+	}, false, &ttft)
+	svc.ReportOpenAIAccountScheduleResultForRequest(account, "mapped-model", &OpenAIForwardResult{
+		Model: "public-model", RequestedReasoningEffort: &low,
+	}, true, &ttft)
+	highError, highTTFT, hasHighTTFT := stats.snapshotForRequest(account.ID, "public-model", high)
+	lowError, _, hasLowTTFT := stats.snapshotForRequest(account.ID, "public-model", low)
+	require.Greater(t, highError, 0.0)
+	require.Equal(t, float64(ttft), highTTFT)
+	require.True(t, hasHighTTFT)
+	require.Zero(t, lowError)
+	require.True(t, hasLowTTFT)
+	for _, route := range [][2]string{{"mapped-model", ""}, {"mapped-model", high}, {"public-model", ""}} {
+		_, found := stats.loadRoute(account.ID, route[0], route[1])
+		require.False(t, found, "unrelated route %v must remain unsampled", route)
+	}
+}
+
 func TestOpenAIClientRequestedModelContextIsIndependentFromMappedModel(t *testing.T) {
 	ctx := WithOpenAIClientRequestedModel(context.Background(), " gpt-6-astra ")
 	req := OpenAIAccountScheduleRequest{RequestedModel: "upstream-gpt-6", RequestedReasoningEffort: "high"}

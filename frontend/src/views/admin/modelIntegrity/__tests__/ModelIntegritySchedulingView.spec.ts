@@ -8,6 +8,8 @@ const api = vi.hoisted(() => ({
   getOpenAIEvalConfig: vi.fn(),
   saveOpenAIEvalConfig: vi.fn(),
   resetOpenAIBPSState: vi.fn(),
+  listOpenAIEvalRuns: vi.fn(),
+  listOpenAIEvalAudit: vi.fn(),
   list: vi.fn(),
   listSchedulerDecisions: vi.fn()
 }))
@@ -35,7 +37,7 @@ const catalog = {
   items: [{ id: 'gpt-5' }, { id: 'gpt-5-mini' }],
   baseline_version: 'v1',
   baseline_models: [],
-  candy: { expected_answer: 21, confidence: 'low', scheduling: 'alert_only' },
+  candy: { expected_answer: 29, confidence: 'low', scheduling: 'alert_only' },
   evaluation_notice: '',
   reasoning_efforts: ['', 'high'],
   fingerprint_modes: [{ id: 'quick', samples: 60 }],
@@ -51,6 +53,19 @@ function serverConfig(overrides: Partial<OpenAIEvalConfig> = {}): OpenAIEvalConf
     bps_auto_enabled: true,
     scheduling_policy: '',
     policies: [],
+    bps_accounts: [{
+      account_id: 11,
+      probe_model: 'gpt-5',
+      mode: 'auto',
+      failure_threshold: 3,
+      recovery_threshold: 2,
+      interval_seconds: 21600,
+      active: false,
+      state: 'locked',
+      disabled_reason: 'upstream_403',
+      degraded_streak: 0,
+      healthy_streak: 0
+    }],
     accounts: [
       {
         account_id: 11,
@@ -94,6 +109,8 @@ beforeEach(() => {
   api.getOpenAIEvalModels.mockResolvedValue(catalog)
   api.getOpenAIEvalConfig.mockResolvedValue(serverConfig())
   api.list.mockResolvedValue({ items: [{ id: 11, name: 'oauth-a', platform: 'openai', type: 'oauth' }, { id: 12, name: 'apikey-b', platform: 'openai', type: 'apikey' }] })
+  api.listOpenAIEvalRuns.mockResolvedValue({ items: [] })
+  api.listOpenAIEvalAudit.mockResolvedValue({ items: [] })
   api.listSchedulerDecisions.mockResolvedValue({
     limit: 50,
     items: [{
@@ -129,8 +146,8 @@ describe('ModelIntegritySchedulingView', () => {
     await flushPromises()
 
     await wrapper.get('[data-testid="policy-avoid_degradation"]').setValue(true)
-    expect(wrapper.text()).toContain('只在于更少考虑价格')
-    await wrapper.get('.btn-primary').trigger('click')
+    expect(wrapper.text()).toContain('区别主要在于价格权重更低')
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
     await flushPromises()
 
     const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
@@ -149,8 +166,8 @@ describe('ModelIntegritySchedulingView', () => {
     await wrapper.get('[data-testid="add-rule"]').trigger('click')
     const rules = wrapper.findAll('[data-testid="policy-rule"]')
     for (const rule of rules) await rule.find('select').setValue('gpt-5')
-    expect(wrapper.text()).toContain('这个模型和推理强度已经有规则了')
-    await wrapper.get('.btn-primary').trigger('click')
+    expect(wrapper.text()).toContain('该模型与推理强度的规则已存在')
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
     expect(api.saveOpenAIEvalConfig).not.toHaveBeenCalled()
   })
 
@@ -160,11 +177,153 @@ describe('ModelIntegritySchedulingView', () => {
 
     const rows = wrapper.findAll('[data-testid="bps-row"]')
     expect(rows).toHaveLength(1)
-    const options = rows[0].findAll('option').map(option => option.attributes('value'))
-    expect(options).toEqual(['auto', 'force_off', 'force_on'])
     expect(rows[0].text()).toContain('BPS 已停用')
     expect(rows[0].text()).toContain('返回 403')
-    expect(wrapper.text()).toContain('另有 1 个测试对象不支持 BPS')
+    expect(wrapper.text()).toContain('1 个测试对象仍保留升级前的模型级 BPS 配置')
+    await rows[0].get('[data-testid="bps-edit"]').trigger('click')
+    expect(wrapper.get('[data-testid="bps-mode-auto"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="bps-mode-force_off"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="bps-mode-force_on"]').exists()).toBe(true)
+  })
+
+  it('uses the shared interval presets and preserves a custom BPS interval', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-testid="bps-edit"]').trigger('click')
+    const select = wrapper.get('[data-testid="bps-interval"]')
+    expect(select.text()).toContain('每 5 分钟')
+    expect(select.text()).toContain('每 24 小时')
+    await select.setValue('custom')
+    const custom = wrapper.get('[data-testid="bps-custom-interval"]')
+    expect(custom.attributes('max')).toBe('35791394')
+    expect(wrapper.text()).toContain('存储上限 35,791,394')
+    await custom.setValue(17)
+    await wrapper.get('[data-testid="bps-dialog"]').trigger('submit')
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+
+    const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
+    expect(payload.bps_accounts?.[0].interval_seconds).toBe(17 * 60)
+  })
+
+  it('normalizes an old all-zero custom balance response before saving a new custom rule', async () => {
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({
+      scheduling_policy: 'custom_balance',
+      custom_balance: { cost: 0, stability: 0, error_rate: 0, ttft: 0, load: 0 }
+    }))
+    const wrapper = mountView()
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="custom-balance"]').find('input').element.value).toBe('20')
+    await wrapper.get('[data-testid="add-rule"]').trigger('click')
+    const rule = wrapper.get('[data-testid="policy-rule"]')
+    const selects = rule.findAll('select')
+    await selects[0].setValue('gpt-5')
+    await selects[2].setValue('custom_balance')
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+
+    const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
+    const defaults = { cost: 0.2, stability: 0.3, error_rate: 0.25, ttft: 0.15, load: 0.1 }
+    expect(payload.custom_balance).toEqual(defaults)
+    expect(payload.policies?.[0].custom_balance).toEqual(defaults)
+  })
+
+  it('edits custom-balance rule weights while the site default is cost first, without touching other weights', async () => {
+    const global = { cost: 0.5, stability: 0.2, error_rate: 0.1, ttft: 0.1, load: 0.1 }
+    const other = { cost: 0.1, stability: 0.1, error_rate: 0.1, ttft: 0.1, load: 0.6 }
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({
+      scheduling_policy: 'cost_first',
+      custom_balance: global,
+      policies: [
+        { requested_model: 'gpt-5-mini', reasoning_effort: '', policy: 'custom_balance', custom_balance: other },
+        { requested_model: 'gpt-5', reasoning_effort: 'high', policy: 'stability_first' }
+      ]
+    }))
+    const wrapper = mountView()
+    await flushPromises()
+
+    // The site default is not custom, so only the rule-level editor exists.
+    expect(wrapper.find('[data-testid="custom-balance"]').exists()).toBe(false)
+    const rules = () => wrapper.findAll('[data-testid="policy-rule"]')
+    expect(rules()[0].get('[data-testid="rule-weights-summary"]').text()).toBe('价格 10%，稳定性 10%，错误率 10%，首包延迟 10%，并发负载 60%')
+    expect(rules()[0].find('[data-testid="weight-cost"]').exists()).toBe(false)
+    expect(rules()[1].find('[data-testid="rule-weights"]').exists()).toBe(false)
+
+    // Switching a rule to custom balance seeds a copy and opens its editor.
+    await rules()[1].get('[data-testid="rule-policy"]').setValue('custom_balance')
+    const seeded = rules()[1]
+    expect((seeded.get('[data-testid="weight-cost"]').element as HTMLInputElement).value).toBe('50')
+    await seeded.get('[data-testid="weight-ttft"]').setValue('40')
+    expect(seeded.get('[data-testid="rule-weights-summary"]').text()).toContain('首包延迟 31%')
+
+    await rules()[0].get('[data-testid="rule-weights-toggle"]').trigger('click')
+    await rules()[0].get('[data-testid="weight-error_rate"]').setValue('30')
+
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
+    expect(payload.scheduling_policy).toBe('cost_first')
+    expect(payload.custom_balance).toEqual(global)
+    expect(payload.policies?.[0]).toMatchObject({ requested_model: 'gpt-5-mini', policy: 'custom_balance', custom_balance: { ...other, error_rate: 0.3 } })
+    expect(payload.policies?.[1]).toMatchObject({ requested_model: 'gpt-5', reasoning_effort: 'high', policy: 'custom_balance', custom_balance: { ...global, ttft: 0.4 } })
+  })
+
+  it('keeps each rule weight object separate from the site default after a rule is seeded', async () => {
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ scheduling_policy: 'custom_balance' }))
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-testid="add-rule"]').trigger('click')
+    const rule = wrapper.get('[data-testid="policy-rule"]')
+    await rule.find('select').setValue('gpt-5')
+    await rule.get('[data-testid="rule-policy"]').setValue('custom_balance')
+    await wrapper.get('[data-testid="custom-balance"]').get('[data-testid="weight-cost"]').setValue('90')
+
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
+    expect(payload.custom_balance?.cost).toBe(0.9)
+    expect(payload.policies?.[0].custom_balance?.cost).toBe(0.2)
+  })
+
+  it('flags an all-zero rule weight set inline and blocks saving instead of silently resetting it', async () => {
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({
+      scheduling_policy: 'cost_first',
+      policies: [{ requested_model: 'gpt-5', reasoning_effort: '', policy: 'custom_balance', custom_balance: { cost: 0.5, stability: 0, error_rate: 0, ttft: 0, load: 0 } }]
+    }))
+    const wrapper = mountView()
+    await flushPromises()
+
+    const rule = () => wrapper.get('[data-testid="policy-rule"]')
+    const toggle = rule().get('[data-testid="rule-weights-toggle"]')
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+    await toggle.trigger('click')
+    expect(toggle.attributes('aria-expanded')).toBe('true')
+    expect(rule().find(`#${toggle.attributes('aria-controls')}`).exists()).toBe(true)
+
+    const cost = rule().get('[data-testid="weight-cost"]')
+    await cost.setValue('250')
+    expect((cost.element as HTMLInputElement).value).toBe('100')
+    await cost.setValue('0')
+    const error = rule().get('[data-testid="weights-error"]')
+    expect(error.text()).toBe('权重合计须大于 0，请至少为一项设置权重。')
+    expect(cost.attributes('aria-invalid')).toBe('true')
+    expect(cost.attributes('aria-describedby')).toBe(error.attributes('id'))
+    expect(rule().get('[data-testid="rule-weights-summary"]').text()).toContain('权重合计须大于 0')
+
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    expect(api.saveOpenAIEvalConfig).not.toHaveBeenCalled()
+    expect(store.showError).toHaveBeenCalledWith('权重合计须大于 0，请至少为一项设置权重。')
+
+    await rule().get('[data-testid="weight-load"]').setValue('10')
+    expect(rule().find('[data-testid="weights-error"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
+    expect(payload.policies?.[0].custom_balance).toEqual({ cost: 0, stability: 0, error_rate: 0, ttft: 0, load: 0.1 })
   })
 
   it('restores a locked BPS route through the reset API without touching unsaved config', async () => {
@@ -173,11 +332,15 @@ describe('ModelIntegritySchedulingView', () => {
     await flushPromises()
 
     const row = wrapper.get('[data-testid="bps-row"]')
-    await row.get('button').trigger('click')
-    wrapper.findComponent({ name: 'ConfirmDialog' }).vm.$emit('confirm')
+    await row.get('[data-testid="bps-reset"]').trigger('click')
+    await flushPromises()
+    const dialogs = wrapper.findAllComponents({ name: 'ConfirmDialog' })
+    const resetDialog = dialogs.find(dialog => dialog.props('show') === true)
+    expect(resetDialog).toBeDefined()
+    resetDialog!.vm.$emit('confirm')
     await flushPromises()
 
-    expect(api.resetOpenAIBPSState).toHaveBeenCalledWith({ account_id: 11, requested_model: 'gpt-5' })
+    expect(api.resetOpenAIBPSState).toHaveBeenCalledWith({ account_id: 11 })
     expect(wrapper.get('[data-testid="bps-row"]').text()).toContain('原线路')
     expect(api.saveOpenAIEvalConfig).not.toHaveBeenCalled()
   })
@@ -188,12 +351,12 @@ describe('ModelIntegritySchedulingView', () => {
 
     const row = wrapper.get('[data-testid="decision-row"]')
     expect(row.text()).toContain('选中 oauth-a #11')
-    expect(row.text()).toContain('选法：优先低价')
-    expect(row.text()).toContain('1 个可用，1 个被排除')
+    expect(row.text()).toContain('策略：优先低价')
+    expect(row.text()).toContain('1 个可用，1 个已排除')
     await row.get('.ledger-toggle').trigger('click')
     const candidates = wrapper.findAll('[data-testid="candidate-row"]')
     expect(candidates[0].text()).toContain('选中')
-    expect(candidates[1].text()).toContain('账号不支持这个模型')
+    expect(candidates[1].text()).toContain('账号不支持该模型')
     expect(wrapper.text()).not.toMatch(/路线资格|硬失败/)
   })
 
@@ -203,11 +366,11 @@ describe('ModelIntegritySchedulingView', () => {
     await flushPromises()
 
     await wrapper.get('[data-testid="policy-cost_first"]').setValue(true)
-    await wrapper.get('.btn-primary').trigger('click')
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
     await flushPromises()
 
-    expect(wrapper.text()).toContain('这份设置刚在别处被改过')
-    expect(wrapper.get('.btn-primary').attributes('disabled')).toBeDefined()
+    expect(wrapper.text()).toContain('该配置已在其他页面或由其他管理员修改')
+    expect(wrapper.get('[data-testid="model-integrity-save"]').attributes('disabled')).toBeDefined()
     expect(store.showError).not.toHaveBeenCalled()
   })
 })

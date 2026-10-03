@@ -83,6 +83,9 @@ func (s *OpenAIGatewayService) forwardOpenAIBPS(ctx context.Context, c *gin.Cont
 	req.Header.Set("Origin", "https://bps.openai.com")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
+	// BPS is still a Codex OAuth outbound route. Keep the same fixed locale
+	// identity as native Responses so the host/client locale never leaks.
+	enforceCodexAcceptLanguage(req.Header)
 	proxy := ""
 	if account.Proxy != nil {
 		proxy = account.Proxy.URL()
@@ -103,7 +106,7 @@ func (s *OpenAIGatewayService) forwardOpenAIBPS(ctx context.Context, c *gin.Cont
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		if resp.StatusCode == http.StatusForbidden {
-			s.disableOpenAIBPSAfter403(ctx, account, requestedModel)
+			s.disableOpenAIBPSAfter403(ctx, account)
 		}
 		return nil, errOpenAIBPSNativeFallback
 	}
@@ -161,18 +164,18 @@ func openAIBPSReject(c *gin.Context, status int, code, message string) error {
 	return fmt.Errorf("BPS %s", code)
 }
 
-func (s *OpenAIGatewayService) disableOpenAIBPSAfter403(ctx context.Context, account *Account, model string) {
+func (s *OpenAIGatewayService) disableOpenAIBPSAfter403(ctx context.Context, account *Account) {
 	if s == nil || s.accountRepo == nil || account == nil {
 		return
 	}
 	stateCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	if err := updateOpenAIBPSModelState(stateCtx, s.accountRepo, account.ID, model, func(state OpenAIBPSModelState) (OpenAIBPSModelState, bool) {
+	if err := updateOpenAIBPSAccountState(stateCtx, s.accountRepo, account.ID, func(state OpenAIBPSAccountState) (OpenAIBPSAccountState, bool) {
 		state.Active = false
 		state.DisabledReason = "upstream_403"
 		state.UpdatedAt = time.Now().UTC()
 		return state, true
 	}); err != nil {
-		logger.LegacyPrintf("service.openai_eval", "[OpenAI BPS] failed to persist 403 disable account=%d model=%s: %v", account.ID, model, err)
+		logger.LegacyPrintf("service.openai_eval", "[OpenAI BPS] failed to persist 403 disable account=%d: %v", account.ID, err)
 	}
 }

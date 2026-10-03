@@ -285,6 +285,7 @@ type OpenAIForwardResult struct {
 	ResponsesMeaningfulOutput  bool
 	ResponsesToolCallForwarded bool
 	ToolCapabilityFailure      bool
+	PrecommitExecProtocolLeak  bool
 	ExecCallObserved           bool
 	ResponseHeaders            http.Header
 	Duration                   time.Duration
@@ -321,6 +322,9 @@ func (r *OpenAIForwardResult) RequiresSessionAccountEscape() bool {
 	if r == nil {
 		return false
 	}
+	if r.PrecommitExecProtocolLeak {
+		return true
+	}
 	if r.ToolCapabilityFailure && strings.EqualFold(strings.TrimSpace(r.ResponsesProtocolStatus), "completed") &&
 		(r.UpstreamTerminalEvent == "response.completed" || r.UpstreamTerminalEvent == "response.done") {
 		return true
@@ -346,7 +350,7 @@ func (r *OpenAIForwardResult) SucceededForScheduling() bool {
 	// A completed response can still prove that this account did not honor the
 	// requested tool contract. Keep that signal out of the scheduler's success
 	// EWMA and do not clear transient account state for the affected route.
-	if r.ToolCapabilityFailure {
+	if r.ToolCapabilityFailure || r.PrecommitExecProtocolLeak {
 		return false
 	}
 	// A syntactically successful response from a different model is a channel
@@ -588,6 +592,8 @@ type OpenAIGatewayService struct {
 	openaiSessionEscapeMu    sync.Mutex
 	openaiSessionEscapes     map[string]map[int64]time.Time
 	openaiSessionEscapeRates map[string]float64
+	openaiOpaqueRouteEpochMu sync.Mutex
+	openaiOpaqueRouteEpochs  map[string]openAIOpaqueRouteEpochLocalState
 	// openaiCodexTurnStateOrigins: 下游会话 seed → openAICodexTurnStateOrigin，
 	// 记录最近一次向该会话下发 x-codex-turn-state 的铸造账号，供出站守卫
 	// 剥离跨账号回带（openai_codex_turn_state.go）。

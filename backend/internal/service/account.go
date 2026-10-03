@@ -2109,6 +2109,18 @@ func (a *Account) IsOpenAIPassthroughEnabled() bool {
 	return false
 }
 
+// IsOpenAIOpaqueUpstream reports API-key routes whose upstream is itself an
+// account aggregator. Its hidden account choice cannot be excluded locally, so
+// confirmed per-session integrity failures use a route-epoch rekey instead of
+// quarantining the whole local account.
+func (a *Account) IsOpenAIOpaqueUpstream() bool {
+	if a == nil || !a.IsOpenAIApiKey() || a.Extra == nil {
+		return false
+	}
+	enabled, _ := a.Extra["openai_opaque_upstream"].(bool)
+	return enabled
+}
+
 // IsOpenAIResponsesWebSocketV2Enabled 返回 OpenAI 账号是否开启 Responses WebSocket v2。
 //
 // 分类型新字段：

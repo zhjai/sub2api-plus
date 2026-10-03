@@ -18,7 +18,7 @@ func WithOpenAIExecCapability(ctx context.Context, body []byte) context.Context 
 // separate namespace from generic account/model health. A completed ordinary
 // chat request neither clears nor trips the exec breaker.
 func (s *OpenAIGatewayService) ObserveOpenAIExecCapabilityResult(account *Account, canonicalModel string, result *OpenAIForwardResult, sessionHash ...string) {
-	if s == nil || account == nil || result == nil {
+	if s == nil || account == nil || result == nil || account.IsOpenAIOpaqueUpstream() {
 		return
 	}
 	if result.ExecCallObserved {
@@ -38,14 +38,14 @@ func (s *OpenAIGatewayService) ObserveOpenAIExecCapabilityResult(account *Accoun
 // ObserveOpenAIExecCapabilityFailure is the equivalent hook for the generic
 // Responses gateway result type.
 func (s *OpenAIGatewayService) ObserveOpenAIExecCapabilityFailure(account *Account, canonicalModel string, failed bool) {
-	if s == nil || account == nil || !failed {
+	if s == nil || account == nil || !failed || account.IsOpenAIOpaqueUpstream() {
 		return
 	}
 	s.getOpenAIAccountModelTransientState().recordFailure(account.ID, canonicalModel, time.Now(), openAITransientCapabilityExec)
 }
 
 func (s *OpenAIGatewayService) ObserveOpenAIExecProtocolLeak(account *Account, canonicalModel, sessionHash string) {
-	if s == nil || account == nil {
+	if s == nil || account == nil || account.IsOpenAIOpaqueUpstream() {
 		return
 	}
 	s.getOpenAIAccountModelTransientState().recordDistinctSessionFailure(account.ID, canonicalModel, time.Now(), sessionHash, openAITransientCapabilityExec)

@@ -55,6 +55,13 @@ type openAIWSTurnChannelMappingSnapshot struct {
 	mapping service.ChannelMappingResult
 }
 
+type openAIWSTurnRouteSnapshot struct {
+	turn   int
+	model  string
+	effort string
+	epoch  service.OpenAIOpaqueRouteEpochState
+}
+
 func advanceOpenAIWSCyberBlockState(blocked, pending, marked bool, turnErr error) (bool, bool) {
 	var failoverErr *service.UpstreamFailoverError
 	isFailover := errors.As(turnErr, &failoverErr)
@@ -539,6 +546,8 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		)
 		if ownershipErr != nil {
 			reqLog.Warn("openai.previous_response_owner_lookup_failed", zap.Error(ownershipErr))
+			h.errorResponse(c, http.StatusServiceUnavailable, "service_unavailable", "previous_response_id ownership is temporarily unavailable")
+			return
 		}
 		if !owned {
 			reqLog.Warn("openai.request_validation_failed", zap.String("reason", "previous_response_owner_mismatch"))
@@ -661,6 +670,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	if effort := service.RequestedReasoningEffortFromContext(c.Request.Context()); effort != nil {
 		requestedEffort = *effort
 	}
+	routeGroupID := int64(0)
+	if apiKey.GroupID != nil {
+		routeGroupID = *apiKey.GroupID
+	}
 	escapeRouteState := h.gatewayService.OpenAISessionEscapeRouteStateForRequest(apiKey.GroupID, routeSessionHash, reqModel, requestedEffort)
 	for _, escapedID := range escapeRouteState.AccountIDs {
 		failedAccountIDs[escapedID] = struct{}{}
@@ -671,6 +684,33 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		))
 	}
 	sameAccountRetryCount := make(map[int64]int)
+	opaqueEpochRetryCount := make(map[int64]int)
+	opaqueEpochRetryTotal := 0
+	bumpOpaqueRouteEpoch := func(account *service.Account, expectedEpoch int64, signal string, preCommit bool) (service.OpenAIOpaqueRouteEpochState, bool) {
+		if account == nil || !account.IsOpenAIOpaqueUpstream() {
+			return service.OpenAIOpaqueRouteEpochState{}, false
+		}
+		state, advanced, bumpErr := h.gatewayService.BumpOpenAIOpaqueRouteEpoch(
+			c.Request.Context(), routeGroupID, routeSessionHash, reqModel, requestedEffort, account.ID, expectedEpoch,
+		)
+		fields := []zap.Field{
+			zap.Int64("account_id", account.ID),
+			zap.String("escape_signal", signal),
+			zap.Bool("pre_commit", preCommit),
+			zap.Int64("route_epoch_from", expectedEpoch),
+			zap.Int64("route_epoch_to", state.Epoch),
+			zap.Int("route_epoch_bumps", state.Bumps),
+			zap.Bool("previous_response_id_present", previousResponseID != ""),
+			zap.Bool("advanced", advanced),
+		}
+		if bumpErr != nil {
+			fields = append(fields, zap.Error(bumpErr))
+			reqLog.Warn("openai.opaque_route_epoch_cache_fallback", fields...)
+		} else {
+			reqLog.Warn("openai.opaque_route_epoch_updated", fields...)
+		}
+		return state, advanced
+	}
 	var lastFailoverErr *service.UpstreamFailoverError
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 	var passthroughFailoverState openAIPassthroughFailoverState
@@ -682,6 +722,32 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	// 该判断已排除 Codex 被动 image_gen namespace，避免 CC-only 账号被误过滤（#4476）。
 	needsResponses := nativeV2 || legacyCompact
 	requiredCapability := openAIResponsesRequiredCapabilityForRequest(imageIntent, needsResponses, requestPlatform)
+
+	// Resolve a durable previous-response owner before account selection.  An
+	// opaque response is tied to its creating account and route epoch, so even a
+	// reconstructable input must not silently migrate it to another account.
+	var previousResponseOwner *service.Account
+	var previousResponseOwnerBound bool
+	if previousResponseID != "" && requestPlatform == service.PlatformOpenAI {
+		owner, bound, ownerErr := h.gatewayService.ResolveOpenAIPreviousResponseOwner(
+			c.Request.Context(), apiKey.GroupID, previousResponseID,
+		)
+		if ownerErr != nil {
+			reqLog.Warn("openai.previous_response_owner_lookup_failed", zap.Error(ownerErr))
+			h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "service_unavailable", "previous_response_id owner is unavailable for this continuation", streamStarted)
+			return
+		}
+		if !bound || owner == nil {
+			reqLog.Warn("openai.previous_response_owner_unavailable",
+				zap.String("reason", "bound_owner_missing"),
+				zap.String("previous_response_id_kind", service.ClassifyOpenAIPreviousResponseIDKind(previousResponseID)),
+			)
+			h.handleStreamingAwareError(c, http.StatusBadRequest, "invalid_request_error", "previous_response_id owner is unavailable for this continuation", streamStarted)
+			return
+		}
+		previousResponseOwner = owner
+		previousResponseOwnerBound = bound
+	}
 
 	// 分组利润控制：请求级装配定价上下文——pricingAt 固定本请求的
 	// D 与计费高峰因子，选号、槽位终检与全部 failover 重入共用同一门与阈值。
@@ -765,6 +831,22 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			zap.Float64("load_skew", scheduleDecision.LoadSkew),
 		)
 		account := selection.Account
+		if previousResponseOwnerBound && previousResponseOwner != nil &&
+			previousResponseOwner.IsOpenAIOpaqueUpstream() && account.ID != previousResponseOwner.ID {
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+				selection.ReleaseFunc = nil
+			}
+			reqLog.Warn("openai.previous_response_owner_unavailable",
+				zap.String("reason", "opaque_owner_account_mismatch"),
+				zap.Int64("owner_account_id", previousResponseOwner.ID),
+				zap.Int64("selected_account_id", account.ID),
+				zap.String("previous_response_id_kind", service.ClassifyOpenAIPreviousResponseIDKind(previousResponseID)),
+			)
+			status, errorType := openAIPreviousResponseOwnerUnavailableStatus(previousResponseOwner)
+			h.handleStreamingAwareError(c, status, errorType, "previous_response_id owner is unavailable for this continuation", streamStarted)
+			return
+		}
 		if previousResponseID != "" && requestPlatform == service.PlatformOpenAI &&
 			!scheduleDecision.StickyPreviousHit && !previousResponseCanMove {
 			// The request still depends on opaque upstream continuation state, but
@@ -825,6 +907,21 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		}
 
 		// Forward request
+		routeEpochState, routeEpochErr := h.gatewayService.PrepareOpenAIOpaqueRouteEpochAttempt(
+			c.Request.Context(), c, routeGroupID, routeSessionHash, reqModel, requestedEffort, account, previousResponseID,
+		)
+		if routeEpochErr != nil {
+			if accountReleaseFunc != nil {
+				accountReleaseFunc()
+				accountReleaseFunc = nil
+			}
+			if errors.Is(routeEpochErr, service.ErrOpenAIOpaqueRouteEpochBindingUnavailable) {
+				h.handleStreamingAwareError(c, http.StatusBadRequest, "invalid_request_error", "previous_response_id owner is unavailable for this continuation", streamStarted)
+			} else {
+				h.handleStreamingAwareError(c, http.StatusServiceUnavailable, "service_unavailable", "previous_response_id owner is unavailable for this continuation", streamStarted)
+			}
+			return
+		}
 		service.SetOpsLatencyMs(c, service.OpsRoutingLatencyMsKey, time.Since(routingStart).Milliseconds())
 		forwardStart := time.Now()
 		// 用扣除非语义心跳字节的口径快照：心跳注释不构成语义响应，
@@ -937,6 +1034,54 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					if failoverErr.Reason == service.OpenAIExecProtocolLeakReason {
 						h.gatewayService.ObserveOpenAIExecProtocolLeak(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, result), routeSessionHash)
 					}
+					mayFailover := openAIForwardMayFailover(c, writerSizeBeforeForward, failoverErr)
+					if failoverErr.OpaqueRouteEpochEligible && account.IsOpenAIOpaqueUpstream() {
+						_, advanced := bumpOpaqueRouteEpoch(account, routeEpochState.Epoch, failoverErr.IntegritySignal, true)
+						if previousResponseID != "" {
+							reqLog.Warn("openai.opaque_route_epoch_deferred_continuation",
+								zap.Int64("account_id", account.ID),
+								zap.String("escape_signal", failoverErr.IntegritySignal),
+							)
+							h.handleFailoverExhausted(c, failoverErr, c.Writer.Written())
+							return
+						}
+						if mayFailover && advanced && opaqueEpochRetryCount[account.ID] < 1 && opaqueEpochRetryTotal < 2 && switchCount < maxAccountSwitches {
+							opaqueEpochRetryCount[account.ID]++
+							opaqueEpochRetryTotal++
+							switchCount++
+							lastFailoverErr = failoverErr
+							reqLog.Warn("openai.opaque_route_epoch_retry",
+								zap.Int64("account_id", account.ID),
+								zap.String("escape_signal", failoverErr.IntegritySignal),
+								zap.Int("epoch_retry_count", opaqueEpochRetryCount[account.ID]),
+								zap.Int("switch_count", switchCount),
+							)
+							continue
+						}
+						if !mayFailover || !failoverErr.ShouldRetryNextAccount() || switchCount >= maxAccountSwitches {
+							h.handleFailoverExhausted(c, failoverErr, c.Writer.Written())
+							return
+						}
+						// Epoch retry is unavailable or already used. Exclude this account
+						// only for the current request and let the normal selector try any
+						// other local account. No persistent session escape is written here.
+						h.gatewayService.RecordOpenAIAccountSwitch()
+						failedAccountIDs[account.ID] = struct{}{}
+						lastFailoverErr = failoverErr
+						switchCount++
+						reqLog.Warn("openai.opaque_route_epoch_switching_local_account",
+							zap.Int64("account_id", account.ID),
+							zap.String("escape_signal", failoverErr.IntegritySignal),
+							zap.Int("switch_count", switchCount),
+							zap.Int("max_switches", maxAccountSwitches),
+						)
+						continue
+					}
+					if failoverErr.Reason == service.OpenAIUpstreamModelMismatchFailoverReason {
+						h.gatewayService.QuarantineOpenAIUpstreamModelMismatch(
+							c.Request.Context(), account, failoverErr.IntegritySentModel, failoverErr.IntegrityResponseModel,
+						)
+					}
 					if failoverErr.SessionAccountEscape {
 						if escapeErr := h.gatewayService.EscapeOpenAISessionAccountForRequest(c.Request.Context(), apiKey.GroupID, routeSessionHash, reqModel, requestedEffort, account.ID, account.BillingRateMultiplier()); escapeErr != nil {
 							reqLog.Warn("openai.session_account_escape_failed", zap.Int64("account_id", account.ID), zap.Error(escapeErr))
@@ -950,7 +1095,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 						)
 						return
 					}
-					if !openAIForwardMayFailover(c, writerSizeBeforeForward, failoverErr) {
+					if !mayFailover {
 						h.gatewayService.ObserveOpenAIAccountHealthFailure(c.Request.Context(), account, err)
 						h.handleFailoverExhausted(c, failoverErr, true)
 						return
@@ -1041,10 +1186,14 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					zap.Error(err),
 				}
 				if result != nil && result.RequiresSessionAccountEscape() {
-					if escapeErr := h.gatewayService.EscapeOpenAISessionAccountForRequest(c.Request.Context(), apiKey.GroupID, routeSessionHash, reqModel, requestedEffort, account.ID, account.BillingRateMultiplier()); escapeErr != nil {
-						reqLog.Warn("openai.session_account_escape_failed", zap.Int64("account_id", account.ID), zap.Error(escapeErr))
+					if account.IsOpenAIOpaqueUpstream() {
+						bumpOpaqueRouteEpoch(account, routeEpochState.Epoch, service.OpenAIIntegritySignalStreamEnded, false)
 					} else {
-						reqLog.Warn("openai.session_account_escaped", zap.Int64("account_id", account.ID), zap.String("reason", result.ResponsesIncompleteReason))
+						if escapeErr := h.gatewayService.EscapeOpenAISessionAccountForRequest(c.Request.Context(), apiKey.GroupID, routeSessionHash, reqModel, requestedEffort, account.ID, account.BillingRateMultiplier()); escapeErr != nil {
+							reqLog.Warn("openai.session_account_escape_failed", zap.Int64("account_id", account.ID), zap.Error(escapeErr))
+						} else {
+							reqLog.Warn("openai.session_account_escaped", zap.Int64("account_id", account.ID), zap.String("reason", result.ResponsesIncompleteReason))
+						}
 					}
 				}
 				submitResponsesUsage(result)
@@ -1058,7 +1207,20 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		}
 		if result != nil {
 			h.gatewayService.ObserveOpenAIExecCapabilityResult(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, result), result, routeSessionHash)
-			if result.RequiresSessionAccountEscape() {
+			mismatchErr := result.UpstreamModelMismatchError()
+			opaqueIntegritySignal := ""
+			if account.IsOpenAIOpaqueUpstream() {
+				if result.ToolCapabilityFailure {
+					opaqueIntegritySignal = service.OpenAIIntegritySignalExecLeak
+				} else if mismatchErr != nil {
+					opaqueIntegritySignal = service.OpenAIIntegritySignalModelMismatch
+				} else if result.RequiresSessionAccountEscape() {
+					opaqueIntegritySignal = service.OpenAIIntegritySignalStreamEnded
+				}
+			}
+			if opaqueIntegritySignal != "" {
+				bumpOpaqueRouteEpoch(account, routeEpochState.Epoch, opaqueIntegritySignal, false)
+			} else if result.RequiresSessionAccountEscape() {
 				if escapeErr := h.gatewayService.EscapeOpenAISessionAccountForRequest(c.Request.Context(), apiKey.GroupID, routeSessionHash, reqModel, requestedEffort, account.ID, account.BillingRateMultiplier()); escapeErr != nil {
 					reqLog.Warn("openai.session_account_escape_failed",
 						zap.Int64("account_id", account.ID), zap.Error(escapeErr))
@@ -1072,11 +1234,16 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			if account.Type == service.AccountTypeOAuth && !account.IsShadow() {
 				h.gatewayService.UpdateCodexUsageSnapshotFromHeaders(c.Request.Context(), account.ID, result.ResponseHeaders)
 			}
-			mismatchErr := result.UpstreamModelMismatchError()
 			if mismatchErr != nil {
-				h.gatewayService.QuarantineOpenAIUpstreamModelMismatch(c.Request.Context(), account, result.UpstreamSentModelForAudit(), result.UpstreamResponseModel)
+				if !account.IsOpenAIOpaqueUpstream() {
+					h.gatewayService.QuarantineOpenAIUpstreamModelMismatch(c.Request.Context(), account, result.UpstreamSentModelForAudit(), result.UpstreamResponseModel)
+				}
 			}
-			h.gatewayService.ReportOpenAIAccountScheduleResultForRequest(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, result), result, openAIForwardSucceededForScheduling(result), result.FirstTokenMs, mismatchErr)
+			if account.IsOpenAIOpaqueUpstream() && mismatchErr != nil {
+				h.gatewayService.ReportOpenAIAccountScheduleResultForRequest(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, result), result, false, result.FirstTokenMs)
+			} else {
+				h.gatewayService.ReportOpenAIAccountScheduleResultForRequest(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, result), result, openAIForwardSucceededForScheduling(result), result.FirstTokenMs, mismatchErr)
+			}
 		} else {
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, result), openAIForwardSucceededForScheduling(result), nil)
 		}
@@ -2512,6 +2679,18 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "invalid JSON payload")
 		return
 	}
+	clientLifecycleCtx, cancelClientLifecycle := context.WithCancelCause(clientLifecycleCtx)
+	ctx, cancelClientForward := context.WithCancelCause(ctx)
+	clientReader := service.NewOpenAIWSClientReader(wsConn, func(readErr error) {
+		cancelClientLifecycle(readErr)
+		cancelClientForward(readErr)
+	})
+	defer func() {
+		cancelClientLifecycle(context.Canceled)
+		cancelClientForward(context.Canceled)
+		clientReader.Close()
+	}()
+	c.Request = c.Request.WithContext(ctx)
 	reqModel := strings.TrimSpace(gjson.GetBytes(firstMessage, "model").String())
 	if reqModel == "" {
 		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "model is required in first response.create payload")
@@ -2697,12 +2876,25 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		firstMessage,
 		openAIWSIngressFallbackSessionSeed(subject.UserID, apiKey.ID, apiKey.GroupID),
 	)
+	wsRequestedEffort := ""
+	if effort := service.CanonicalRequestedReasoningEffort(firstMessage, reqModel); effort != nil {
+		wsRequestedEffort = *effort
+	}
+	var wsQualityResult atomic.Pointer[service.OpenAIForwardResult]
+	wsQualityResult.Store(&service.OpenAIForwardResult{Model: reqModel, RequestedReasoningEffort: service.CanonicalRequestedReasoningEffort(firstMessage, reqModel)})
+	wsRouteGroupID := int64(0)
+	if apiKey.GroupID != nil {
+		wsRouteGroupID = *apiKey.GroupID
+	}
 	ctx = service.WithOpenAIGuardianParentAffinity(ctx, c, firstMessage, reqModel)
 	maxAccountSwitches := h.maxAccountSwitches
 	switchCount := 0
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
+	opaqueEpochRetryCount := make(map[int64]int)
+	opaqueEpochRetryTotal := 0
+	currentOpaqueEpochState := service.OpenAIOpaqueRouteEpochState{}
 	var lastFailoverErr *service.UpstreamFailoverError
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 	wsAttemptMessage := append([]byte(nil), firstMessage...)
@@ -2733,8 +2925,51 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		if ctx.Err() != nil {
 			return false
 		}
+		if account != nil && account.IsOpenAIOpaqueUpstream() && failoverErr.OpaqueRouteEpochEligible {
+			releaseAccountSlot()
+			state, advanced, bumpErr := h.gatewayService.BumpOpenAIOpaqueRouteEpoch(
+				ctx, wsRouteGroupID, sessionHash, reqModel, wsRequestedEffort, account.ID, currentOpaqueEpochState.Epoch,
+			)
+			reqLog.Warn("openai.websocket_opaque_route_epoch_updated",
+				zap.Int64("account_id", account.ID),
+				zap.String("escape_signal", failoverErr.IntegritySignal),
+				zap.Int64("route_epoch_from", currentOpaqueEpochState.Epoch),
+				zap.Int64("route_epoch_to", state.Epoch),
+				zap.Int("route_epoch_bumps", state.Bumps),
+				zap.Bool("previous_response_id_present", previousResponseID != ""),
+				zap.Bool("advanced", advanced),
+				zap.Error(bumpErr),
+			)
+			if previousResponseID != "" {
+				closeOpenAIWSFailoverExhausted(c, wsConn, failoverErr)
+				return false
+			}
+			if advanced && opaqueEpochRetryCount[account.ID] < 1 && opaqueEpochRetryTotal < 2 && switchCount < maxAccountSwitches {
+				opaqueEpochRetryCount[account.ID]++
+				opaqueEpochRetryTotal++
+				switchCount++
+				lastFailoverErr = failoverErr
+				currentOpaqueEpochState = state
+				return ensureUserSlotHeld()
+			}
+			if !failoverErr.ShouldRetryNextAccount() || switchCount >= maxAccountSwitches {
+				closeOpenAIWSFailoverExhausted(c, wsConn, failoverErr)
+				return false
+			}
+			h.gatewayService.RecordOpenAIAccountSwitch()
+			failedAccountIDs[account.ID] = struct{}{}
+			lastFailoverErr = failoverErr
+			switchCount++
+			reqLog.Warn("openai.websocket_opaque_route_epoch_switching_local_account",
+				zap.Int64("account_id", account.ID),
+				zap.String("escape_signal", failoverErr.IntegritySignal),
+				zap.Int("switch_count", switchCount),
+				zap.Int("max_switches", maxAccountSwitches),
+			)
+			return ensureUserSlotHeld()
+		}
 		if failoverErr.ShouldReportAccountScheduleFailure() {
-			h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, wsForwardModel, false, nil), false, nil, failoverErr)
+			h.gatewayService.ReportOpenAIAccountScheduleResultForRequest(account, openAIAccountScheduleModel(c, account, wsForwardModel, false, nil), wsQualityResult.Load(), false, nil, failoverErr)
 		}
 		releaseAccountSlot()
 		if !failoverErr.ShouldRetryNextAccount() {
@@ -2776,6 +3011,31 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		requiredCapability = service.OpenAIEndpointCapabilityResponses
 	}
 
+	// Snapshot durable continuation ownership before scheduler selection. An
+	// unavailable opaque owner cannot be reconstructed on a fallback account.
+	var previousResponseOwner *service.Account
+	var previousResponseOwnerBound bool
+	if previousResponseID != "" && requestPlatform == service.PlatformOpenAI {
+		owner, bound, ownerErr := h.gatewayService.ResolveOpenAIPreviousResponseOwner(
+			ctx, apiKey.GroupID, previousResponseID,
+		)
+		if ownerErr != nil {
+			reqLog.Warn("openai.websocket_previous_response_owner_lookup_failed", zap.Error(ownerErr))
+			closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "previous_response_id owner is unavailable for this continuation")
+			return
+		}
+		if !bound || owner == nil {
+			reqLog.Warn("openai.websocket_previous_response_owner_unavailable",
+				zap.String("reason", "owner_unverifiable"),
+				zap.String("previous_response_id_kind", previousResponseIDKind),
+			)
+			closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "previous_response_id owner is unavailable for this continuation")
+			return
+		}
+		previousResponseOwner = owner
+		previousResponseOwnerBound = bound
+	}
+
 	// 分组利润控制：WS 桥按连接装配定价上下文并装门（选号与抢槽共用该
 	// ctx）。连接内不重选号，但每个 turn 开始经 BeforeTurn 重新冻结 pricingAt
 	// 并按最新门复核当前账号（准入与计费同源），峰前建连保活不能让后续 turn
@@ -2783,6 +3043,8 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	// 建连时刻只用于选号/准入，不作为任何 turn 的计费定价时刻。
 	wsPricingCtx, _ := h.gatewayService.WithOpenAIRequestPricingContext(ctx, apiKey.GroupID)
 	wsPricingCtx = service.WithOpenAIExecCapability(wsPricingCtx, firstMessage)
+	wsPricingCtx = service.WithOpenAIClientRequestedModel(wsPricingCtx, reqModel)
+	wsPricingCtx = service.WithRequestedReasoningEffort(wsPricingCtx, wsRequestedEffort)
 	ctx = wsPricingCtx
 
 	for {
@@ -2826,6 +3088,37 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		}
 
 		account := selection.Account
+		if previousResponseOwnerBound && previousResponseOwner != nil && previousResponseOwner.IsOpenAIOpaqueUpstream() && account.ID != previousResponseOwner.ID {
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			status := coderws.StatusPolicyViolation
+			if ownerStatus, _ := openAIPreviousResponseOwnerUnavailableStatus(previousResponseOwner); ownerStatus == http.StatusServiceUnavailable {
+				status = coderws.StatusTryAgainLater
+			}
+			closeOpenAIClientWS(wsConn, status, "previous_response_id owner is unavailable for this continuation")
+			return
+		}
+		var routeEpochErr error
+		currentOpaqueEpochState, routeEpochErr = h.gatewayService.PrepareOpenAIOpaqueRouteEpochAttempt(
+			ctx, c, wsRouteGroupID, sessionHash, reqModel, wsRequestedEffort, account, previousResponseID,
+		)
+		if routeEpochErr != nil {
+			// The selection's release function is not installed in
+			// currentAccountRelease until after this pre-admission check. Release
+			// it directly here so a route-epoch lookup failure cannot leak the
+			// scheduler-acquired account slot.
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+				selection.ReleaseFunc = nil
+			}
+			if errors.Is(routeEpochErr, service.ErrOpenAIOpaqueRouteEpochBindingUnavailable) {
+				closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "previous_response_id owner is unavailable for this continuation")
+			} else {
+				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "previous_response_id owner is temporarily unavailable")
+			}
+			return
+		}
 		accountMaxConcurrency := account.Concurrency
 		if selection.WaitPlan != nil && selection.WaitPlan.MaxConcurrency > 0 {
 			accountMaxConcurrency = selection.WaitPlan.MaxConcurrency
@@ -2947,6 +3240,8 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		// turn-tagged slot preserves the exact mapping used for the in-flight request.
 		var turnChannelMapping atomic.Pointer[openAIWSTurnChannelMappingSnapshot]
 		turnChannelMapping.Store(&openAIWSTurnChannelMappingSnapshot{turn: 1, mapping: channelMappingWS})
+		var turnRoute atomic.Pointer[openAIWSTurnRouteSnapshot]
+		turnRoute.Store(&openAIWSTurnRouteSnapshot{turn: 1, model: reqModel, effort: wsRequestedEffort, epoch: currentOpaqueEpochState})
 		// turn 级定价：首轮回退到 TurnStarted 的所属 turn 时刻；后续 turn 由
 		// BeforeTurn 重新冻结 pricingAt 并按最新门复核当前账号。
 		var turnPricing openAIWSTurnPricing
@@ -2957,6 +3252,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		}
 		hooks := &service.OpenAIWSIngressHooks{
 			ClientLifecycleContext:      clientLifecycleCtx,
+			ClientReader:                clientReader,
 			InitialRequestModel:         reqModel,
 			InitialTurnStartedAt:        firstTurnStartedAt,
 			MaxReasoningEffort:          maxReasoningEffort,
@@ -2986,6 +3282,16 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				if model == "" {
 					model = reqModel
 				}
+				requestedEffort := service.CanonicalRequestedReasoningEffort(payload, model)
+				wsQualityResult.Store(&service.OpenAIForwardResult{Model: model, RequestedReasoningEffort: requestedEffort})
+				route := &openAIWSTurnRouteSnapshot{turn: turn, model: model}
+				if requestedEffort != nil {
+					route.effort = *requestedEffort
+				}
+				if account.IsOpenAIOpaqueUpstream() {
+					route.epoch = h.gatewayService.SnapshotOpenAIOpaqueRouteEpoch(ctx, wsRouteGroupID, sessionHash, model, route.effort, account.ID)
+				}
+				turnRoute.Store(route)
 				// 分组级模型白名单：后续 turn 同样校验客户端模型（省略 model 时
 				// 沿用会话实际生效模型，含 session.update 轮换后的模型），不通过
 				// 则关闭整条连接，与推理强度 deny 一致。实际生效模型始终参与校验；
@@ -3114,6 +3420,45 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					cyberMarked && !h.cyberPolicyLogOnly(c, apiKey),
 					turnErr,
 				)
+				if result != nil && !result.ClientDisconnect && ctx.Err() == nil {
+					var failoverErr *service.UpstreamFailoverError
+					transparentFailover := errors.As(turnErr, &failoverErr) && failoverErr != nil
+					// Transparent attempts are handled by the failover loop. All
+					// committed/closed turns update only subsequent root routing.
+					if !transparentFailover {
+						h.gatewayService.ObserveOpenAIExecCapabilityResult(account, turnUpstreamModel, result, sessionHash)
+						signal := ""
+						if (result.ToolCapabilityFailure || result.PrecommitExecProtocolLeak) && result.RequiresSessionAccountEscape() {
+							signal = service.OpenAIIntegritySignalExecLeak
+						} else if result.UpstreamModelMismatchError() != nil {
+							signal = service.OpenAIIntegritySignalModelMismatch
+						} else if result.RequiresSessionAccountEscape() {
+							signal = service.OpenAIIntegritySignalStreamEnded
+						}
+						if account.IsOpenAIOpaqueUpstream() && signal != "" {
+							if route := turnRoute.Load(); route != nil && route.turn == turn {
+								state, advanced, bumpErr := h.gatewayService.BumpOpenAIOpaqueRouteEpoch(
+									ctx, wsRouteGroupID, sessionHash, route.model, route.effort, account.ID, route.epoch.Epoch,
+								)
+								reqLog.Warn("openai.websocket_opaque_route_epoch_post_commit",
+									zap.Int64("account_id", account.ID), zap.String("escape_signal", signal),
+									zap.String("requested_model", route.model), zap.String("requested_effort", route.effort),
+									zap.Int64("route_epoch_to", state.Epoch), zap.Bool("advanced", advanced), zap.Error(bumpErr))
+							}
+						} else if !account.IsOpenAIOpaqueUpstream() {
+							if mismatchErr := result.UpstreamModelMismatchError(); mismatchErr != nil {
+								h.gatewayService.QuarantineOpenAIUpstreamModelMismatch(ctx, account, result.UpstreamSentModelForAudit(), result.UpstreamResponseModel)
+							}
+							if result.RequiresSessionAccountEscape() {
+								if route := turnRoute.Load(); route != nil && route.turn == turn {
+									if escapeErr := h.gatewayService.EscapeOpenAISessionAccountForRequest(ctx, apiKey.GroupID, sessionHash, route.model, route.effort, account.ID, account.BillingRateMultiplier()); escapeErr != nil {
+										reqLog.Warn("openai.websocket_session_account_escape_failed", zap.Int64("account_id", account.ID), zap.Error(escapeErr))
+									}
+								}
+							}
+						}
+					}
+				}
 				if turnErr != nil {
 					if result == nil || result.ImageCount <= 0 {
 						return
@@ -3148,10 +3493,11 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					scheduleModel = turnRequestedModel
 				}
 				mismatchErr := result.UpstreamModelMismatchError()
-				if mismatchErr != nil {
-					h.gatewayService.QuarantineOpenAIUpstreamModelMismatch(ctx, account, result.UpstreamSentModelForAudit(), result.UpstreamResponseModel)
+				if account.IsOpenAIOpaqueUpstream() && mismatchErr != nil {
+					h.gatewayService.ReportOpenAIAccountScheduleResultForRequest(account, scheduleModel, result, false, result.FirstTokenMs)
+				} else {
+					h.gatewayService.ReportOpenAIAccountScheduleResultForRequest(account, scheduleModel, result, openAIForwardSucceededForScheduling(result), result.FirstTokenMs, mismatchErr)
 				}
-				h.gatewayService.ReportOpenAIAccountScheduleResult(account, scheduleModel, openAIForwardSucceededForScheduling(result), result.FirstTokenMs, mismatchErr)
 				inboundEndpoint := GetInboundEndpoint(c)
 				upstreamEndpoint := resolveOpenAIUpstreamEndpoint(c, account, result)
 				quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
@@ -3193,6 +3539,29 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		// 故剥离首包里的 previous_response_id，改用首包内 input 重建上下文；带 function_call_output 的
 		// 工具续链无法重建，保持原样。仅作用于首轮首包，后续 turn 的续链由 WS 转发层既有逻辑处理。
 		if previousResponseID != "" && !scheduleDecision.StickyPreviousHit && previousResponseCanMove {
+			// A durable response binding is authoritative even when the account
+			// record has since disappeared.  A missing owner cannot be proven
+			// portable, so fail closed instead of stripping previous_response_id
+			// and reconstructing the turn on another account.
+			if previousResponseOwnerBound && !openAIWebSocketContinuationMayReconstruct(previousResponseOwner) {
+				releaseAccountSlot()
+				ownerID := int64(0)
+				if previousResponseOwner != nil {
+					ownerID = previousResponseOwner.ID
+				}
+				reqLog.Warn("openai.websocket_previous_response_owner_unavailable",
+					zap.String("reason", "opaque_owner_not_schedulable"),
+					zap.Int64("owner_account_id", ownerID),
+					zap.Int64("selected_account_id", account.ID),
+					zap.String("previous_response_id_kind", service.ClassifyOpenAIPreviousResponseIDKind(previousResponseID)),
+				)
+				closeStatus := coderws.StatusPolicyViolation
+				if status, _ := openAIPreviousResponseOwnerUnavailableStatus(previousResponseOwner); status == http.StatusServiceUnavailable {
+					closeStatus = coderws.StatusTryAgainLater
+				}
+				closeOpenAIClientWS(wsConn, closeStatus, "previous_response_id owner is unavailable for this continuation")
+				return
+			}
 			wsFirstMessage = service.RemovePreviousResponseIDFromBody(wsFirstMessage)
 			reqLog.Debug("openai.websocket_previous_response_id_stripped_cross_group",
 				zap.Int64("account_id", account.ID),
@@ -3223,12 +3592,46 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				retryPayload, retryCurrentTurn := service.OpenAIWSCurrentTurnRetryPayload(err)
 				nextAttemptMessage, retrySafe := openAIWSNextAttemptMessage(wsAttemptMessage, retryPayload, retryCurrentTurn)
 				if !retrySafe {
+					if account.IsOpenAIOpaqueUpstream() && failoverErr.OpaqueRouteEpochEligible {
+						if route := turnRoute.Load(); route != nil {
+							state, advanced, bumpErr := h.gatewayService.BumpOpenAIOpaqueRouteEpoch(ctx, wsRouteGroupID, sessionHash, route.model, route.effort, account.ID, route.epoch.Epoch)
+							reqLog.Warn("openai.websocket_opaque_route_epoch_before_close", zap.Int64("account_id", account.ID),
+								zap.String("requested_model", route.model), zap.String("requested_effort", route.effort),
+								zap.Int64("route_epoch_to", state.Epoch), zap.Bool("advanced", advanced), zap.Error(bumpErr))
+						}
+					}
 					closeOpenAIWSFailoverExhausted(c, wsConn, failoverErr)
 					return
 				}
 				wsAttemptMessage = nextAttemptMessage
 				if retryCurrentTurn {
+					// Payloads can contain mapped effort. The immutable admission
+					// snapshot retains this turn's original scheduling dimensions.
+					route := turnRoute.Load()
+					if route == nil || strings.TrimSpace(route.model) == "" {
+						closeOpenAIWSFailoverExhausted(c, wsConn, failoverErr)
+						return
+					}
+					reqModel, wsRequestedEffort = route.model, route.effort
+					currentOpaqueEpochState = route.epoch
+					if apiKey.Group == nil || apiKey.Group.Platform != service.PlatformComposite {
+						wsRouteModel = reqModel
+					}
+					channelMappingWS, _ = h.gatewayService.ResolveChannelMappingAndRestrict(ctx, apiKey.GroupID, wsRouteModel)
+					wsForwardModel = openAIChannelForwardModel(channelMappingWS, wsRouteModel)
 					previousResponseID = ""
+					previousResponseOwner, previousResponseOwnerBound = nil, false
+					coverage := service.AnalyzeToolCallOutputContextCoverageBytes(wsAttemptMessage)
+					previousResponseCanMove = !coverage.HasFunctionCallOutput || coverage.ContextCoversAllCallIDs
+					imageIntent = service.IsExplicitImageGenerationIntent("/v1/responses", reqModel, wsAttemptMessage)
+					requiredCapability = service.OpenAIEndpointCapabilityChatCompletions
+					if imageIntent && requestPlatform == service.PlatformOpenAI {
+						requiredCapability = service.OpenAIEndpointCapabilityResponses
+					}
+					ctx = service.WithOpenAIExecCapability(ctx, wsAttemptMessage)
+					ctx = service.WithOpenAIClientRequestedModel(ctx, reqModel)
+					ctx = service.WithRequestedReasoningEffort(ctx, wsRequestedEffort)
+					setOpsRequestContext(c, reqModel, true)
 					reqLog.Warn("openai.websocket_current_turn_failover_retry",
 						zap.Int64("account_id", account.ID),
 						zap.Int("upstream_status", failoverErr.StatusCode),
@@ -3237,7 +3640,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				}
 				if waitForWSSameAccountRetry(account, failoverErr) {
 					if failoverErr.ShouldReportAccountScheduleFailure() {
-						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, wsForwardModel, false, nil), false, nil, err)
+						h.gatewayService.ReportOpenAIAccountScheduleResultForRequest(account, openAIAccountScheduleModel(c, account, wsForwardModel, false, nil), wsQualityResult.Load(), false, nil, err)
 					}
 					if !ensureUserSlotHeld() {
 						return
@@ -3294,7 +3697,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			}
 
 			if shouldReportOpenAIWSProxyAccountFailure(err) {
-				h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, wsForwardModel, false, nil), false, nil, err)
+				h.gatewayService.ReportOpenAIAccountScheduleResultForRequest(account, openAIAccountScheduleModel(c, account, wsForwardModel, false, nil), wsQualityResult.Load(), false, nil, err)
 			}
 			closeStatus, closeReason := summarizeWSCloseErrorForLog(err)
 			proxyFailedFields := []zap.Field{
@@ -3323,6 +3726,22 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		}
 	}
 
+}
+
+// openAIWebSocketContinuationMayReconstruct is deliberately fail-closed for
+// a stored response binding.  A normal provider response can be reconstructed
+// from the request input when its owner is unavailable, but an opaque upstream
+// response is tied to the creating account/connection/route epoch.  A missing
+// owner record cannot prove portability, so it must not be stripped.
+func openAIPreviousResponseOwnerUnavailableStatus(owner *service.Account) (int, string) {
+	if owner != nil && owner.Status == service.StatusActive {
+		return http.StatusServiceUnavailable, "service_unavailable"
+	}
+	return http.StatusBadRequest, "invalid_request_error"
+}
+
+func openAIWebSocketContinuationMayReconstruct(owner *service.Account) bool {
+	return owner != nil && !owner.IsOpenAIOpaqueUpstream()
 }
 
 func (h *OpenAIGatewayHandler) recoverResponsesPanic(c *gin.Context, streamStarted *bool) {

@@ -251,7 +251,9 @@ func prepareOpenAIWSHTTPBridgeBody(account *Account, payload []byte) ([]byte, er
 	}
 	delete(body, "type")
 	delete(body, "generate")
-	delete(body, "previous_response_id")
+	if account == nil || !account.IsOpenAIOpaqueUpstream() {
+		delete(body, "previous_response_id")
+	}
 	deleteOpenAIResponsesNoneReasoningEffortFromObject(account, body)
 	body["stream"] = true
 	return json.Marshal(body)
@@ -433,6 +435,11 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	if writeClientMessage == nil {
 		return nil, errors.New("client websocket writer is nil")
 	}
+	if turn > 1 {
+		if err := s.validateOpenAIWSTurnContinuation(ctx, c, account, payload); err != nil {
+			return nil, err
+		}
+	}
 	responseModelObserver := &upstreamResponseModelObserver{}
 
 	body, err := prepareOpenAIWSHTTPBridgeBody(account, payload)
@@ -489,9 +496,11 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		}
 	}
 
+	upstreamCtx, cancelUpstream := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelUpstream()
+	stopCancelUpstream := context.AfterFunc(ctx, cancelUpstream)
+	defer stopCancelUpstream()
 	buildUpstreamRequest := func(requestBody []byte) (*http.Request, error) {
-		upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
-		defer releaseUpstreamCtx()
 		var upstreamReq *http.Request
 		var buildErr error
 		if account.Platform == PlatformGrok {
@@ -549,6 +558,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		if buildErr != nil {
 			return nil, buildErr
 		}
+		setOpenAIExecContract(c, body, true)
 		resp, err = s.doOpenAIUpstream(upstreamReq, proxyURL, account)
 		if err != nil {
 			if turn == 1 {
@@ -613,9 +623,12 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		}
 		return nil, fmt.Errorf("upstream http bridge error: status=%d message=%s", resp.StatusCode, upstreamMsg)
 	}
-	defer func() { _ = resp.Body.Close() }()
-	stopCancelBody := context.AfterFunc(ctx, func() { _ = resp.Body.Close() })
-	defer stopCancelBody()
+	defer func() {
+		// The tool restorer may still be reading. Abort transport EOF handoff
+		// before closing its body so the next keepalive request cannot stall.
+		cancelUpstream()
+		_ = resp.Body.Close()
+	}()
 	if account.Platform == PlatformGrok {
 		s.updateGrokUsageFromResponse(withGrokTeamRateLimitModel(ctx, resolveGrokWSUpstreamModel(account, body, originalModel)), account, resp.Header, resp.StatusCode)
 	}
@@ -638,6 +651,8 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	pendingClientMessageBytes := int64(0)
 	capacityFailoverSuppressedLogged := false
 	clientDisconnected := false
+	integrity := newOpenAIWSIntegrityEvidence(payload, body)
+	upstreamTerminated := false
 	officialOpenAIResponses := account != nil && account.Platform == PlatformOpenAI
 	bareErrorPending := false
 	var bareErrorPayload []byte
@@ -665,13 +680,17 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			UpstreamResponseServiceTier:   responseModelObserver.ServiceTier(),
 			ServiceTier:                   resolvedOpenAIUpstreamServiceTierFromObserver(responseModelObserver, extractOpenAIServiceTierFromBody(body)),
 			ReasoningEffort:               ApplyThinkingEnabledFallback(extractOpenAIReasoningEffortFromBody(body, mappedModel, originalModel), body, mappedModel),
-			RequestedReasoningEffort:      CanonicalRequestedReasoningEffort(body, originalModel, mappedModel),
+			RequestedReasoningEffort:      CanonicalRequestedReasoningEffort(payload, originalModel, mappedModel),
 			Stream:                        reqStream,
 			OpenAIWSMode:                  true,
 			UpstreamTerminalEvent:         upstreamTerminalEvent,
 			ResponseHeaders:               cloneHeader(resp.Header),
 			Duration:                      time.Since(turnStart),
 			FirstTokenMs:                  firstTokenMs,
+		}
+		integrity.apply(result, upstreamTerminated, clientDisconnected || ctx.Err() != nil)
+		if upstreamTerminated {
+			result.RequestID = integrity.deliveredID()
 		}
 		if replayInput := replayCollector.Items(); len(replayInput) > 0 {
 			result.wsReplayInput = replayInput
@@ -760,7 +779,13 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			upstreamMessage = normalized
 		}
 		eventType, eventResponseID, _ := parseOpenAIWSEventEnvelope(upstreamMessage)
+		integrity.observe(eventType, upstreamMessage)
 		responseModelObserver.ObserveOpenAI(upstreamMessage, eventType)
+		if account.IsOpenAIOpaqueUpstream() && !clientDisconnected && !wroteDownstream {
+			if responseModel, mismatch := openAIPreCommitResponseModelMismatch(upstreamMessage, mappedModel); mismatch {
+				return resultWithUsage(), newOpenAIPreCommitModelMismatchFailoverError(mappedModel, responseModel)
+			}
+		}
 		if responseID == "" && eventResponseID != "" {
 			responseID = eventResponseID
 		}
@@ -878,57 +903,66 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			}
 		}
 		if !clientDisconnected && !suppressClientMessage {
-			isKeepalive := eventType == "keepalive"
-			stageBeforeSemanticOutput := turn == 1 && account.Platform == PlatformOpenAI && !wroteDownstream
-			commitStagedMessages := !stageBeforeSemanticOutput ||
-				openAIStreamDataStartsClientOutput(string(clientMessage), eventType) ||
-				isOpenAIWSTerminalEvent(eventType)
-			if stageBeforeSemanticOutput && !commitStagedMessages && !isKeepalive {
-				if pendingClientMessageBytes+int64(len(clientMessage)) > openAIFirstOutputStageMaxBytes {
-					return nil, s.newOpenAIStreamFailoverError(
-						c,
-						account,
-						true,
-						resp.Header.Get("x-request-id"),
-						nil,
-						"OpenAI WS HTTP bridge first-output staging limit exceeded",
-						resp.Header,
-					)
-				}
-				pendingClientMessages = append(pendingClientMessages, append([]byte(nil), clientMessage...))
-				pendingClientMessageBytes += int64(len(clientMessage))
-			} else {
-				// Keep the client connection alive without committing this attempt
-				// or exposing its staged lifecycle metadata.
-				var messages [][]byte
-				if !isKeepalive {
-					messages = pendingClientMessages
-					pendingClientMessages = nil
-					pendingClientMessageBytes = 0
-				}
-				messages = append(messages, clientMessage)
-				for _, message := range messages {
-					if err := writeClientMessage(message); err != nil {
-						if isOpenAIWSClientDisconnectError(err) {
-							clientDisconnected = true
-							closeStatus, closeReason := summarizeOpenAIWSReadCloseError(err)
-							logOpenAIWSModeInfo(
-								"ingress_ws_http_bridge_client_disconnected_drain account_id=%d turn=%d close_status=%s close_reason=%s",
-								account.ID,
-								turn,
-								closeStatus,
-								truncateOpenAIWSLogValue(closeReason, openAIWSHeaderValueMaxLen),
-							)
-							break
-						}
-						return nil, wrapOpenAIWSIngressTurnError(
-							"write_client",
-							fmt.Errorf("write client websocket event: %w", err),
-							wroteDownstream,
+			preparedMessages, prepareErr := integrity.prepareDelivery(eventType, clientMessage)
+			if prepareErr != nil {
+				return resultWithUsage(), prepareErr
+			}
+			for _, clientMessage := range preparedMessages {
+				eventType, _, _ := parseOpenAIWSEventEnvelope(clientMessage)
+				isKeepalive := eventType == "keepalive"
+				stageBeforeSemanticOutput := account.Platform == PlatformOpenAI && !wroteDownstream
+				commitStagedMessages := !stageBeforeSemanticOutput ||
+					openAIStreamDataStartsClientOutput(string(clientMessage), eventType) ||
+					isOpenAIWSTerminalEvent(eventType)
+				if stageBeforeSemanticOutput && !commitStagedMessages && !isKeepalive {
+					if pendingClientMessageBytes+int64(len(clientMessage)) > openAIFirstOutputStageMaxBytes {
+						return nil, s.newOpenAIStreamFailoverError(
+							c,
+							account,
+							true,
+							resp.Header.Get("x-request-id"),
+							nil,
+							"OpenAI WS HTTP bridge first-output staging limit exceeded",
+							resp.Header,
 						)
 					}
+					pendingClientMessages = append(pendingClientMessages, append([]byte(nil), clientMessage...))
+					pendingClientMessageBytes += int64(len(clientMessage))
+				} else {
+					// Keep the client connection alive without committing this attempt
+					// or exposing its staged lifecycle metadata.
+					var messages [][]byte
 					if !isKeepalive {
-						wroteDownstream = true
+						messages = pendingClientMessages
+						pendingClientMessages = nil
+						pendingClientMessageBytes = 0
+					}
+					messages = append(messages, clientMessage)
+					for _, message := range messages {
+						if err := writeClientMessage(message); err != nil {
+							if isOpenAIWSClientDisconnectError(err) {
+								clientDisconnected = true
+								closeStatus, closeReason := summarizeOpenAIWSReadCloseError(err)
+								logOpenAIWSModeInfo(
+									"ingress_ws_http_bridge_client_disconnected_drain account_id=%d turn=%d close_status=%s close_reason=%s",
+									account.ID,
+									turn,
+									closeStatus,
+									truncateOpenAIWSLogValue(closeReason, openAIWSHeaderValueMaxLen),
+								)
+								break
+							}
+							return nil, wrapOpenAIWSIngressTurnError(
+								"write_client",
+								fmt.Errorf("write client websocket event: %w", err),
+								wroteDownstream,
+							)
+						}
+						if !isKeepalive {
+							wroteDownstream = true
+							messageType, _, _ := parseOpenAIWSEventEnvelope(message)
+							integrity.delivered(messageType, message)
+						}
 					}
 				}
 			}
@@ -979,6 +1013,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		return resultWithUsage(), errors.New(bareErrorMessage)
 	}
 	if err := scanner.Err(); err != nil {
+		upstreamTerminated = true
 		streamErr := fmt.Errorf("read upstream http bridge stream: %w", err)
 		if turn == 1 && !clientDisconnected && !wroteDownstream {
 			return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, streamErr, true)
@@ -986,6 +1021,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		return resultWithUsage(), streamErr
 	}
 	terminalErr := errors.New("upstream http bridge stream ended before terminal event")
+	upstreamTerminated = true
 	if sawDone {
 		terminalErr = errors.New("upstream http bridge stream sent [DONE] before terminal event")
 	}

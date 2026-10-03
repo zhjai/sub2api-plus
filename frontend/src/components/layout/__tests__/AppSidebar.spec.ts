@@ -3,6 +3,8 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { describe, expect, it } from 'vitest'
+import zh from '@/i18n/locales/zh'
+import en from '@/i18n/locales/en'
 
 const componentPath = resolve(dirname(fileURLToPath(import.meta.url)), '../AppSidebar.vue')
 const componentSource = readFileSync(componentPath, 'utf8')
@@ -97,11 +99,21 @@ describe('AppSidebar model integrity navigation', () => {
     expect(componentSource).toMatch(/path: '\/admin\/model-integrity',\s*label: t\('nav\.modelIntegrity'\)[\s\S]{0,80}expandOnly: true/)
   })
 
-  it('has exactly the two pages 降智测试 and 降智调度 as children', () => {
+  it('has exactly the two pages 降智测试 and 调度策略 as children', () => {
     const block = componentSource.match(/path: '\/admin\/model-integrity',[\s\S]*?children: \[([\s\S]*?)\],/)
     expect(block).not.toBeNull()
     const children = block?.[1].match(/path: '[^']+'/g) ?? []
     expect(children).toEqual(["path: '/admin/model-integrity/tests'", "path: '/admin/model-integrity/scheduling'"])
+    expect(block?.[1]).toContain("label: t('nav.modelIntegrityTests')")
+    expect(block?.[1]).toContain("label: t('nav.modelIntegrityScheduling')")
+  })
+
+  it('names the group and its two children distinctly in both locales', () => {
+    expect([zh.nav.modelIntegrity, zh.nav.modelIntegrityTests, zh.nav.modelIntegrityScheduling]).toEqual(['降智调度', '降智测试', '调度策略'])
+    expect(zh.admin.modelIntegrity.tests.title).toBe(zh.nav.modelIntegrityTests)
+    expect(zh.admin.modelIntegrity.scheduling.title).toBe(zh.nav.modelIntegrityScheduling)
+    expect([en.nav.modelIntegrity, en.nav.modelIntegrityTests, en.nav.modelIntegrityScheduling]).toEqual(['Model integrity', 'Integrity tests', 'Scheduling policy'])
+    expect(en.admin.modelIntegrity.scheduling.title).toBe(en.nav.modelIntegrityScheduling)
   })
 
   it('no longer links the legacy evaluation page directly', () => {

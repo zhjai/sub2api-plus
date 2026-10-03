@@ -228,7 +228,7 @@ func classifyOpenAIResponsesOutcome(eventType string, payload []byte) (protocolS
 		switch responseStatus {
 		case "incomplete":
 			return "incomplete", responseStatus, incompleteReason
-		case "failed":
+		case "failed", "terminated":
 			return "failed", responseStatus, incompleteReason
 		case "cancelled", "canceled":
 			return "cancelled", responseStatus, incompleteReason
@@ -243,7 +243,7 @@ func classifyOpenAIResponsesOutcome(eventType string, payload []byte) (protocolS
 			return "completed", responseStatus, incompleteReason
 		case "incomplete":
 			return "incomplete", responseStatus, incompleteReason
-		case "failed":
+		case "failed", "terminated":
 			return "failed", responseStatus, incompleteReason
 		case "cancelled", "canceled":
 			return "cancelled", responseStatus, incompleteReason
@@ -582,6 +582,29 @@ type OpenAISessionEscapeRouteCache interface {
 	GetOpenAISessionEscapedRoute(ctx context.Context, groupID int64, sessionHash, requestedModel, requestedEffort string) (OpenAISessionEscapeRouteState, error)
 }
 
+// OpenAIOpaqueRouteEpochState rotates only the upstream-facing session
+// identity for a local API-key account that fronts another account aggregator.
+// Bumps is scoped to the current rolling window and prevents retry loops.
+type OpenAIOpaqueRouteEpochState struct {
+	Epoch             int64
+	Bumps             int
+	WindowStartedUnix int64
+}
+
+// OpenAIOpaqueRouteEpochCache is optional so test doubles and deployments
+// without Redis retain a process-local fallback.
+type OpenAIOpaqueRouteEpochCache interface {
+	GetOpenAIOpaqueRouteEpoch(ctx context.Context, groupID int64, sessionHash, requestedModel, requestedEffort string, accountID int64, ttl time.Duration) (OpenAIOpaqueRouteEpochState, error)
+	BumpOpenAIOpaqueRouteEpoch(ctx context.Context, groupID int64, sessionHash, requestedModel, requestedEffort string, accountID, expectedEpoch int64, maxBumps int, window, ttl time.Duration) (OpenAIOpaqueRouteEpochState, bool, error)
+}
+
+// OpenAIOpaqueRouteEpochConvergenceCache lets a process that advanced its
+// local fallback while Redis was unavailable publish that non-decreasing
+// state once the shared cache recovers.
+type OpenAIOpaqueRouteEpochConvergenceCache interface {
+	ConvergeOpenAIOpaqueRouteEpoch(ctx context.Context, groupID int64, sessionHash, requestedModel, requestedEffort string, accountID int64, floor OpenAIOpaqueRouteEpochState, ttl time.Duration) (OpenAIOpaqueRouteEpochState, error)
+}
+
 // derefGroupID safely dereferences *int64 to int64, returning 0 if nil
 func derefGroupID(groupID *int64) int64 {
 	if groupID == nil {
@@ -805,6 +828,13 @@ type UpstreamFailoverError struct {
 	SameAccountRetryMax      int           // 可选的错误级同账号重试上限，低于 handler 默认预算时优先采用
 	RequestScopedTransient   bool          // 故障因素与账号无关（如上游按客户端身份/模型容量降载）：可同账号重试，但不得据此对账号做临时封禁
 	SafeToFailoverAfterWrite bool          // 仅写出 SSE 注释等非语义字节时，仍可在同一客户端流中切换账号
+	// OpaqueRouteEpochEligible marks an objective hidden-route integrity
+	// failure. A flagged upstream aggregator may retry the same local account
+	// once with a new upstream-facing session identity.
+	OpaqueRouteEpochEligible bool
+	IntegritySignal          string
+	IntegritySentModel       string
+	IntegrityResponseModel   string
 	// SessionAccountEscape asks the handler to exclude this account for the
 	// next sampling of the same session. It is set for hard stream failures
 	// such as a watchdog timeout before semantic output.

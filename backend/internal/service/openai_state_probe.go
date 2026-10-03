@@ -123,6 +123,7 @@ func (s *AccountTestService) openAIStateProbeShot(ctx context.Context, account, 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("OpenAI-Beta", "responses=experimental")
+	enforceCodexAcceptLanguage(req.Header)
 	req.Header.Set("session_id", uuid.NewString())
 	setOpenAIChatGPTAccountHeaders(req.Header, credential)
 	enforceCodexIdentityHeadersWithUA(req.Header, credential.GetOpenAIUserAgent())

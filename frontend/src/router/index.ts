@@ -538,7 +538,7 @@ const routes: RouteRecordRaw[] = [
       requiresAdmin: true,
       title: '降智测试',
       titleKey: 'admin.modelIntegrity.tests.title',
-      descriptionKey: 'admin.modelIntegrity.tests.description'
+      descriptionKey: 'admin.modelIntegrity.tests.headerDescription'
     }
   },
   {
@@ -548,9 +548,9 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: true,
       requiresAdmin: true,
-      title: '降智调度',
+      title: '调度策略',
       titleKey: 'admin.modelIntegrity.scheduling.title',
-      descriptionKey: 'admin.modelIntegrity.scheduling.description'
+      descriptionKey: 'admin.modelIntegrity.scheduling.headerDescription'
     }
   },
   // Legacy entry points for the former single evaluation page. The route name

@@ -1421,10 +1421,21 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAIAccountLoadPlan(
 			weights.TTFT = 1.25
 		}
 		weights.UpstreamCost *= 0.25
+	case OpenAIEvalSchedulingPolicyCustomBalance:
+		if custom, ok := OpenAIEvalCustomBalanceForRequest(openAIClientModelForSchedule(req), req.RequestedReasoningEffort); ok {
+			// Custom balance is a normalized route policy. Keep the scheduler's
+			// non-quality gates intact, and map only the requested dimensions to
+			// the existing score weights.
+			const scale = 10.0
+			weights.UpstreamCost = scale * custom.Cost
+			weights.ErrorRate = scale * (custom.ErrorRate + custom.Stability*0.6)
+			weights.TTFT = scale * (custom.TTFT + custom.Stability*0.4)
+			weights.Load = scale * custom.Load
+		}
 	}
 	now := time.Now()
 	upstreamCostFactors := map[int64]float64(nil)
-	if (req.UseUpstreamTokenCost || policy == OpenAIEvalSchedulingPolicyCostFirst) && weights.UpstreamCost > 0 {
+	if req.UseUpstreamTokenCost && weights.UpstreamCost > 0 {
 		accounts := make([]*Account, 0, len(candidates))
 		for _, candidate := range candidates {
 			accounts = append(accounts, candidate.account)

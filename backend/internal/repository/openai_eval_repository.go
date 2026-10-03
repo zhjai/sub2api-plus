@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"strings"
 	"time"
 
@@ -13,6 +14,47 @@ import (
 
 type openAIEvalRepository struct {
 	db *sql.DB
+}
+
+// An account-scoped BPS entry supersedes the legacy per-model flags. If that
+// account entry is later deleted, leaving those historical flags enabled would
+// silently turn BPS back on through the compatibility fallback. Clear only the
+// removed accounts' legacy flags while preserving unrelated old clients and
+// routes.
+func disableLegacyBPSForRemovedAccounts(previous, next *service.OpenAIEvalConfig) {
+	if previous == nil || next == nil || len(previous.BPSAccounts) == 0 {
+		return
+	}
+	configured := make(map[int64]struct{}, len(next.BPSAccounts))
+	for _, item := range next.BPSAccounts {
+		configured[item.AccountID] = struct{}{}
+	}
+	removed := make(map[int64]struct{})
+	for _, item := range previous.BPSAccounts {
+		if _, ok := configured[item.AccountID]; !ok {
+			removed[item.AccountID] = struct{}{}
+		}
+	}
+	for i := range next.Accounts {
+		route := &next.Accounts[i]
+		if _, ok := removed[route.AccountID]; !ok {
+			continue
+		}
+		route.BPSMode = service.OpenAIEvalBPSModeForceOff
+		route.BPSAuto = false
+	}
+}
+
+func openAIEvalInitialNextRun(now time.Time, intervalSeconds, jitterSeconds int) (time.Time, error) {
+	jitter := 0
+	if jitterSeconds > 0 {
+		jitter = rand.IntN(jitterSeconds + 1)
+	}
+	delay, err := service.OpenAIEvalIntervalDuration(intervalSeconds + jitter)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return now.Add(delay), nil
 }
 
 func NewOpenAIEvalRepository(db *sql.DB) service.OpenAIEvalRepository {
@@ -33,7 +75,7 @@ func (r *openAIEvalRepository) GetConfig(ctx context.Context) (*service.OpenAIEv
 		cfg.Accounts = []service.OpenAIEvalAccountConfig{}
 	}
 	schedules, err := r.db.QueryContext(ctx, `
-		SELECT account_id, test_type, requested_model, reasoning_effort, last_run_at, next_run_at
+		SELECT account_id, test_type, requested_model, reasoning_effort, sample_count, last_run_at, next_run_at
 		FROM openai_eval_schedule_state`)
 	if err != nil {
 		return nil, fmt.Errorf("load OpenAI evaluation schedule state: %w", err)
@@ -42,9 +84,29 @@ func (r *openAIEvalRepository) GetConfig(ctx context.Context) (*service.OpenAIEv
 	for schedules.Next() {
 		var accountID int64
 		var testType, model, effort string
+		var sampleCount int
 		var lastRun, nextRun sql.NullTime
-		if err := schedules.Scan(&accountID, &testType, &model, &effort, &lastRun, &nextRun); err != nil {
+		if err := schedules.Scan(&accountID, &testType, &model, &effort, &sampleCount, &lastRun, &nextRun); err != nil {
 			return nil, fmt.Errorf("scan OpenAI evaluation schedule state: %w", err)
+		}
+		if testType == service.OpenAIEvalTypeStateProbe && effort == service.OpenAIEvalBPSAccountEffort {
+			for i := range cfg.BPSAccounts {
+				item := &cfg.BPSAccounts[i]
+				if item.AccountID != accountID || !strings.EqualFold(service.OpenAIEvalBPSProbeModel(item.ProbeModel), model) {
+					continue
+				}
+				item.LastRunAt, item.NextRunAt = nil, nil
+				if lastRun.Valid {
+					value := lastRun.Time
+					item.LastRunAt = &value
+				}
+				if nextRun.Valid {
+					value := nextRun.Time
+					item.NextRunAt = &value
+				}
+				break
+			}
+			continue
 		}
 		for i := range cfg.Accounts {
 			route := &cfg.Accounts[i]
@@ -60,6 +122,7 @@ func (r *openAIEvalRepository) GetConfig(ctx context.Context) (*service.OpenAIEv
 				schedule = &route.StateProbeSchedule
 			}
 			schedule.LastRunAt, schedule.NextRunAt = nil, nil
+			schedule.SampleCount = sampleCount
 			if lastRun.Valid {
 				value := lastRun.Time
 				schedule.LastRunAt = &value
@@ -97,6 +160,7 @@ func (r *openAIEvalRepository) SaveConfig(ctx context.Context, cfg *service.Open
 	if cfg.Revision != 0 && cfg.Revision != previous.Revision {
 		return service.ErrOpenAIEvalConfigRevisionConflict
 	}
+	disableLegacyBPSForRemovedAccounts(&previous, cfg)
 	cfg.Revision = previous.Revision + 1
 	payload, err := json.Marshal(cfg)
 	if err != nil {
@@ -117,20 +181,44 @@ func (r *openAIEvalRepository) SaveConfig(ctx context.Context, cfg *service.Open
 	if err != nil {
 		return fmt.Errorf("lock OpenAI evaluation schedule keys: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
-	keep := make(map[string]struct{}, len(cfg.Accounts)*4)
+	keep := make(map[string]struct{}, len(cfg.Accounts)*4+len(cfg.BPSAccounts))
 	for _, route := range cfg.Accounts {
 		for _, testType := range []string{service.OpenAIEvalTypeCandy, service.OpenAIEvalTypeFingerprint, service.OpenAIEvalTypeModelTrace, service.OpenAIEvalTypeStateProbe} {
 			keep[openAIEvalScheduleKey(route.AccountID, testType, route.RequestedModel, route.ReasoningEffort)] = struct{}{}
 		}
 	}
+	for _, item := range cfg.BPSAccounts {
+		mode := strings.ToLower(strings.TrimSpace(item.Mode))
+		if !cfg.BPSAutoEnabled || mode != service.OpenAIEvalBPSModeAuto {
+			continue
+		}
+		probeModel := service.OpenAIEvalBPSProbeModel(item.ProbeModel)
+		keep[openAIEvalScheduleKey(item.AccountID, service.OpenAIEvalTypeStateProbe, probeModel, service.OpenAIEvalBPSAccountEffort)] = struct{}{}
+	}
+	type existingScheduleKey struct {
+		accountID int64
+		testType  string
+		model     string
+		effort    string
+	}
+	existingKeys := make([]existingScheduleKey, 0)
 	for rows.Next() {
-		var accountID int64
-		var testType, model, effort string
-		if err := rows.Scan(&accountID, &testType, &model, &effort); err != nil {
+		var key existingScheduleKey
+		if err := rows.Scan(&key.accountID, &key.testType, &key.model, &key.effort); err != nil {
+			_ = rows.Close()
 			return fmt.Errorf("scan OpenAI evaluation schedule keys: %w", err)
 		}
-		key := openAIEvalScheduleKey(accountID, testType, model, effort)
+		existingKeys = append(existingKeys, key)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("iterate OpenAI evaluation schedule keys: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close OpenAI evaluation schedule keys: %w", err)
+	}
+	for _, existing := range existingKeys {
+		key := openAIEvalScheduleKey(existing.accountID, existing.testType, existing.model, existing.effort)
 		if _, exists := keep[key]; exists {
 			continue
 		}
@@ -138,12 +226,9 @@ func (r *openAIEvalRepository) SaveConfig(ctx context.Context, cfg *service.Open
 			UPDATE openai_eval_schedule_state
 			SET enabled=FALSE, next_run_at=NULL, updated_at=NOW()
 			WHERE account_id=$1 AND test_type=$2 AND requested_model=$3 AND reasoning_effort=$4`,
-			accountID, testType, model, effort); err != nil {
+			existing.accountID, existing.testType, existing.model, existing.effort); err != nil {
 			return fmt.Errorf("disable removed OpenAI evaluation schedule: %w", err)
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate OpenAI evaluation schedule keys: %w", err)
 	}
 	for _, route := range cfg.Accounts {
 		for _, item := range []struct {
@@ -152,13 +237,17 @@ func (r *openAIEvalRepository) SaveConfig(ctx context.Context, cfg *service.Open
 		}{{service.OpenAIEvalTypeCandy, route.CandySchedule}, {service.OpenAIEvalTypeFingerprint, route.FingerprintSchedule}, {service.OpenAIEvalTypeModelTrace, route.ModelTraceSchedule}, {service.OpenAIEvalTypeStateProbe, route.StateProbeSchedule}} {
 			nextRun := any(nil)
 			if item.schedule.Enabled {
-				nextRun = time.Now().UTC().Add(time.Duration(item.schedule.IntervalSeconds) * time.Second)
+				initial, err := openAIEvalInitialNextRun(time.Now().UTC(), item.schedule.IntervalSeconds, item.schedule.JitterSeconds)
+				if err != nil {
+					return fmt.Errorf("invalid OpenAI evaluation schedule interval: %w", err)
+				}
+				nextRun = initial
 			}
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO openai_eval_schedule_state (
 					account_id, test_type, requested_model, reasoning_effort, enabled,
-					interval_seconds, jitter_seconds, sample_mode, next_run_at, updated_at
-				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
+					interval_seconds, jitter_seconds, sample_mode, sample_count, next_run_at, updated_at
+				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())
 				ON CONFLICT (account_id, test_type, requested_model, reasoning_effort) DO UPDATE SET
 					enabled=EXCLUDED.enabled,
 					next_run_at=CASE
@@ -166,18 +255,54 @@ func (r *openAIEvalRepository) SaveConfig(ctx context.Context, cfg *service.Open
 							OR openai_eval_schedule_state.interval_seconds IS DISTINCT FROM EXCLUDED.interval_seconds
 							OR openai_eval_schedule_state.jitter_seconds IS DISTINCT FROM EXCLUDED.jitter_seconds
 							OR openai_eval_schedule_state.sample_mode IS DISTINCT FROM EXCLUDED.sample_mode
+							OR openai_eval_schedule_state.sample_count IS DISTINCT FROM EXCLUDED.sample_count
 							THEN EXCLUDED.next_run_at
 						ELSE openai_eval_schedule_state.next_run_at
 					END,
 					interval_seconds=EXCLUDED.interval_seconds,
 					jitter_seconds=EXCLUDED.jitter_seconds,
 					sample_mode=EXCLUDED.sample_mode,
+					sample_count=EXCLUDED.sample_count,
 					updated_at=NOW()`,
 				route.AccountID, item.testType, route.RequestedModel, route.ReasoningEffort,
 				item.schedule.Enabled, item.schedule.IntervalSeconds, item.schedule.JitterSeconds,
-				item.schedule.SampleMode, nextRun); err != nil {
+				item.schedule.SampleMode, item.schedule.SampleCount, nextRun); err != nil {
 				return fmt.Errorf("save OpenAI evaluation schedule: %w", err)
 			}
+		}
+	}
+	for _, item := range cfg.BPSAccounts {
+		probeModel := service.OpenAIEvalBPSProbeModel(item.ProbeModel)
+		enabled := cfg.BPSAutoEnabled && strings.EqualFold(strings.TrimSpace(item.Mode), service.OpenAIEvalBPSModeAuto)
+		nextRun := any(nil)
+		if enabled {
+			delay, err := service.OpenAIEvalIntervalDuration(item.IntervalSeconds)
+			if err != nil {
+				return fmt.Errorf("invalid OpenAI BPS account interval: %w", err)
+			}
+			nextRun = time.Now().UTC().Add(delay)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO openai_eval_schedule_state (
+				account_id, test_type, requested_model, reasoning_effort, enabled,
+				interval_seconds, jitter_seconds, sample_mode, sample_count, next_run_at, updated_at
+			) VALUES ($1,$2,$3,$4,$5,$6,0,'',0,$7,NOW())
+			ON CONFLICT (account_id, test_type, requested_model, reasoning_effort) DO UPDATE SET
+				enabled=EXCLUDED.enabled,
+				next_run_at=CASE
+					WHEN openai_eval_schedule_state.enabled IS DISTINCT FROM EXCLUDED.enabled
+						OR openai_eval_schedule_state.interval_seconds IS DISTINCT FROM EXCLUDED.interval_seconds
+						THEN EXCLUDED.next_run_at
+					ELSE openai_eval_schedule_state.next_run_at
+				END,
+				interval_seconds=EXCLUDED.interval_seconds,
+				jitter_seconds=0,
+				sample_mode='',
+				sample_count=0,
+				updated_at=NOW()`,
+			item.AccountID, service.OpenAIEvalTypeStateProbe, probeModel, service.OpenAIEvalBPSAccountEffort,
+			enabled, item.IntervalSeconds, nextRun); err != nil {
+			return fmt.Errorf("save OpenAI BPS account schedule: %w", err)
 		}
 	}
 	var after any
@@ -265,6 +390,36 @@ func (r *openAIEvalRepository) FinishRun(ctx context.Context, id int64, run *ser
 	return nil
 }
 
+func (r *openAIEvalRepository) UpdateRunProgress(ctx context.Context, id int64, run *service.OpenAIEvalRun) error {
+	if run == nil || id <= 0 {
+		return fmt.Errorf("OpenAI evaluation run progress is required")
+	}
+	outcome, err := json.Marshal(run.Outcome)
+	if err != nil {
+		return fmt.Errorf("encode OpenAI evaluation progress: %w", err)
+	}
+	samples, err := json.Marshal(run.Samples)
+	if err != nil {
+		return fmt.Errorf("encode OpenAI evaluation progress samples: %w", err)
+	}
+	result, err := r.db.ExecContext(ctx, `
+		UPDATE openai_eval_runs SET status=$2, outcome=$3::jsonb, samples=$4::jsonb,
+			request_count=$5, input_tokens=$6, output_tokens=$7, duration_ms=$8,
+			upstream_model=$9, baseline_version=$10
+		WHERE id=$1 AND finished_at IS NULL`, id, run.Status, outcome, samples,
+		run.RequestCount, run.InputTokens, run.OutputTokens, run.DurationMS,
+		run.UpstreamModel, run.BaselineVersion)
+	if err != nil {
+		return fmt.Errorf("update OpenAI evaluation progress: %w", err)
+	}
+	if count, _ := result.RowsAffected(); count == 0 {
+		return fmt.Errorf("running OpenAI evaluation %d not found", id)
+	}
+	return nil
+}
+
+var _ service.OpenAIEvalProgressRepository = (*openAIEvalRepository)(nil)
+
 func (r *openAIEvalRepository) ListRuns(ctx context.Context, filter service.OpenAIEvalRunFilter) ([]service.OpenAIEvalRun, error) {
 	if filter.Limit <= 0 || filter.Limit > 500 {
 		filter.Limit = 100
@@ -310,6 +465,12 @@ func (r *openAIEvalRepository) ListRuns(ctx context.Context, filter service.Open
 		}
 		if err := json.Unmarshal(samplesRaw, &run.Samples); err != nil {
 			return nil, fmt.Errorf("decode OpenAI evaluation samples: %w", err)
+		}
+		if run.Status == "running" {
+			run.CompletedSamples = run.Outcome.SampleCount
+			run.ExpectedSamples = run.Outcome.ExpectedCount
+			run.SampleCount = run.Outcome.ExpectedCount
+			run.Phase = run.Outcome.Reason
 		}
 		result = append(result, run)
 	}
@@ -371,7 +532,7 @@ func (r *openAIEvalRepository) ClaimDueSchedules(ctx context.Context, now time.T
 	}
 	defer func() { _ = tx.Rollback() }()
 	rows, err := tx.QueryContext(ctx, `
-		SELECT account_id, test_type, requested_model, reasoning_effort, sample_mode, interval_seconds, jitter_seconds
+		SELECT account_id, test_type, requested_model, reasoning_effort, sample_mode, sample_count, interval_seconds, jitter_seconds
 		FROM openai_eval_schedule_state
 		WHERE enabled = TRUE AND next_run_at <= $1
 		ORDER BY next_run_at, account_id
@@ -388,7 +549,7 @@ func (r *openAIEvalRepository) ClaimDueSchedules(ctx context.Context, now time.T
 	items := make([]claimed, 0)
 	for rows.Next() {
 		var item claimed
-		if err := rows.Scan(&item.AccountID, &item.TestType, &item.RequestedModel, &item.ReasoningEffort, &item.SampleMode, &item.interval, &item.jitter); err != nil {
+		if err := rows.Scan(&item.AccountID, &item.TestType, &item.RequestedModel, &item.ReasoningEffort, &item.SampleMode, &item.SampleCount, &item.interval, &item.jitter); err != nil {
 			_ = rows.Close()
 			return nil, fmt.Errorf("scan due OpenAI evaluation schedule: %w", err)
 		}
@@ -411,7 +572,11 @@ func (r *openAIEvalRepository) ClaimDueSchedules(ctx context.Context, now time.T
 			}
 			jitter = int(seed)
 		}
-		next := now.Add(time.Duration(item.interval+jitter) * time.Second)
+		delay, err := service.OpenAIEvalIntervalDuration(item.interval + jitter)
+		if err != nil {
+			return nil, fmt.Errorf("advance OpenAI evaluation schedule: %w", err)
+		}
+		next := now.Add(delay)
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE openai_eval_schedule_state
 			SET last_run_at=$5, next_run_at=$6, updated_at=NOW()

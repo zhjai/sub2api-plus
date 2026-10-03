@@ -6,7 +6,7 @@
           {{ t(`admin.modelIntegrity.tests.types.${type}.name`) }}
           <span v-if="type !== 'state_probe'" class="tt-tag">{{ t('admin.modelIntegrity.tests.alertOnly') }}</span>
         </h3>
-        <p class="tt-what">{{ t(`admin.modelIntegrity.tests.types.${type}.what`) }}</p>
+        <p class="tt-what">{{ t(`admin.modelIntegrity.tests.types.${type}.what`, { count: perRun }) }}</p>
       </div>
       <button
         type="button"
@@ -30,14 +30,42 @@
         </label>
         <label class="tt-field">
           <span class="tt-label">{{ t('admin.modelIntegrity.tests.every') }}</span>
-          <select v-model.number="schedule.interval_seconds" class="input tt-input" :disabled="!schedule.enabled" @change="normalize">
-            <option v-if="!intervals.includes(schedule.interval_seconds)" :value="schedule.interval_seconds">{{ t('admin.modelIntegrity.tests.interval.custom', { value: humanInterval(schedule.interval_seconds) }) }}</option>
+          <select v-model="intervalChoice" class="input tt-input" :disabled="!schedule.enabled">
             <option v-for="seconds in intervals" :key="seconds" :value="seconds">{{ intervalLabel(seconds) }}</option>
+            <option :value="CUSTOM_INTERVAL">{{ t('admin.modelIntegrity.tests.interval.customOption') }}</option>
           </select>
+        </label>
+        <label v-if="customIntervalSelected" class="tt-field">
+          <span class="tt-label">{{ t('admin.modelIntegrity.tests.interval.customMinutes', { max: MAX_INTERVAL_MINUTES.toLocaleString() }) }}</span>
+          <input
+            v-model.number="customIntervalMinutes"
+            type="number"
+            min="5"
+            :max="MAX_INTERVAL_MINUTES"
+            step="1"
+            class="input tt-input tt-custom-interval"
+            data-testid="custom-interval"
+            :disabled="!schedule.enabled"
+            @change="normalize"
+          />
+        </label>
+        <label v-if="type === 'candy'" class="tt-field">
+          <span class="tt-label">{{ t('admin.modelIntegrity.tests.candySamples') }}</span>
+          <input
+            v-model.number="candySampleCount"
+            type="number"
+            min="1"
+            max="10"
+            step="1"
+            class="input tt-input tt-samples"
+            data-testid="candy-sample-count"
+            :title="t('admin.modelIntegrity.tests.candySamplesHint')"
+            @change="normalize"
+          />
         </label>
         <label v-if="type === 'fingerprint'" class="tt-field">
           <span class="tt-label">{{ t('admin.modelIntegrity.tests.sampleMode') }}</span>
-          <select v-model="schedule.sample_mode" class="input tt-input" :disabled="!schedule.enabled">
+          <select v-model="schedule.sample_mode" class="input tt-input" data-testid="fingerprint-sample-mode">
             <option v-if="schedule.sample_mode && !modes.some(mode => mode.id === schedule.sample_mode)" :value="schedule.sample_mode">{{ t('admin.modelIntegrity.tests.sampleModes.custom', { mode: schedule.sample_mode }) }}</option>
             <option v-for="mode in modes" :key="mode.id" :value="mode.id">{{ t('admin.modelIntegrity.tests.manualSampleOption', { mode: modeLabel(mode.id), count: mode.samples }) }}</option>
           </select>
@@ -51,9 +79,20 @@
             :max="maxJitterMinutes"
             class="input tt-input tt-jitter"
             :disabled="!schedule.enabled || maxJitterMinutes === 0"
-            :title="maxJitterMinutes === 0 ? t('admin.modelIntegrity.tests.jitterUnavailable') : t('admin.modelIntegrity.tests.jitterHint', { max: maxJitterMinutes })"
+            :title="t('admin.modelIntegrity.tests.jitterHint', { max: maxJitterMinutes })"
           />
         </label>
+      </div>
+
+      <div v-if="running" class="tt-progress" role="status" :aria-label="progressText" data-testid="test-progress">
+        <div class="tt-progress-head">
+          <span>{{ progressText }}</span>
+          <span v-if="progressPercent !== null" class="tabular-nums">{{ progressPercent }}%</span>
+        </div>
+        <div class="tt-progress-track" aria-hidden="true">
+          <span v-if="progressPercent !== null" class="tt-progress-value" :style="{ width: `${progressPercent}%` }" />
+          <span v-else class="tt-progress-value tt-progress-indeterminate" />
+        </div>
       </div>
 
       <p class="tt-cost">
@@ -66,11 +105,11 @@
       </p>
     </template>
 
-    <footer class="tt-result">
+    <footer class="tt-result" :class="latest ? [`tt-result-${resultTone(latest.status)}`, { 'tt-result-failed': latest.status === 'error' }] : ''">
       <template v-if="latest">
         <button type="button" class="tt-result-btn" @click="emit('open', latest)">
-          <span class="tone" :class="`tone-${resultTone(latest.status)}`">{{ statusText(latest.status) }}</span>
-          <span class="tt-result-text">{{ explanation }}</span>
+          <span class="tt-result-status" data-testid="latest-status">{{ statusText }}</span>
+          <span class="tt-result-text" data-testid="latest-explanation">{{ explanation }}</span>
           <time class="tt-result-time" :datetime="latest.finished_at || latest.started_at">{{ formatTime(latest.finished_at || latest.started_at) }}</time>
         </button>
       </template>
@@ -80,19 +119,20 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/icons/Icon.vue'
 import Toggle from '@/components/common/Toggle.vue'
 import type { OpenAIEvalModelCatalog, OpenAIEvalRouteConfig, OpenAIEvalRun } from '@/api/admin/accounts'
-import { DAY, HOUR, TEST_TYPE_META, dailyRequests, normalizeSchedule, requestsPerRun, resultTone, scheduleOf, type EvalTestType } from '@/views/admin/modelIntegrity/modelIntegrity'
-import { runExplanation, statusLabel } from '@/views/admin/modelIntegrity/runText'
+import { CANDY_MAX_SAMPLES, CANDY_MIN_SAMPLES, CUSTOM_INTERVAL, DAY, HOUR, MAX_INTERVAL_MINUTES, TEST_TYPE_META, dailyRequests, maxScheduleJitterSeconds, normalizeSchedule, requestsPerRun, resultTone, scheduleOf, type EvalTestType } from '@/views/admin/modelIntegrity/modelIntegrity'
+import { runExplanation, runStatusLabel } from '@/views/admin/modelIntegrity/runText'
 
 const props = defineProps<{
   route: OpenAIEvalRouteConfig
   type: EvalTestType
   catalog: OpenAIEvalModelCatalog | null
   latest?: OpenAIEvalRun
+  progress?: OpenAIEvalRun
   running: boolean
   available: boolean
 }>()
@@ -105,7 +145,41 @@ const intervals = computed(() => TEST_TYPE_META[props.type].intervals)
 const modes = computed(() => props.catalog?.fingerprint_modes?.length ? props.catalog.fingerprint_modes : [{ id: 'quick', samples: 60 }, { id: 'standard', samples: 200 }, { id: 'strict', samples: 400 }])
 const perRun = computed(() => requestsPerRun(props.route, props.type, props.catalog))
 const perDay = computed(() => dailyRequests(props.route, props.type, props.catalog))
-const maxJitterMinutes = computed(() => Math.floor(Math.max(0, schedule.value.interval_seconds - TEST_TYPE_META[props.type].minInterval) / 60))
+const maxJitterMinutes = computed(() => Math.floor(maxScheduleJitterSeconds(schedule.value.interval_seconds) / 60))
+const customIntervalSelected = ref(!intervals.value.includes(schedule.value.interval_seconds))
+
+watch(() => `${props.route.account_id}:${props.route.requested_model}:${props.route.reasoning_effort}:${props.type}`, () => {
+  customIntervalSelected.value = !intervals.value.includes(schedule.value.interval_seconds)
+})
+
+const intervalChoice = computed<string | number>({
+  get: () => customIntervalSelected.value ? CUSTOM_INTERVAL : schedule.value.interval_seconds,
+  set: value => {
+    if (value === CUSTOM_INTERVAL) {
+      customIntervalSelected.value = true
+      return
+    }
+    customIntervalSelected.value = false
+    schedule.value.interval_seconds = Number(value)
+    normalize()
+  }
+})
+
+const customIntervalMinutes = computed({
+  get: () => Math.max(5, Math.round((schedule.value.interval_seconds || TEST_TYPE_META[props.type].minInterval) / 60)),
+  set: (value: number) => {
+    const minutes = Number.isFinite(value) ? Math.min(Math.max(5, Math.trunc(value)), MAX_INTERVAL_MINUTES) : 5
+    schedule.value.interval_seconds = minutes * 60
+  }
+})
+
+const candySampleCount = computed({
+  get: () => Math.min(CANDY_MAX_SAMPLES, Math.max(CANDY_MIN_SAMPLES, Math.trunc(Number(schedule.value.sample_count) || CANDY_MIN_SAMPLES))),
+  set: (value: number) => {
+    const samples = Number.isFinite(value) ? Math.min(CANDY_MAX_SAMPLES, Math.max(CANDY_MIN_SAMPLES, Math.trunc(value))) : CANDY_MIN_SAMPLES
+    schedule.value.sample_count = samples
+  }
+})
 
 const jitterMinutes = computed({
   get: () => Math.round((schedule.value.jitter_seconds || 0) / 60),
@@ -116,6 +190,15 @@ const jitterMinutes = computed({
 })
 
 const explanation = computed(() => (props.latest ? runExplanation(t, props.latest, props.catalog) : ''))
+const statusText = computed(() => (props.latest ? runStatusLabel(t, props.latest) : ''))
+const progressDone = computed(() => props.progress?.completed_samples ?? props.progress?.outcome.sample_count ?? 0)
+const progressTotal = computed(() => props.progress?.expected_samples ?? props.progress?.outcome.expected_count ?? 0)
+const progressPercent = computed(() => progressTotal.value > 0
+  ? Math.min(100, Math.max(0, Math.round(progressDone.value * 100 / progressTotal.value)))
+  : null)
+const progressText = computed(() => progressTotal.value > 0
+  ? t('admin.modelIntegrity.tests.progress.samples', { done: progressDone.value, total: progressTotal.value })
+  : t('admin.modelIntegrity.tests.progress.starting'))
 
 function normalize() {
   normalizeSchedule(schedule.value, props.type)
@@ -128,7 +211,7 @@ function modeLabel(id: string) {
 }
 
 function intervalLabel(seconds: number) {
-  const map: Record<number, string> = { 900: 'm15', [HOUR]: 'h1', [6 * HOUR]: 'h6', [DAY]: 'h24', [3 * DAY]: 'd3', [7 * DAY]: 'd7' }
+  const map: Record<number, string> = { 300: 'm5', 600: 'm10', 1800: 'm30', [HOUR]: 'h1', [6 * HOUR]: 'h6', [12 * HOUR]: 'h12', [DAY]: 'h24', [3 * DAY]: 'd3', [7 * DAY]: 'd7' }
   return map[seconds] ? t(`admin.modelIntegrity.tests.interval.${map[seconds]}`) : humanInterval(seconds)
 }
 
@@ -138,7 +221,6 @@ function humanInterval(seconds: number) {
   return `${Math.round(seconds / 60)} min`
 }
 
-const statusText = (status: string) => statusLabel(t, status)
 const formatDaily = (value: number) => (value >= 10 ? Math.round(value).toLocaleString() : Number(value.toFixed(1)).toString())
 const formatTime = (value: string) => {
   const date = new Date(value)
@@ -159,19 +241,35 @@ const formatTime = (value: string) => {
 .tt-field { @apply flex flex-col gap-1; }
 .tt-label { @apply text-xs text-gray-500 dark:text-gray-400; }
 .tt-input { @apply h-9 w-auto min-w-[8.5rem] py-1 text-sm; }
+.tt-custom-interval { @apply min-w-0 w-32; }
+.tt-samples { @apply min-w-0 w-24; }
 .tt-jitter { @apply min-w-0 w-24; }
 .tt-cost { @apply flex flex-wrap gap-x-4 gap-y-1 text-xs tabular-nums text-gray-500 dark:text-gray-400; }
 .tt-cost-strong { @apply font-medium text-gray-800 dark:text-gray-200; }
 .tt-link-note { @apply text-xs; }
 .tt-link { @apply font-medium text-primary-700 underline-offset-2 hover:underline dark:text-primary-300; }
-.tt-result { @apply text-xs; }
-.tt-result-btn { @apply flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 dark:hover:bg-dark-700/50; margin-left: -0.5rem; width: calc(100% + 1rem); }
-.tt-result-text { @apply min-w-0 flex-1 text-gray-600 dark:text-gray-300; }
-.tt-result-time { @apply shrink-0 tabular-nums text-gray-400; }
+.tt-progress { @apply rounded-md bg-gray-50 px-3 py-2.5 dark:bg-dark-800/70; }
+.tt-progress-head { @apply mb-2 flex items-center justify-between gap-3 text-xs font-medium text-gray-700 dark:text-gray-300; }
+.tt-progress-track { @apply relative h-2 overflow-hidden rounded-full bg-gray-200 dark:bg-dark-600; }
+.tt-progress-value { @apply block h-full rounded-full bg-primary-500 transition-[width] duration-300; }
+.tt-progress-indeterminate { width: 35%; animation: progress-slide 1.2s ease-in-out infinite; }
+.tt-result { @apply rounded-md border border-gray-200 bg-gray-50 text-xs dark:border-dark-700 dark:bg-dark-800/60; }
+.tt-result-ok { @apply border-emerald-200 bg-emerald-50 dark:border-emerald-900/60 dark:bg-emerald-950/25; }
+.tt-result-likely { @apply border-dashed border-emerald-300 bg-white dark:border-emerald-800 dark:bg-dark-800/40; }
+.tt-result-likely .tt-result-status { @apply text-emerald-800 dark:text-emerald-300; }
+.tt-result-attention { @apply border-amber-200 bg-amber-50 dark:border-amber-900/60 dark:bg-amber-950/25; }
+.tt-result-failed { @apply border-rose-200 bg-rose-50 dark:border-rose-900/60 dark:bg-rose-950/25; }
+/* Narrow screens: status beside the explanation, time on its own line, so the text keeps a readable width. */
+.tt-result-btn { @apply grid w-full grid-cols-[auto_minmax(0,1fr)] items-start gap-x-3 gap-y-1 rounded-md px-3 py-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:gap-y-3; }
+.tt-result-status { @apply text-sm font-semibold text-gray-900 dark:text-white; min-width: 4rem; }
+.tt-result-text { @apply min-w-0 flex-1 leading-relaxed text-gray-600 dark:text-gray-300; }
+.tt-result-time { @apply col-start-2 shrink-0 tabular-nums text-gray-400 sm:col-start-auto; }
 .tt-never { @apply text-gray-400; }
 .tone { @apply inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded px-1.5 py-0.5 font-medium; }
 .tone-ok { @apply bg-emerald-50 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300; }
+.tone-likely { @apply border border-dashed border-emerald-400 text-emerald-800 dark:border-emerald-600 dark:text-emerald-300; }
 .tone-attention { @apply bg-amber-100 text-amber-900 dark:bg-amber-900/40 dark:text-amber-200; }
 .tone-neutral { @apply bg-gray-100 text-gray-700 dark:bg-dark-700 dark:text-gray-300; }
 .tone-running { @apply bg-sky-50 text-sky-800 dark:bg-sky-950/40 dark:text-sky-300; }
+@keyframes progress-slide { from { transform: translateX(-110%); } to { transform: translateX(320%); } }
 </style>

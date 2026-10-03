@@ -185,7 +185,7 @@ export default {
     evaluations: '降智测试',
     modelIntegrity: '降智调度',
     modelIntegrityTests: '降智测试',
-    modelIntegrityScheduling: '降智调度',
+    modelIntegrityScheduling: '调度策略',
     plugins: '插件管理',
     proxies: 'IP管理',
     redeemCodes: '兑换码',

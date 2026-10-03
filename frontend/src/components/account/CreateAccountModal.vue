@@ -3092,6 +3092,27 @@
         </div>
       </div>
 
+      <!-- Explicit opt-in for an OpenAI API-key account that fronts another account aggregator. -->
+      <div
+        v-if="openaiOpaqueUpstreamCandidate"
+        class="border-t border-gray-200 pt-4 dark:border-dark-600"
+        data-testid="create-openai-opaque-upstream"
+      >
+        <div class="flex items-center justify-between gap-4">
+          <div>
+            <label class="input-label mb-0">{{ t('admin.accounts.openai.opaqueUpstream') }}</label>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.openai.opaqueUpstreamDesc') }}
+            </p>
+          </div>
+          <Toggle
+            v-model="openaiOpaqueUpstreamEnabled"
+            data-testid="create-openai-opaque-upstream-toggle"
+            :aria-label="t('admin.accounts.openai.opaqueUpstream')"
+          />
+        </div>
+      </div>
+
       <!-- OpenAI Codex namespace 工具摊平（兼容开关，仅 OAuth） -->
       <div
         v-if="form.platform === 'openai' && form.type === 'oauth'"
@@ -3972,6 +3993,7 @@ import {
 import { createStableObjectKeyResolver } from '@/utils/stableObjectKey'
 import { getAccountExpiryTimestamp } from '@/components/account/accountExpiry'
 import { VERTEX_LOCATION_OPTIONS } from '@/constants/account'
+import { isOpenAIOpaqueUpstreamBaseUrl } from '@/components/account/openaiBaseUrl'
 import {
   OPENAI_WS_MODE_CTX_POOL,
   OPENAI_WS_MODE_OFF,
@@ -4428,6 +4450,7 @@ const applyGrokOAuthUpstreamConfig = (credentials: Record<string, unknown>) => {
 const interceptWarmupRequests = ref(false)
 const autoPauseOnExpired = ref(true)
 const openaiPassthroughEnabled = ref(false)
+const openaiOpaqueUpstreamEnabled = ref(false)
 // OpenAI Codex namespace 工具摊平兼容开关（仅 OAuth），缺省关闭即原样保留
 const openaiFlattenNamespacesEnabled = ref(false)
 const openAILongContextBillingEnabled = ref(false)
@@ -4665,6 +4688,12 @@ const isOpenAIModelRestrictionDisabled = computed(() =>
   form.platform === 'openai' && openaiPassthroughEnabled.value
 )
 
+const openaiOpaqueUpstreamCandidate = computed(() =>
+  form.platform === 'openai' &&
+  form.type === 'apikey' &&
+  isOpenAIOpaqueUpstreamBaseUrl(apiKeyBaseUrl.value)
+)
+
 const mixedChannelWarningMessageText = computed(() => {
   if (mixedChannelWarningDetails.value) {
     return t('admin.accounts.mixedChannelWarning', mixedChannelWarningDetails.value)
@@ -4900,6 +4929,7 @@ watch(
     }
     if (newPlatform !== 'openai') {
       openaiPassthroughEnabled.value = false
+      openaiOpaqueUpstreamEnabled.value = false
       openaiFlattenNamespacesEnabled.value = false
       openAIEndpointCapabilities.value = ['chat_completions', 'embeddings']
       openaiOAuthResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
@@ -5353,6 +5383,7 @@ const resetForm = () => {
   interceptWarmupRequests.value = false
   autoPauseOnExpired.value = true
   openaiPassthroughEnabled.value = false
+  openaiOpaqueUpstreamEnabled.value = false
   openaiFlattenNamespacesEnabled.value = false
   openAILongContextBillingEnabled.value = false
   openAILongContextBillingTouched.value = false
@@ -5439,6 +5470,11 @@ const buildOpenAIExtra = (base?: Record<string, unknown>): Record<string, unknow
   } else {
     delete extra.openai_passthrough
     delete extra.openai_oauth_passthrough
+  }
+  if (openaiOpaqueUpstreamCandidate.value && openaiOpaqueUpstreamEnabled.value) {
+    extra.openai_opaque_upstream = true
+  } else {
+    delete extra.openai_opaque_upstream
   }
   // 缺省即保留 namespace，不写空值，避免 extra 里堆积默认项
   if (form.type === 'oauth' && openaiFlattenNamespacesEnabled.value) {

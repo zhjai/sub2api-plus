@@ -63,6 +63,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	)
 
 	payload := s.buildOpenAIWSCreatePayload(reqBody, account)
+	applyOpenAIOpaqueRouteEpochPayload(c, account, payload)
 	payloadStrategy, removedKeys := applyOpenAIWSRetryPayloadStrategy(payload, attempt)
 	turnState := ""
 	turnMetadata := ""
@@ -137,9 +138,11 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		}
 	}
 	preferredConnID := ""
+	preferredConnBound := false
 	if stateStore != nil && previousResponseID != "" {
 		if connID, ok := stateStore.GetResponseConn(previousResponseID); ok {
 			preferredConnID = connID
+			preferredConnBound = true
 		}
 	}
 	storeDisabled := s.isOpenAIWSStoreDisabledInRequest(reqBody, account)
@@ -209,8 +212,11 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		HeadersFactory: func(factoryCtx context.Context, headers http.Header) (http.Header, error) {
 			return s.refreshOpenAIAgentIdentityHeaders(factoryCtx, account, headers)
 		},
-		PreferredConnID: preferredConnID,
-		ForceNewConn:    forceNewConn,
+		PreferredConnID:    preferredConnID,
+		PreferredConnBound: preferredConnBound,
+		ForcePreferredConn: preferredConnBound && account.IsOpenAIOpaqueUpstream(),
+		RouteEpochAffinity: openAIOpaqueRouteEpochAffinity(c, account),
+		ForceNewConn:       forceNewConn,
 		ProxyURL: func() string {
 			if account.ProxyID != nil && account.Proxy != nil {
 				return account.Proxy.URL()
@@ -614,6 +620,10 @@ readLoop:
 			continue
 		}
 		responseModelObserver.ObserveOpenAI(message, eventType)
+		if responseModel, mismatch := openAIPreCommitResponseModelMismatch(message, mappedModel); account.IsOpenAIOpaqueUpstream() && mismatch && !wroteDownstream && !clientDisconnected {
+			lease.MarkBroken()
+			return resultWithUsage(), newOpenAIPreCommitModelMismatchFailoverError(mappedModel, responseModel)
+		}
 		eventCount++
 		if firstEventType == "" {
 			firstEventType = eventType
@@ -822,6 +832,7 @@ readLoop:
 	if responseID != "" && stateStore != nil {
 		ttl := s.openAIWSResponseStickyTTL()
 		logOpenAIWSBindResponseAccountWarn(groupID, account.ID, responseID, stateStore.BindResponseAccount(ctx, groupID, responseID, account.ID, ttl))
+		s.bindOpenAIResponseRouteEpoch(ctx, c, account, responseID)
 		stateStore.BindResponseConn(responseID, lease.ConnID(), ttl)
 	}
 	if stateStore != nil && storeDisabled && sessionHash != "" {

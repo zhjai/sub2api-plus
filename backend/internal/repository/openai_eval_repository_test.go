@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"database/sql/driver"
 	"testing"
 	"time"
@@ -9,6 +10,32 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/stretchr/testify/require"
 )
+
+func TestOpenAIEvalInitialNextRunUsesAdditiveJitter(t *testing.T) {
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	for range 100 {
+		next, err := openAIEvalInitialNextRun(now, 300, 150)
+		require.NoError(t, err)
+		delay := next.Sub(now)
+		require.GreaterOrEqual(t, delay, 300*time.Second)
+		require.LessOrEqual(t, delay, 450*time.Second)
+	}
+}
+
+func TestOpenAIEvalUpdateRunProgressPersistsOnlySanitizedCounters(t *testing.T) {
+	repo, mock := openAIEvalSaveConfigDB(t)
+	run := &service.OpenAIEvalRun{
+		Status: "running", RequestCount: 5, InputTokens: 12, OutputTokens: 7, DurationMS: 850,
+		UpstreamModel: "gpt-upstream", BaselineVersion: "baseline-v1",
+		Outcome: service.OpenAIEvalOutcome{Status: "running", Reason: "sampling", SampleCount: 5, ExpectedCount: 60},
+		Samples: []service.OpenAIEvalSampleRecord{{ProbeID: "cell-1", NormalizedAnswer: "42", Valid: true}},
+	}
+	mock.ExpectExec(`UPDATE\s+openai_eval_runs\s+SET\s+status=\$2`).
+		WithArgs(int64(71), "running", sqlmock.AnyArg(), sqlmock.AnyArg(), 5, int64(12), int64(7), int64(850), "gpt-upstream", "baseline-v1").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	require.NoError(t, repo.UpdateRunProgress(context.Background(), 71, run))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
 
 type nonNilTimeArgument struct{}
 
@@ -43,7 +70,7 @@ func expectOpenAIEvalConfigSaveAuditAndCommit(mock sqlmock.Sqlmock, actorID int6
 
 func expectOpenAIEvalScheduleUpsert(mock sqlmock.Sqlmock, accountID int64, testType string, schedule service.OpenAIEvalSchedule, next sqlmock.Argument) {
 	mock.ExpectExec(`INSERT\s+INTO\s+openai_eval_schedule_state`).
-		WithArgs(accountID, testType, "gpt-6-astra", "high", schedule.Enabled, schedule.IntervalSeconds, schedule.JitterSeconds, schedule.SampleMode, next).
+		WithArgs(accountID, testType, "gpt-6-astra", "high", schedule.Enabled, schedule.IntervalSeconds, schedule.JitterSeconds, schedule.SampleMode, schedule.SampleCount, next).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 }
 
@@ -149,4 +176,28 @@ func TestOpenAIEvalSaveConfigRejectsStaleRevision(t *testing.T) {
 
 	require.ErrorIs(t, repo.SaveConfig(t.Context(), &config, 17), service.ErrOpenAIEvalConfigRevisionConflict)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDisableLegacyBPSForRemovedAccountPreventsCompatibilityFallback(t *testing.T) {
+	previous := &service.OpenAIEvalConfig{BPSAccounts: []service.OpenAIEvalBPSAccountConfig{
+		{AccountID: 41, Mode: service.OpenAIEvalBPSModeAuto},
+		{AccountID: 42, Mode: service.OpenAIEvalBPSModeAuto},
+	}}
+	next := &service.OpenAIEvalConfig{
+		BPSAccounts: []service.OpenAIEvalBPSAccountConfig{{AccountID: 42, Mode: service.OpenAIEvalBPSModeAuto}},
+		Accounts: []service.OpenAIEvalAccountConfig{
+			{AccountID: 41, RequestedModel: "gpt-5.4", BPSMode: service.OpenAIEvalBPSModeAuto, BPSAuto: true},
+			{AccountID: 41, RequestedModel: "gpt-6-astra", BPSMode: service.OpenAIEvalBPSModeForceOn, BPSAuto: true},
+			{AccountID: 42, RequestedModel: "gpt-5.4", BPSMode: service.OpenAIEvalBPSModeAuto, BPSAuto: true},
+		},
+	}
+
+	disableLegacyBPSForRemovedAccounts(previous, next)
+
+	require.Equal(t, service.OpenAIEvalBPSModeForceOff, next.Accounts[0].BPSMode)
+	require.False(t, next.Accounts[0].BPSAuto)
+	require.Equal(t, service.OpenAIEvalBPSModeForceOff, next.Accounts[1].BPSMode)
+	require.False(t, next.Accounts[1].BPSAuto)
+	require.Equal(t, service.OpenAIEvalBPSModeAuto, next.Accounts[2].BPSMode)
+	require.True(t, next.Accounts[2].BPSAuto)
 }

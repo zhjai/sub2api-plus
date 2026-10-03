@@ -134,6 +134,13 @@ type OpenAIBPSModelStateRepository interface {
 	UpdateOpenAIBPSModelState(ctx context.Context, accountID int64, model string, transition func(OpenAIBPSModelState) (OpenAIBPSModelState, bool)) error
 }
 
+// OpenAIBPSAccountStateRepository persists the BPS state for the whole OAuth
+// account. Implementations must apply the transition while holding the
+// account row lock and merge only the account-scoped JSON key.
+type OpenAIBPSAccountStateRepository interface {
+	UpdateOpenAIBPSAccountState(ctx context.Context, accountID int64, transition func(OpenAIBPSAccountState) (OpenAIBPSAccountState, bool)) error
+}
+
 type AccountDuplicateRepository interface {
 	// CreateWithAccountGroups atomically persists an account, its exact group priorities,
 	// and the scheduler outbox event for the new routing snapshot.

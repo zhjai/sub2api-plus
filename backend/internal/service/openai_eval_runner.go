@@ -103,7 +103,7 @@ func (r *OpenAIEvalRunner) runDue(ctx context.Context) {
 			request := OpenAIEvalRunRequest{
 				AccountID: schedule.AccountID, TestType: schedule.TestType,
 				RequestedModel: schedule.RequestedModel, ReasoningEffort: schedule.ReasoningEffort,
-				SampleMode: schedule.SampleMode,
+				SampleMode: schedule.SampleMode, SampleCount: schedule.SampleCount,
 			}
 			if _, runErr := r.service.Run(ctx, request, 0, "scheduled"); runErr != nil && ctx.Err() == nil {
 				logger.LegacyPrintf("service.openai_eval_runner", "[OpenAIEvalRunner] scheduled run failed account=%d model=%s type=%s: %v", schedule.AccountID, schedule.RequestedModel, schedule.TestType, runErr)

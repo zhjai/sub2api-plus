@@ -185,7 +185,7 @@ export default {
     evaluations: 'Degradation tests',
     modelIntegrity: 'Model integrity',
     modelIntegrityTests: 'Integrity tests',
-    modelIntegrityScheduling: 'Integrity scheduling',
+    modelIntegrityScheduling: 'Scheduling policy',
     plugins: 'Plugins',
     proxies: 'Proxies',
     redeemCodes: 'Redeem Codes',

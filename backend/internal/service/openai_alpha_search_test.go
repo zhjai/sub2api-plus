@@ -173,7 +173,7 @@ func TestForwardAlphaSearchPATUsesResponsesWebSearchFallback(t *testing.T) {
 	require.Empty(t, upstream.lastReq.Header.Get("X-Codex-Beta-Features"))
 	require.Empty(t, upstream.lastReq.Header.Get("X-Codex-Turn-State"))
 	require.Empty(t, upstream.lastReq.Header.Get(responsesLiteHeaderKey))
-	require.Empty(t, upstream.lastReq.Header.Get("Accept-Language"))
+	require.Equal(t, "en-US,en;q=0.9", upstream.lastReq.Header.Get("Accept-Language"))
 	require.False(t, gjson.GetBytes(upstream.lastBody, "prompt_cache_key").Exists())
 	require.False(t, gjson.GetBytes(upstream.lastBody, "prompt_cache_retention").Exists())
 	require.Equal(t, "gpt-5.6-sol", gjson.GetBytes(upstream.lastBody, "model").String())

@@ -850,6 +850,14 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				)
 				return false
 			}
+			if account.IsOpenAIOpaqueUpstream() {
+				logOpenAIWSModeInfo(
+					"reconnect_prev_response_recovery_skip account_id=%d attempt=%d reason=opaque_owner_continuation previous_response_id_present=true",
+					account.ID,
+					attempt,
+				)
+				return false
+			}
 			delete(wsReqBody, "previous_response_id")
 			wsPrevResponseRecoveryTried = true
 			logOpenAIWSModeInfo(
@@ -886,7 +894,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			}
 			previousResponseID := openAIWSPayloadString(wsReqBody, "previous_response_id")
 			hasFunctionCallOutput := HasFunctionCallOutput(wsReqBody)
-			if previousResponseID != "" && !hasFunctionCallOutput {
+			if previousResponseID != "" && !hasFunctionCallOutput && !account.IsOpenAIOpaqueUpstream() {
 				delete(wsReqBody, "previous_response_id")
 			}
 			wsInvalidEncryptedContentRecoveryTried = true
@@ -1313,6 +1321,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				return nil, err
 			}
 			usage = nonStreamResult.usage
+			streamOutcome = nonStreamResult.outcome
 			responseID = strings.TrimSpace(nonStreamResult.responseID)
 			imageCount = nonStreamResult.imageCount
 			imageOutputSizes = nonStreamResult.imageOutputSizes
@@ -1352,17 +1361,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			Duration:                      time.Since(startTime),
 			FirstTokenMs:                  firstTokenMs,
 		}
-		if streamOutcome != nil {
-			forwardResult.ResponsesOutcomeObserved = streamOutcome.responsesOutcomeObserved
-			forwardResult.ResponsesProtocolStatus = streamOutcome.responsesProtocolStatus
-			forwardResult.ResponsesStatus = streamOutcome.responsesStatus
-			forwardResult.ResponsesIncompleteReason = streamOutcome.responsesIncompleteReason
-			forwardResult.ResponsesMeaningfulOutput = streamOutcome.responsesMeaningfulOutput
-			forwardResult.ResponsesToolCallForwarded = streamOutcome.responsesToolCallForwarded
-			forwardResult.ToolCapabilityFailure = streamOutcome.toolCapabilityFailure
-			forwardResult.ExecCallObserved = streamOutcome.execCallObserved
-			forwardResult.UpstreamTerminalEvent = streamOutcome.responsesTerminalEvent
-		}
+		streamOutcome.applyForwardOutcome(forwardResult)
 		if imageCount > 0 {
 			forwardResult.ImageCount = imageCount
 			forwardResult.ImageSize = imageSizeTier
@@ -1441,6 +1440,11 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 	// DeepSeek / Kimi 原生 Responses 端点为无状态实现：强制 store=false、清除
 	// previous_response_id，避免携带状态字段被上游拒绝。
 	body = normalizeDeepSeekResponsesRequestBody(account, body)
+	if rekeyedBody, changed, rekeyErr := applyOpenAIOpaqueRouteEpochBody(c, account, body); rekeyErr != nil {
+		return nil, rekeyErr
+	} else if changed {
+		body = rekeyedBody
+	}
 	// Record capability from the exact body sent upstream, after request rewriting.
 	setOpenAIExecContract(c, body, true)
 
@@ -1558,6 +1562,8 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 	// 账号级请求头覆写（仅 openai api_key 账号启用时生效；OAuth 路径 no-op）
 	account.ApplyHeaderOverrides(req.Header)
 	applyOpenCodeSessionHeader(c, account, targetURL, req.Header, body, openCodeSessionHintBody(promptCacheKey))
+	applyOpenAIOpaqueRouteEpochHeaders(c, account, req.Header, strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String()) != "")
+	s.enforceCodexAcceptLanguageForRequest(c, account, req.Header)
 	// x-codex-beta-features：按真实 Codex 的会话级行为补注（在账号级覆写之后，
 	// 保证不被覆盖丢失）。
 	applyOpenAICodexBetaFeatures(c, account, req.Header)

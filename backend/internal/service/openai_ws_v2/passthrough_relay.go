@@ -69,6 +69,11 @@ type RelayExit struct {
 	WroteDownstream bool
 }
 
+type RelayClientFrame struct {
+	MessageType coderws.MessageType
+	Payload     []byte
+}
+
 type RelayOptions struct {
 	WriteTimeout                    time.Duration
 	IdleTimeout                     time.Duration
@@ -81,6 +86,7 @@ type RelayOptions struct {
 	OnUsageParseFailure             func(eventType string, usageRaw string)
 	OnTurnComplete                  func(turn RelayTurnResult)
 	BeforeWriteClient               func(msgType coderws.MessageType, payload []byte, wroteDownstream bool) error
+	PrepareClientFrames             func(msgType coderws.MessageType, payload []byte) ([]RelayClientFrame, error)
 	BeforeClientWrite               func(msgType coderws.MessageType, payload []byte)
 	AfterClientWrite                func(msgType coderws.MessageType, payload []byte, writeErr error)
 	BeforeRelayCancel               func(exit RelayExit)
@@ -317,6 +323,7 @@ func Relay(
 			markActivity,
 			onTrace,
 			exitCh,
+			options.PrepareClientFrames,
 		)
 	}()
 	go runIdleWatchdog(relayCtx, nowFn, options.IdleTimeout, &lastActivity, onTrace, exitCh)
@@ -539,6 +546,7 @@ func runUpstreamToClient(
 	markActivity func(),
 	onTrace func(event RelayTraceEvent),
 	exitCh chan<- relayExitSignal,
+	prepareClientFrames ...func(coderws.MessageType, []byte) ([]RelayClientFrame, error),
 ) {
 	wroteDownstream := false
 	for {
@@ -592,6 +600,14 @@ func runUpstreamToClient(
 				return
 			}
 		}
+		frames := []RelayClientFrame{{MessageType: msgType, Payload: payload}}
+		if len(prepareClientFrames) > 0 && prepareClientFrames[0] != nil {
+			frames, err = prepareClientFrames[0](msgType, payload)
+			if err != nil {
+				exitCh <- relayExitSignal{stage: "upstream_message", err: err, wroteDownstream: wroteDownstream}
+				return
+			}
+		}
 		observedEvent := observedUpstreamEvent{}
 		switch msgType {
 		case coderws.MessageText:
@@ -633,36 +649,40 @@ func runUpstreamToClient(
 			markActivity()
 			continue
 		}
-		if beforeClientWrite != nil {
-			beforeClientWrite(msgType, payload)
+		for _, frame := range frames {
+			msgType, payload := frame.MessageType, frame.Payload
+			if beforeClientWrite != nil {
+				beforeClientWrite(msgType, payload)
+			}
+			writeErr := writeClient(msgType, payload)
+			if afterClientWrite != nil {
+				afterClientWrite(msgType, payload, writeErr)
+			}
+			if writeErr != nil {
+				emitRelayTrace(onTrace, RelayTraceEvent{
+					Stage:           "write_client_failed",
+					Direction:       "upstream_to_client",
+					MessageType:     relayMessageTypeString(msgType),
+					PayloadBytes:    len(payload),
+					WroteDownstream: wroteDownstream,
+					Error:           writeErr.Error(),
+				})
+				exitCh <- relayExitSignal{stage: "write_client", err: writeErr, wroteDownstream: wroteDownstream}
+				return
+			}
+			commitsOutput := msgType != coderws.MessageText || gjson.GetBytes(payload, "type").String() != "keepalive"
+			wroteDownstream = wroteDownstream || commitsOutput
+			if state != nil && commitsOutput {
+				state.turnWroteDownstream.Store(true)
+			}
+			if afterWriteClient != nil {
+				afterWriteClient(msgType, payload)
+			}
+			if forwardedFrames != nil {
+				forwardedFrames.Add(1)
+			}
+			markActivity()
 		}
-		writeErr := writeClient(msgType, payload)
-		if afterClientWrite != nil {
-			afterClientWrite(msgType, payload, writeErr)
-		}
-		if writeErr != nil {
-			emitRelayTrace(onTrace, RelayTraceEvent{
-				Stage:           "write_client_failed",
-				Direction:       "upstream_to_client",
-				MessageType:     relayMessageTypeString(msgType),
-				PayloadBytes:    len(payload),
-				WroteDownstream: wroteDownstream,
-				Error:           writeErr.Error(),
-			})
-			exitCh <- relayExitSignal{stage: "write_client", err: writeErr, wroteDownstream: wroteDownstream}
-			return
-		}
-		wroteDownstream = true
-		if state != nil {
-			state.turnWroteDownstream.Store(true)
-		}
-		if afterWriteClient != nil {
-			afterWriteClient(msgType, payload)
-		}
-		if forwardedFrames != nil {
-			forwardedFrames.Add(1)
-		}
-		markActivity()
 	}
 }
 

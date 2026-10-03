@@ -95,6 +95,12 @@ func mergeOpenAIEvalConfigOmittedFields(incoming, current *service.OpenAIEvalCon
 	if _, ok := fields["policies"]; !ok {
 		incoming.Policies = current.Policies
 	}
+	if _, ok := fields["custom_balance"]; !ok {
+		incoming.CustomBalance = current.CustomBalance
+	}
+	if _, ok := fields["bps_accounts"]; !ok {
+		incoming.BPSAccounts = current.BPSAccounts
+	}
 	if raw, ok := fields["accounts"]; !ok {
 		incoming.Accounts = current.Accounts
 	} else {

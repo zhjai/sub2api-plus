@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
 
@@ -17,6 +18,11 @@ const codexUpstreamMinVersion = "0.144.0"
 
 // codexClientVersionMaxLen 官方版本号均为短 ASCII 串，远低于此上限。
 const codexClientVersionMaxLen = 64
+
+// codexOutboundAcceptLanguage is intentionally fixed for every Codex
+// ChatGPT-internal request.  The gateway must not leak the host or client
+// locale, and account-level header overrides must not be able to change it.
+const codexOutboundAcceptLanguage = "en-US,en;q=0.9"
 
 // codexClientVersionPattern 允许 0.146.0 与 0.147.0-alpha.4 两类官方形态。
 var codexClientVersionPattern = regexp.MustCompile(`^[0-9]+(\.[0-9]+){1,3}(-[0-9A-Za-z.]+)?$`)
@@ -101,6 +107,52 @@ func ApplyCodexCanonicalAuthIdentity(h http.Header) {
 	userAgent, originator := CodexCanonicalAuthIdentity()
 	h.Set("user-agent", userAgent)
 	h.Set("originator", originator)
+	enforceCodexAcceptLanguage(h)
+}
+
+func enforceCodexAcceptLanguage(h http.Header) {
+	if h == nil {
+		return
+	}
+	for name := range h {
+		if strings.EqualFold(name, "Accept-Language") {
+			delete(h, name)
+		}
+	}
+	h.Set("Accept-Language", codexOutboundAcceptLanguage)
+}
+
+func hasCodexIdentityHeaders(h http.Header) bool {
+	for name, values := range h {
+		for _, value := range values {
+			if strings.EqualFold(name, "User-Agent") && openai.IsCodexOfficialClientByHeaders(value, "") ||
+				strings.EqualFold(name, "originator") && openai.IsCodexOfficialClientByHeaders("", value) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (s *OpenAIGatewayService) enforceCodexAcceptLanguageForRequest(c *gin.Context, account *Account, h http.Header) {
+	if s != nil && s.cfg != nil && s.cfg.Gateway.ForceCodexCLI {
+		enforceCodexAcceptLanguage(h)
+		return
+	}
+	if account != nil && account.UsesOpenAICodexProtocol() {
+		enforceCodexAcceptLanguage(h)
+		return
+	}
+	if hasCodexIdentityHeaders(h) {
+		enforceCodexAcceptLanguage(h)
+		return
+	}
+	if c == nil || c.Request == nil {
+		return
+	}
+	if hasCodexIdentityHeaders(c.Request.Header) {
+		enforceCodexAcceptLanguage(h)
+	}
 }
 
 // CodexCanonicalClientVersion 返回当前生效的 Codex 客户端版本号。
@@ -177,6 +229,7 @@ func ensureCodexIdentityHeaders(h http.Header) {
 	if h == nil {
 		return
 	}
+	enforceCodexAcceptLanguage(h)
 	identity := resolveCodexOutboundIdentity("")
 	if strings.TrimSpace(h.Get("user-agent")) == "" {
 		h.Set("user-agent", identity.userAgent)
@@ -220,7 +273,11 @@ func enforceCodexIdentityHeaders(h http.Header) {
 // 不应被补回。需要从缺失身份头恢复的调用方应先调用 ensureCodexIdentityHeaders。
 // 必须在所有 User-Agent 改写之后调用。
 func enforceCodexIdentityHeadersWithUA(h http.Header, overrideUA string) {
-	if h == nil || h.Get("originator") == "" {
+	if h == nil {
+		return
+	}
+	enforceCodexAcceptLanguage(h)
+	if h.Get("originator") == "" {
 		return
 	}
 	if !codexIdentityEnforcement.Load() {

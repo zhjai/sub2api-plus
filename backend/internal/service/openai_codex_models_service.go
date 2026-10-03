@@ -1749,6 +1749,7 @@ func (s *OpenAIGatewayService) FetchCodexModelsManifest(ctx context.Context, acc
 		setOpenAIChatGPTAccountHeaders(headers, credAccount)
 	}
 	headers.Set("Accept", "application/json")
+	enforceCodexAcceptLanguage(headers)
 	overrideUA := ""
 	if !useAPIKeyUpstream {
 		overrideUA = credAccount.GetOpenAIUserAgent()

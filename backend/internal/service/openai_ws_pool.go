@@ -81,10 +81,18 @@ type openAIWSAcquireRequest struct {
 	ForceNewConn bool
 	// ForcePreferredConn: 强制本次只使用 PreferredConnID，禁止漂移到其它连接。
 	ForcePreferredConn bool
+	// PreferredConnBound is set only when PreferredConnID came from a verified
+	// response_id -> conn_id binding. That exact connection may predate the
+	// currently staged epoch and is still the only safe continuation target.
+	PreferredConnBound bool
+	// RouteEpochAffinity is an internal pool compatibility key. It is never
+	// copied into upstream headers.
+	RouteEpochAffinity string
 }
 
 type openAIWSHandshakeCompatibilityKey struct {
 	betaFeatures        string
+	routeEpochAffinity  string
 	codexInstallationID string
 	sessionIDHyphen     string
 	sessionIDUnderscore string
@@ -772,6 +780,22 @@ func (c *openAIWSConn) matchesHandshakeCompatibility(compatibility openAIWSHands
 	return c != nil && c.handshakeCompatibility == compatibility
 }
 
+func (c *openAIWSConn) matchesBoundContinuationCompatibility(req openAIWSAcquireRequest, compatibility openAIWSHandshakeCompatibilityKey) bool {
+	if c == nil {
+		return false
+	}
+	if c.matchesHandshakeCompatibility(compatibility) {
+		return true
+	}
+	if !req.PreferredConnBound || req.Account == nil || !req.Account.IsOpenAIOpaqueUpstream() {
+		return false
+	}
+	bound := c.handshakeCompatibility
+	bound.routeEpochAffinity = ""
+	compatibility.routeEpochAffinity = ""
+	return bound == compatibility
+}
+
 func (c *openAIWSConn) matchesRoutingAffinity(routingAffinity string) bool {
 	return c != nil && c.routingAffinity == routingAffinity
 }
@@ -1145,7 +1169,7 @@ func (p *openAIWSConnPool) acquire(ctx context.Context, req openAIWSAcquireReque
 
 retryAcquire:
 	accountID := req.Account.ID
-	compatibility := normalizeOpenAIWSHandshakeCompatibility(req.Account, req.Headers)
+	compatibility := normalizeOpenAIWSHandshakeCompatibility(req.Account, req.Headers, req.RouteEpochAffinity)
 	routingAffinity := normalizeOpenAIWSRoutingAffinity(req.Headers)
 	effectiveMaxConns := p.effectiveMaxConnsByAccount(req.Account)
 	if effectiveMaxConns <= 0 {
@@ -1174,7 +1198,7 @@ retryAcquire:
 				return nil, errOpenAIWSPreferredConnUnavailable
 			}
 			preferredConn, ok := ap.conns[preferredConnID]
-			if !ok || !preferredConn.matchesHandshakeCompatibility(compatibility) {
+			if !ok || !preferredConn.matchesBoundContinuationCompatibility(req, compatibility) {
 				p.recordConnPickDuration(time.Since(pickStartedAt))
 				ap.mu.Unlock()
 				closeOpenAIWSConns(evicted)
@@ -1266,7 +1290,7 @@ retryAcquire:
 		}
 
 		if preferredConnID != "" {
-			if conn, ok := ap.conns[preferredConnID]; ok && conn.matchesHandshakeCompatibility(compatibility) && conn.tryAcquire() {
+			if conn, ok := ap.conns[preferredConnID]; ok && conn.matchesBoundContinuationCompatibility(req, compatibility) && conn.tryAcquire() {
 				connPick := time.Since(pickStartedAt)
 				p.recordConnPickDuration(connPick)
 				ap.mu.Unlock()
@@ -2152,7 +2176,7 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 	accountID := req.Account.ID
 	evict := func() { p.evictConn(accountID, id) }
 	pooledConn.onPeerClosed.Store(&evict)
-	pooledConn.handshakeCompatibility = normalizeOpenAIWSHandshakeCompatibility(req.Account, req.Headers)
+	pooledConn.handshakeCompatibility = normalizeOpenAIWSHandshakeCompatibility(req.Account, req.Headers, req.RouteEpochAffinity)
 	pooledConn.routingAffinity = normalizeOpenAIWSRoutingAffinity(req.Headers)
 	return pooledConn, nil
 }
@@ -2319,6 +2343,7 @@ func cloneOpenAIWSAcquireRequest(req openAIWSAcquireRequest) openAIWSAcquireRequ
 	copied.WSURL = stringsTrim(req.WSURL)
 	copied.ProxyURL = stringsTrim(req.ProxyURL)
 	copied.PreferredConnID = stringsTrim(req.PreferredConnID)
+	copied.RouteEpochAffinity = stringsTrim(req.RouteEpochAffinity)
 	return copied
 }
 
@@ -2333,7 +2358,7 @@ func cloneOpenAIWSAcquireRequestPtr(req *openAIWSAcquireRequest) *openAIWSAcquir
 func sameOpenAIWSPrewarmTarget(a, b openAIWSAcquireRequest) bool {
 	return stringsTrim(a.WSURL) == stringsTrim(b.WSURL) &&
 		stringsTrim(a.ProxyURL) == stringsTrim(b.ProxyURL) &&
-		normalizeOpenAIWSHandshakeCompatibility(a.Account, a.Headers) == normalizeOpenAIWSHandshakeCompatibility(b.Account, b.Headers)
+		normalizeOpenAIWSHandshakeCompatibility(a.Account, a.Headers, a.RouteEpochAffinity) == normalizeOpenAIWSHandshakeCompatibility(b.Account, b.Headers, b.RouteEpochAffinity)
 }
 
 func normalizeOpenAIWSBetaFeatures(headers http.Header) string {
@@ -2361,9 +2386,12 @@ func normalizeOpenAIWSBetaFeatures(headers http.Header) string {
 	return strings.Join(normalized, ",")
 }
 
-func normalizeOpenAIWSHandshakeCompatibility(account *Account, headers http.Header) openAIWSHandshakeCompatibilityKey {
+func normalizeOpenAIWSHandshakeCompatibility(account *Account, headers http.Header, routeEpochAffinity ...string) openAIWSHandshakeCompatibilityKey {
 	key := openAIWSHandshakeCompatibilityKey{
 		betaFeatures: normalizeOpenAIWSBetaFeatures(headers),
+	}
+	if len(routeEpochAffinity) > 0 {
+		key.routeEpochAffinity = stringsTrim(routeEpochAffinity[0])
 	}
 	mode := activeCodexFingerprintMode(account)
 	if mode == codexFingerprintOff {

@@ -39,7 +39,7 @@ This directory contains the Vue Router configuration for the Sub2API frontend ap
 | `/admin/groups`    | AdminGroupsView    | Group management                |
 | `/admin/accounts`  | AdminAccountsView  | Account management              |
 | `/admin/model-integrity/tests` | ModelIntegrityTestsView | 降智测试 (Candy / Fingerprint / ModelTrace / State Probe). `/admin/evaluations` and `/admin/accounts/evaluations` redirect here |
-| `/admin/model-integrity/scheduling` | ModelIntegritySchedulingView | 降智调度 (account selection policy, BPS, recent scheduler decisions) |
+| `/admin/model-integrity/scheduling` | ModelIntegritySchedulingView | 调度策略 (account selection policy, BPS, recent scheduler decisions) |
 | `/admin/proxies`   | AdminProxiesView   | Proxy management                |
 | `/admin/redeem`    | AdminRedeemView    | Redeem code management          |
 

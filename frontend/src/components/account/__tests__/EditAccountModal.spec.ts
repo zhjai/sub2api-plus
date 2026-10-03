@@ -349,6 +349,20 @@ describe('EditAccountModal', () => {
     ])
   })
 
+  it('loads and persists the opaque-upstream switch for a custom OpenAI API-key endpoint', async () => {
+    const account = buildAccount()
+    account.credentials.base_url = 'https://relay.example/v1'
+    account.extra = { openai_opaque_upstream: true }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+
+    const wrapper = mountModal(account)
+    expect(wrapper.get('[data-testid="edit-openai-opaque-upstream-toggle"]').attributes('aria-checked')).toBe('true')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_opaque_upstream).toBe(true)
+  })
+
   it('sets expiry presets from now instead of extending the saved expiry', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     vi.setSystemTime(new Date('2028-02-29T12:34:00'))

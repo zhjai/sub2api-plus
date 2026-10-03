@@ -1,7 +1,7 @@
 import { computed, reactive, ref } from 'vue'
 import { accountsAPI, type OpenAIEvalConfig, type OpenAIEvalModelCatalog } from '@/api/admin/accounts'
 import type { AccountListItem } from '@/types'
-import { normalizeRoute, toSavePayload } from './modelIntegrity'
+import { DEFAULT_CUSTOM_BALANCE, normalizeBPSAccount, normalizeCustomBalance, normalizeRoute, toSavePayload } from './modelIntegrity'
 
 export type SaveResult = 'saved' | 'conflict' | 'failed'
 
@@ -19,7 +19,7 @@ function isConflict(error: unknown): boolean {
  * overwriting what the other page changed.
  */
 export function useModelIntegrityConfig() {
-  const config = reactive<OpenAIEvalConfig>({ effects_enabled: false, bps_auto_enabled: false, scheduling_policy: '', policies: [], accounts: [] })
+  const config = reactive<OpenAIEvalConfig>({ effects_enabled: false, bps_auto_enabled: false, scheduling_policy: '', custom_balance: { ...DEFAULT_CUSTOM_BALANCE }, policies: [], bps_accounts: [], accounts: [] })
   const catalog = ref<OpenAIEvalModelCatalog | null>(null)
   const accounts = ref<AccountListItem[]>([])
   const loading = ref(true)
@@ -37,7 +37,13 @@ export function useModelIntegrityConfig() {
     config.effects_enabled = Boolean(saved.effects_enabled)
     config.bps_auto_enabled = Boolean(saved.bps_auto_enabled)
     config.scheduling_policy = saved.scheduling_policy ?? ''
-    config.policies = (saved.policies ?? []).map(rule => ({ ...rule, reasoning_effort: rule.reasoning_effort || '' }))
+    config.custom_balance = normalizeCustomBalance(saved.custom_balance)
+    config.policies = (saved.policies ?? []).map(rule => ({
+      ...rule,
+      reasoning_effort: rule.reasoning_effort || '',
+      ...(rule.policy === 'custom_balance' ? { custom_balance: normalizeCustomBalance(rule.custom_balance ?? saved.custom_balance) } : {})
+    }))
+    config.bps_accounts = (saved.bps_accounts ?? []).map(item => normalizeBPSAccount({ ...item }))
     config.accounts = (saved.accounts ?? []).map(route => normalizeRoute({ ...route }))
     snapshot.value = serialized()
   }
@@ -73,6 +79,7 @@ export function useModelIntegrityConfig() {
   async function save(): Promise<SaveResult> {
     if (!loaded.value || saving.value) return 'failed'
     config.accounts.forEach(normalizeRoute)
+    config.bps_accounts?.forEach(normalizeBPSAccount)
     saving.value = true
     try {
       const saved = await accountsAPI.saveOpenAIEvalConfig(toSavePayload(config))
@@ -96,10 +103,15 @@ export function useModelIntegrityConfig() {
     }
   }
 
+  function accountLabel(accountID: number) {
+    const account = accounts.value.find(item => item.id === accountID)
+    return account ? `${account.name} #${accountID}` : `#${accountID}`
+  }
+
   function accountName(accountID: number) {
     const account = accounts.value.find(item => item.id === accountID)
     return account ? account.name : `#${accountID}`
   }
 
-  return { config, catalog, accounts, loading, loaded, saving, conflict, loadError, dirty, load, reloadConfig, save, accountName }
+  return { config, catalog, accounts, loading, loaded, saving, conflict, loadError, dirty, load, reloadConfig, save, accountName, accountLabel }
 }

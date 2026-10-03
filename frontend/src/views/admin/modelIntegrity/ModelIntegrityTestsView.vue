@@ -90,6 +90,7 @@
                 :type="type"
                 :catalog="catalog"
                 :latest="latestRunFor(panelRuns, selected, type)"
+                :progress="runningProgress.get(runKey(selected, type))"
                 :running="isRunning(selected, type)"
                 :available="type !== 'state_probe' || isDirectOAuthRoute(selected)"
                 @run="requestRun(selected, type)"
@@ -119,6 +120,7 @@
                 <option value="">{{ t('admin.modelIntegrity.tests.filterResult') }}</option>
                 <option value="attention">{{ t('admin.modelIntegrity.tests.filterAttention') }}</option>
                 <option value="ok">{{ t('admin.modelIntegrity.tests.filterOk') }}</option>
+                <option value="likely">{{ t('admin.modelIntegrity.tests.filterLikely') }}</option>
                 <option value="neutral">{{ t('admin.modelIntegrity.tests.filterNeutral') }}</option>
               </select>
               <button type="button" class="btn btn-secondary btn-sm" :disabled="historyLoading" @click="loadHistory">
@@ -144,19 +146,19 @@
               </thead>
               <tbody>
                 <tr v-for="run in visibleRuns" :key="run.id" class="history-row" tabindex="0" data-testid="history-row" @click="detailRun = run" @keydown.enter="detailRun = run">
-                  <td class="whitespace-nowrap tabular-nums text-gray-500">{{ formatTime(run.finished_at || run.started_at) }}</td>
+                  <td class="history-time whitespace-nowrap tabular-nums text-gray-500">{{ formatTime(run.finished_at || run.started_at) }}</td>
                   <td class="history-target">
                     <span class="block text-gray-900 dark:text-gray-100">{{ accountName(run.account_id) }}</span>
                     <span class="block text-xs text-gray-500">{{ run.requested_model }} · {{ run.reasoning_effort || t('admin.modelIntegrity.common.defaultEffort') }}</span>
                   </td>
-                  <td class="whitespace-nowrap">{{ t(`admin.modelIntegrity.tests.types.${run.test_type}.name`) }}</td>
+                  <td class="history-test whitespace-nowrap">{{ t(`admin.modelIntegrity.tests.types.${run.test_type}.name`) }}</td>
                   <td class="history-result">
-                    <span class="tone" :class="`tone-${resultTone(run.status)}`">{{ statusLabel(t, run.status) }}</span>
+                    <span class="tone" :class="`tone-${resultTone(run.status)}`" data-testid="history-status">{{ runStatusLabel(t, run) }}</span>
                     <span class="mt-1 block text-xs text-gray-600 dark:text-gray-400">{{ runExplanation(t, run, catalog) }}</span>
                   </td>
-                  <td class="num">{{ run.outcome.sample_count }}/{{ run.outcome.expected_count }}</td>
-                  <td class="num">{{ run.cost_estimate_usd == null ? t('admin.modelIntegrity.tests.costUnknown') : `$${run.cost_estimate_usd.toFixed(4)}` }}</td>
-                  <td class="whitespace-nowrap text-gray-500">{{ triggerLabel(run.trigger_source) }}</td>
+                  <td class="history-meta num">{{ run.outcome.sample_count }}/{{ run.outcome.expected_count }}</td>
+                  <td class="history-meta num">{{ run.cost_estimate_usd == null ? t('admin.modelIntegrity.tests.costUnknown') : `$${run.cost_estimate_usd.toFixed(4)}` }}</td>
+                  <td class="history-trigger whitespace-nowrap text-gray-500">{{ triggerLabel(run.trigger_source) }}</td>
                 </tr>
               </tbody>
             </table>
@@ -199,7 +201,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { onBeforeRouteLeave } from 'vue-router'
 import AppLayout from '@/components/layout/AppLayout.vue'
@@ -225,7 +227,7 @@ import {
   totalDailyRequests,
   type EvalTestType
 } from './modelIntegrity'
-import { runExplanation, statusLabel } from './runText'
+import { runExplanation, runStatusLabel } from './runText'
 import { useModelIntegrityConfig } from './useModelIntegrityConfig'
 
 const { t } = useI18n()
@@ -246,6 +248,8 @@ const pendingRemove = ref<OpenAIEvalRouteConfig | null>(null)
 const pendingFingerprint = ref<OpenAIEvalRouteConfig | null>(null)
 const manualSampleMode = ref('quick')
 const runningKeys = reactive(new Set<string>())
+const runningProgress = reactive(new Map<string, OpenAIEvalRun>())
+const progressTimers = new Set<ReturnType<typeof setInterval>>()
 
 const filteredTargets = computed(() => {
   const needle = search.value.trim().toLowerCase()
@@ -287,7 +291,7 @@ function signalClass(route: OpenAIEvalRouteConfig, type: EvalTestType) {
 function signalText(route: OpenAIEvalRouteConfig, type: EvalTestType) {
   if (type === 'state_probe' && !isDirectOAuthRoute(route)) return t('admin.modelIntegrity.tests.onlyDirectOAuth')
   const run = signalRun(route, type)
-  return run ? statusLabel(t, run.status) : t('admin.modelIntegrity.tests.neverRun')
+  return run ? runStatusLabel(t, run) : t('admin.modelIntegrity.tests.neverRun')
 }
 function signalLabel(route: OpenAIEvalRouteConfig) {
   return TEST_TYPES.map(type => `${t(`admin.modelIntegrity.tests.types.${type}.name`)}: ${signalText(route, type)}`).join('; ')
@@ -350,19 +354,50 @@ function confirmFingerprint() {
 async function runNow(route: OpenAIEvalRouteConfig, type: EvalTestType, sampleMode?: string) {
   const key = runKey(route, type)
   runningKeys.add(key)
+  let pollTimer: ReturnType<typeof setInterval> | undefined
   try {
     const request: Parameters<typeof accountsAPI.runOpenAIEval>[0] = { account_id: route.account_id, requested_model: route.requested_model, reasoning_effort: route.reasoning_effort, test_type: type }
     if (type === 'fingerprint') request.sample_mode = sampleMode || 'quick'
-    const run = await accountsAPI.runOpenAIEval(request)
+    if (type === 'candy') request.sample_count = Math.max(1, Math.trunc(Number(route.candy_schedule.sample_count) || 1))
+    const pendingRun = accountsAPI.runOpenAIEval(request)
+    const poll = async () => {
+      try {
+        const response = await accountsAPI.listOpenAIEvalRuns({
+          account_id: route.account_id,
+          requested_model: route.requested_model,
+          reasoning_effort: type === 'state_probe' ? '' : route.reasoning_effort,
+          test_type: type,
+          limit: 5
+        })
+        const active = (response.items ?? []).find(item => item.status === 'running')
+        if (active) runningProgress.set(key, active)
+      } catch {
+        // Progress is best-effort; the primary run request remains authoritative.
+      }
+    }
+    pollTimer = setInterval(() => { void poll() }, 1000)
+    progressTimers.add(pollTimer)
+    void poll()
+    const run = await pendingRun
     detailRun.value = run
     appStore.showSuccess(t('admin.modelIntegrity.tests.runDone'))
     await Promise.all([loadHistory(), loadTargetRuns()])
   } catch (error) {
     appStore.showError(extractApiErrorMessage(error, t('admin.modelIntegrity.tests.runFailed')))
   } finally {
+    if (pollTimer) {
+      clearInterval(pollTimer)
+      progressTimers.delete(pollTimer)
+    }
+    runningProgress.delete(key)
     runningKeys.delete(key)
   }
 }
+
+onBeforeUnmount(() => {
+  for (const timer of progressTimers) clearInterval(timer)
+  progressTimers.clear()
+})
 
 async function loadHistory() {
   historyLoading.value = true
@@ -463,6 +498,7 @@ onMounted(initialLoad)
 .signals { @apply inline-flex gap-1; }
 .signal { @apply h-2.5 w-5 rounded-sm; }
 .signal-ok { @apply bg-emerald-500; }
+.signal-likely { @apply bg-emerald-100 ring-1 ring-inset ring-emerald-500 dark:bg-emerald-950/60 dark:ring-emerald-400; }
 .signal-attention { @apply bg-amber-500; }
 .signal-neutral { @apply bg-gray-400 dark:bg-dark-400; }
 .signal-running { @apply bg-sky-500; }
@@ -487,8 +523,29 @@ onMounted(initialLoad)
 .history-row { @apply cursor-pointer hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary-500 dark:hover:bg-dark-700/40; }
 .history-target { @apply min-w-[12rem]; }
 .history-result { @apply min-w-[16rem] max-w-[28rem]; }
+/*
+ * Phones: the 52rem table would push the result column off-screen. Each run
+ * becomes a compact block (target and time, test and trigger, then the full
+ * result) so the verdict is readable without horizontal scrolling. Samples
+ * and cost stay one tap away in the run details.
+ */
+@media (max-width: 639px) {
+  .history-table { min-width: 0; }
+  .history-table thead { @apply sr-only; }
+  .history-table tbody { @apply block; }
+  .history-row { @apply grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1 border-b border-gray-100 py-3 dark:border-dark-700; }
+  .history-row:last-child { @apply border-b-0; }
+  .history-table td { @apply block border-0 p-0; }
+  .history-table .history-target { @apply col-start-1 row-start-1 min-w-0; }
+  .history-table .history-time { @apply col-start-2 row-start-1 text-right text-xs; }
+  .history-table .history-test { @apply col-start-1 row-start-2 text-xs text-gray-500 dark:text-gray-400; }
+  .history-table .history-trigger { @apply col-start-2 row-start-2 text-right text-xs; }
+  .history-table .history-result { @apply col-span-2 row-start-3 mt-1 min-w-0 max-w-none; }
+  .history-table .history-meta { @apply hidden; }
+}
 .tone { @apply inline-flex whitespace-nowrap rounded px-1.5 py-0.5 text-xs font-medium; }
 .tone-ok { @apply bg-emerald-50 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300; }
+.tone-likely { @apply border border-dashed border-emerald-400 text-emerald-800 dark:border-emerald-600 dark:text-emerald-300; }
 .tone-attention { @apply bg-amber-100 text-amber-900 dark:bg-amber-900/40 dark:text-amber-200; }
 .tone-neutral { @apply bg-gray-100 text-gray-700 dark:bg-dark-700 dark:text-gray-300; }
 .tone-running { @apply bg-sky-50 text-sky-800 dark:bg-sky-950/40 dark:text-sky-300; }

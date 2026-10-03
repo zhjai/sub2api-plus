@@ -18,6 +18,7 @@ FULL_CONFIG = Path('.goreleaser.yaml')
 SIMPLE_CONFIG = Path('.goreleaser.simple.yaml')
 VERSION_FILE = Path('backend/cmd/server/VERSION')
 VERSION_RE = re.compile(r'\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?')
+PRERELEASE_RE = re.compile(r'(?:^|[.-])(?:alpha|beta|rc)(?:[.-]\d+)?$')
 
 
 def config(simple=False):
@@ -92,6 +93,9 @@ def generate_config(args):
     else:
         # Artifacts are supplied through the OSS extra_files mechanism. No build
         # is repeated on the publishing runner, and release templates stay intact.
+        if PRERELEASE_RE.search(os.environ.get('RELEASE_VERSION', '')):
+            data['release']['prerelease'] = True
+            data['release']['make_latest'] = 'false'
         data['before'] = {'hooks': []}
         data['builds'] = [{'id': 'sub2api', 'skip': True}]
         data['archives'] = []

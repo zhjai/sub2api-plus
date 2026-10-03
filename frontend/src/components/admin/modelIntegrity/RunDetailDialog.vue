@@ -6,9 +6,10 @@
         <p class="text-xs text-gray-500 dark:text-gray-400">{{ t(`admin.modelIntegrity.tests.types.${run.test_type}.name`) }} · {{ formatTime(run.finished_at || run.started_at) }}</p>
       </div>
       <div class="flex items-start gap-2">
-        <span class="tone" :class="`tone-${resultTone(run.status)}`">{{ statusLabel(t, run.status) }}</span>
+        <span class="tone" :class="`tone-${resultTone(run.status)}`" data-testid="detail-status">{{ runStatusLabel(t, run) }}</span>
         <p class="text-gray-700 dark:text-gray-300">{{ runExplanation(t, run, catalog) }}</p>
       </div>
+      <p v-if="isAttributionRun(run)" class="attribution-note" data-testid="attribution-note">{{ t('admin.modelIntegrity.tests.detail.attributionNote') }}</p>
 
       <dl class="facts">
         <div><dt>{{ t('admin.modelIntegrity.tests.detail.samples') }}</dt><dd>{{ run.outcome.sample_count }}/{{ run.outcome.expected_count }}</dd></div>
@@ -17,6 +18,7 @@
         <div><dt>{{ t('admin.modelIntegrity.tests.detail.duration') }}</dt><dd>{{ formatDuration(run.duration_ms) }}</dd></div>
         <div><dt>{{ t('admin.modelIntegrity.tests.detail.cost') }}</dt><dd>{{ run.cost_estimate_usd == null ? t('admin.modelIntegrity.tests.costUnknown') : `$${run.cost_estimate_usd.toFixed(4)}` }}</dd></div>
         <div v-if="run.upstream_model"><dt>{{ t('admin.modelIntegrity.tests.detail.upstreamModel') }}</dt><dd>{{ run.upstream_model }}</dd></div>
+        <div v-if="run.outcome.fingerprint?.nearest_model"><dt>{{ t('admin.modelIntegrity.tests.detail.nearestModel') }}</dt><dd class="break-all">{{ run.outcome.fingerprint.nearest_model }}</dd></div>
         <div v-if="run.baseline_version"><dt>{{ t('admin.modelIntegrity.tests.detail.baseline') }}</dt><dd class="break-all">{{ run.baseline_version }}</dd></div>
       </dl>
 
@@ -54,8 +56,8 @@
 import { useI18n } from 'vue-i18n'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import type { OpenAIEvalModelCatalog, OpenAIEvalRun } from '@/api/admin/accounts'
-import { resultTone } from '@/views/admin/modelIntegrity/modelIntegrity'
-import { runExplanation, statusLabel } from '@/views/admin/modelIntegrity/runText'
+import { isAttributionRun, resultTone } from '@/views/admin/modelIntegrity/modelIntegrity'
+import { runExplanation, runStatusLabel } from '@/views/admin/modelIntegrity/runText'
 
 defineProps<{
   run: OpenAIEvalRun | null
@@ -79,6 +81,8 @@ const formatTime = (value: string) => {
 .facts dd { @apply font-medium tabular-nums text-gray-800 dark:text-gray-200; }
 .tone { @apply inline-flex shrink-0 whitespace-nowrap rounded px-1.5 py-0.5 text-xs font-medium; }
 .tone-ok { @apply bg-emerald-50 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300; }
+.tone-likely { @apply border border-dashed border-emerald-400 text-emerald-800 dark:border-emerald-600 dark:text-emerald-300; }
+.attribution-note { @apply border-l-2 border-gray-300 pl-3 text-xs leading-relaxed text-gray-600 dark:border-dark-500 dark:text-gray-400; }
 .tone-attention { @apply bg-amber-100 text-amber-900 dark:bg-amber-900/40 dark:text-amber-200; }
 .tone-neutral { @apply bg-gray-100 text-gray-700 dark:bg-dark-700 dark:text-gray-300; }
 .tone-running { @apply bg-sky-50 text-sky-800 dark:bg-sky-950/40 dark:text-sky-300; }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -20,6 +21,18 @@ const openAIToolCapabilityLoggedKey = "openai_tool_capability_failure_logged"
 const openAIExecProtocolPrefixMaxBytes = 8 * 1024
 
 const OpenAIExecProtocolLeakReason GatewayFailureReason = "openai_exec_protocol_leak"
+
+func newOpenAIExecProtocolLeakFailoverError() *UpstreamFailoverError {
+	return &UpstreamFailoverError{
+		StatusCode:               http.StatusBadGateway,
+		ResponseBody:             []byte(`{"error":{"type":"upstream_error","code":"exec_protocol_leak","message":"Upstream emitted an exec call as text"}}`),
+		SafeToFailoverAfterWrite: true,
+		OpaqueRouteEpochEligible: true,
+		IntegritySignal:          OpenAIIntegritySignalExecLeak,
+		SessionAccountEscape:     true,
+		Reason:                   OpenAIExecProtocolLeakReason,
+	}
+}
 
 type openAIExecProtocolVerdict uint8
 
@@ -183,6 +196,21 @@ func openAIAssistantOutputText(eventType string, data []byte, alreadySeen bool) 
 			}
 			return text.String()
 		}
+	case "response.completed", "response.done":
+		if !alreadySeen {
+			var text strings.Builder
+			for _, item := range gjson.GetBytes(data, "response.output").Array() {
+				if item.Get("type").String() != "message" {
+					continue
+				}
+				for _, part := range item.Get("content").Array() {
+					if part.Get("type").String() == "output_text" {
+						text.WriteString(part.Get("text").String())
+					}
+				}
+			}
+			return text.String()
+		}
 	}
 	return ""
 }
@@ -192,7 +220,20 @@ func observeOpenAIToolCapabilitySSE(c *gin.Context, eventType string, data []byt
 		return
 	}
 	capability := openAIToolCapabilityStateFromContext(c)
+	observeOpenAIToolCapabilityState(&capability, eventType, data)
+	c.Set(openAIToolCapabilityContextKey, capability)
+}
+
+func observeOpenAIToolCapabilityState(capability *openAIToolCapabilityState, eventType string, data []byte) {
 	typ := strings.TrimSpace(eventType)
+	if openAIStreamEventTypeIsTerminal(typ) {
+		for _, item := range gjson.GetBytes(data, "response.output").Array() {
+			// Some providers only expose calls in the terminal output snapshot.
+			if (item.Get("type").String() == "custom_tool_call" || item.Get("type").String() == "function_call") && strings.EqualFold(item.Get("name").String(), "exec") {
+				capability.ExecCallObserved = true
+			}
+		}
+	}
 	itemType := strings.TrimSpace(gjson.GetBytes(data, "item.type").String())
 	name := strings.TrimSpace(gjson.GetBytes(data, "name").String())
 	if name == "" {
@@ -220,7 +261,6 @@ func observeOpenAIToolCapabilitySSE(c *gin.Context, eventType string, data []byt
 			capability.ExplicitDenial = true
 		}
 	}
-	c.Set(openAIToolCapabilityContextKey, capability)
 }
 
 func openAIToolCapabilityFailure(c *gin.Context, completedTerminal bool) bool {

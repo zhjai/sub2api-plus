@@ -49,6 +49,58 @@ func TestOpenAIWSStateStore_HTTPResponseOwnerPersistsAcrossStoreInstances(t *tes
 	require.Equal(t, int64(301), apiKeyID)
 }
 
+func TestOpenAIWSStateStore_ResponseBindingMissIsNotOperationalFailure(t *testing.T) {
+	ctx := context.Background()
+	for _, wrapped := range []bool{false, true} {
+		t.Run(fmt.Sprintf("wrapped=%t", wrapped), func(t *testing.T) {
+			miss := ErrStickySessionNotFound
+			if wrapped {
+				miss = fmt.Errorf("cache miss: %w", miss)
+			}
+			store := NewOpenAIWSStateStore(&openAIOpaqueRouteEpochLookupErrorCache{err: miss})
+			accountID, err := store.GetResponseAccount(ctx, 8, "resp_missing")
+			require.NoError(t, err)
+			require.Zero(t, accountID)
+			epoch, found, err := store.GetResponseRouteEpoch(ctx, 8, "resp_missing", 101)
+			require.NoError(t, err)
+			require.False(t, found)
+			require.Zero(t, epoch)
+		})
+	}
+}
+
+func TestOpenAIWSStateStore_ResponseBindingOperationalErrorPropagates(t *testing.T) {
+	ctx := context.Background()
+	lookupErr := errors.New("cache unavailable")
+	store := NewOpenAIWSStateStore(&openAIOpaqueRouteEpochLookupErrorCache{err: lookupErr})
+	accountID, err := store.GetResponseAccount(ctx, 8, "resp_unavailable")
+	require.ErrorIs(t, err, lookupErr)
+	require.Zero(t, accountID)
+	epoch, found, err := store.GetResponseRouteEpoch(ctx, 8, "resp_unavailable", 101)
+	require.ErrorIs(t, err, lookupErr)
+	require.False(t, found)
+	require.Zero(t, epoch)
+}
+
+func TestOpenAIWSStateStore_ResponseRouteEpochPersistsAndIsAccountScoped(t *testing.T) {
+	cache := &stubGatewayCache{}
+	ctx := context.Background()
+	groupID := int64(8)
+	writer := NewOpenAIWSStateStore(cache)
+	require.NoError(t, writer.BindResponseRouteEpoch(ctx, groupID, "resp_epoch", 101, 2, time.Minute))
+
+	reader := NewOpenAIWSStateStore(cache)
+	epoch, found, err := reader.GetResponseRouteEpoch(ctx, groupID, "resp_epoch", 101)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.EqualValues(t, 2, epoch)
+
+	epoch, found, err = reader.GetResponseRouteEpoch(ctx, groupID, "resp_epoch", 102)
+	require.NoError(t, err)
+	require.Zero(t, epoch)
+	require.False(t, found, "response epoch bindings must not cross accounts")
+}
+
 func TestOpenAIWSStateStore_ResponseConnTTL(t *testing.T) {
 	store := NewOpenAIWSStateStore(nil)
 	store.BindResponseConn("resp_conn", "conn_1", 30*time.Millisecond)

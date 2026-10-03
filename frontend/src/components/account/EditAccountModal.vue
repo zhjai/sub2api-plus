@@ -1769,6 +1769,27 @@
         </div>
       </div>
 
+      <!-- Explicit opt-in for an OpenAI API-key account that fronts another account aggregator. -->
+      <div
+        v-if="openaiOpaqueUpstreamCandidate"
+        class="border-t border-gray-200 pt-4 dark:border-dark-600"
+        data-testid="edit-openai-opaque-upstream"
+      >
+        <div class="flex items-center justify-between gap-4">
+          <div>
+            <label class="input-label mb-0">{{ t('admin.accounts.openai.opaqueUpstream') }}</label>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.openai.opaqueUpstreamDesc') }}
+            </p>
+          </div>
+          <Toggle
+            v-model="openaiOpaqueUpstreamEnabled"
+            data-testid="edit-openai-opaque-upstream-toggle"
+            :aria-label="t('admin.accounts.openai.opaqueUpstream')"
+          />
+        </div>
+      </div>
+
       <!-- OpenAI Codex namespace 工具摊平（兼容开关，仅 OAuth） -->
       <div
         v-if="account?.platform === 'openai' && account?.type === 'oauth'"
@@ -3183,6 +3204,7 @@ import { createStableObjectKeyResolver } from '@/utils/stableObjectKey'
 import { getAccountExpiryTimestamp } from '@/components/account/accountExpiry'
 import { allSelectedGroupsEnableLongContextPricing } from '@/components/account/longContextBilling'
 import { VERTEX_LOCATION_OPTIONS } from '@/constants/account'
+import { isOpenAIOpaqueUpstreamBaseUrl } from '@/components/account/openaiBaseUrl'
 import {
   OPENAI_WS_MODE_CTX_POOL,
   OPENAI_WS_MODE_OFF,
@@ -3682,6 +3704,7 @@ const customBaseUrl = ref('')
 
 // OpenAI 自动透传开关（OAuth/API Key）
 const openaiPassthroughEnabled = ref(false)
+const openaiOpaqueUpstreamEnabled = ref(false)
 // OpenAI Codex namespace 工具摊平兼容开关（仅 OAuth），缺省关闭即原样保留
 const openaiFlattenNamespacesEnabled = ref(false)
 const openAILongContextBillingEnabled = ref(false)
@@ -3923,6 +3946,12 @@ const normalizeOpenAIResponsesMode = (mode: unknown): OpenAIResponsesMode => {
 }
 const isOpenAIModelRestrictionDisabled = computed(() =>
   props.account?.platform === 'openai' && openaiPassthroughEnabled.value
+)
+
+const openaiOpaqueUpstreamCandidate = computed(() =>
+  props.account?.platform === 'openai' &&
+  props.account?.type === 'apikey' &&
+  isOpenAIOpaqueUpstreamBaseUrl(editBaseUrl.value)
 )
 const openAIResponsesStatusKey = computed(() => {
   if (openAIResponsesMode.value === 'force_responses') {
@@ -4170,6 +4199,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 
   // Load OpenAI passthrough toggle (OpenAI OAuth/SetupToken/API Key)
   openaiPassthroughEnabled.value = false
+  openaiOpaqueUpstreamEnabled.value = false
   openaiFlattenNamespacesEnabled.value = false
   openAILongContextBillingEnabled.value = false
   editPlanType.value = ''
@@ -4188,6 +4218,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   webSearchEmulationMode.value = 'default'
   if (newAccount.platform === 'openai' && (newAccount.type === 'oauth' || newAccount.type === 'setup-token' || newAccount.type === 'apikey')) {
     openaiPassthroughEnabled.value = extra?.openai_passthrough === true || extra?.openai_oauth_passthrough === true
+    openaiOpaqueUpstreamEnabled.value = extra?.openai_opaque_upstream === true
     openaiFlattenNamespacesEnabled.value =
       newAccount.type === 'oauth' && extra?.openai_responses_flatten_namespaces === true
     const longContextBillingValue = extra?.openai_long_context_billing_enabled
@@ -5676,6 +5707,11 @@ const handleSubmit = async () => {
       } else {
         delete newExtra.openai_passthrough
         delete newExtra.openai_oauth_passthrough
+      }
+      if (openaiOpaqueUpstreamCandidate.value && openaiOpaqueUpstreamEnabled.value) {
+        newExtra.openai_opaque_upstream = true
+      } else {
+        delete newExtra.openai_opaque_upstream
       }
       // 缺省即保留 namespace，不写空值，避免 extra 里堆积默认项
       if (props.account.type === 'oauth' && openaiFlattenNamespacesEnabled.value) {

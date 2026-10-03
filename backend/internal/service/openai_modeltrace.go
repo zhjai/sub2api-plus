@@ -132,7 +132,8 @@ func modelTraceSchedulingOutcome(result *OpenAIEvalModelTraceResult, err error) 
 	if err != nil || result == nil || result.UsedOutputs == 0 {
 		return OpenAIEvalOutcome{Status: "insufficient", Reason: "modeltrace_insufficient_outputs", SampleCount: 0, ExpectedCount: OpenAIEvalModelTraceRequests, Confidence: "none", Scheduling: "alert_only"}
 	}
-	return OpenAIEvalOutcome{Status: "attributed", Reason: "modeltrace_behavioral_attribution", SampleCount: result.UsedOutputs, ExpectedCount: OpenAIEvalModelTraceRequests, Confidence: "low", Scheduling: "alert_only", ModelTrace: result}
+	status, reason := openAIEvalAttributionVerdict(result.Prediction)
+	return OpenAIEvalOutcome{Status: status, Reason: reason, SampleCount: result.UsedOutputs, ExpectedCount: OpenAIEvalModelTraceRequests, Confidence: "low", Scheduling: "alert_only", ModelTrace: result}
 }
 
 func isModelTraceType(testType string) bool {

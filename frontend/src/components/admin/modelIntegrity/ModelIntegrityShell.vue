@@ -1,16 +1,6 @@
 <template>
   <div class="mi-page">
     <header class="mi-head">
-      <nav class="mi-subnav" :aria-label="t('admin.modelIntegrity.nav.aria')">
-        <router-link
-          v-for="link in links"
-          :key="link.to"
-          :to="link.to"
-          class="mi-subnav-link"
-          :class="{ 'mi-subnav-link-active': route.path === link.to }"
-          :aria-current="route.path === link.to ? 'page' : undefined"
-        >{{ link.label }}</router-link>
-      </nav>
       <div class="mi-head-row">
         <div class="min-w-0">
           <h1 class="mi-title">{{ title }}</h1>
@@ -25,6 +15,7 @@
             v-if="showSave"
             type="button"
             class="btn btn-primary"
+            data-testid="model-integrity-save"
             :disabled="!dirty || saving || conflict"
             @click="emit('save')"
           >
@@ -46,11 +37,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useRoute } from 'vue-router'
 import Icon from '@/components/icons/Icon.vue'
 
+// The sidebar (降智调度 → 降智测试 / 调度策略) is the only page switcher;
+// this shell deliberately renders no second set of tabs.
 withDefaults(defineProps<{
   title: string
   description: string
@@ -63,20 +54,11 @@ withDefaults(defineProps<{
 const emit = defineEmits<{ (e: 'save'): void; (e: 'reload'): void }>()
 
 const { t } = useI18n()
-const route = useRoute()
-
-const links = computed(() => [
-  { to: '/admin/model-integrity/tests', label: t('admin.modelIntegrity.nav.tests') },
-  { to: '/admin/model-integrity/scheduling', label: t('admin.modelIntegrity.nav.scheduling') }
-])
 </script>
 
 <style scoped>
 .mi-page { @apply mx-auto w-full max-w-7xl space-y-5 pb-10; }
-.mi-head { @apply space-y-4 border-b border-gray-200 pb-5 dark:border-dark-700; }
-.mi-subnav { @apply inline-flex gap-1 rounded-lg bg-gray-100 p-1 text-sm dark:bg-dark-800; }
-.mi-subnav-link { @apply rounded-md px-3 py-1.5 font-medium text-gray-600 transition-colors hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 dark:text-gray-400 dark:hover:text-white; }
-.mi-subnav-link-active { @apply bg-white text-gray-900 shadow-sm dark:bg-dark-600 dark:text-white; }
+.mi-head { @apply border-b border-gray-200 pb-5 dark:border-dark-700; }
 .mi-head-row { @apply flex flex-wrap items-end justify-between gap-4; }
 .mi-title { @apply text-[1.375rem] font-semibold leading-tight tracking-tight text-gray-900 dark:text-white; }
 .mi-description { @apply mt-1.5 max-w-[62ch] text-sm leading-relaxed text-gray-600 dark:text-gray-400; }

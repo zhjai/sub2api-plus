@@ -520,6 +520,51 @@ func (s *OpenAIGatewayService) ResolveAccountIDByPreviousResponseIDForScheduler(
 	return accountID
 }
 
+// ResolveOpenAIPreviousResponseOwner resolves the account that created a
+// response binding without applying scheduler or capability eligibility. A
+// continuation may only be reconstructed on another account when its bound
+// owner is known to be an ordinary provider; opaque upstream state is not
+// portable across local accounts or route epochs.
+func (s *OpenAIGatewayService) ResolveOpenAIPreviousResponseOwner(
+	ctx context.Context,
+	groupID *int64,
+	previousResponseID string,
+) (*Account, bool, error) {
+	if s == nil {
+		return nil, false, nil
+	}
+	responseID := strings.TrimSpace(previousResponseID)
+	if responseID == "" {
+		return nil, false, nil
+	}
+	store := s.getOpenAIWSStateStore()
+	if store == nil {
+		return nil, false, nil
+	}
+	accountID, err := store.GetResponseAccount(ctx, derefGroupID(groupID), responseID)
+	if err != nil {
+		return nil, false, err
+	}
+	if accountID <= 0 {
+		return nil, false, nil
+	}
+	if s.accountRepo != nil {
+		account, getErr := s.accountRepo.GetByID(ctx, accountID)
+		if errors.Is(getErr, ErrAccountNotFound) {
+			return nil, true, nil
+		}
+		return account, true, getErr
+	}
+	if s.schedulerSnapshot != nil {
+		account, getErr := s.schedulerSnapshot.GetAccount(ctx, accountID)
+		if errors.Is(getErr, ErrAccountNotFound) {
+			return nil, true, nil
+		}
+		return account, true, getErr
+	}
+	return nil, true, nil
+}
+
 func (s *OpenAIGatewayService) resolveAccountByPreviousResponseIDForCapability(
 	ctx context.Context,
 	groupID *int64,
@@ -551,9 +596,10 @@ func (s *OpenAIGatewayService) resolveAccountByPreviousResponseIDForCapability(
 		}
 	}
 
+	// Ownership is durable response lineage, not a schedulability cache. Keep it
+	// until TTL expiry so retries cannot reconstruct an unavailable opaque owner.
 	account, err := s.getSchedulableAccount(ctx, accountID)
 	if err != nil || account == nil {
-		_ = store.DeleteResponseAccount(ctx, derefGroupID(groupID), responseID)
 		return 0, nil, "", nil
 	}
 	// OAuth/SetupToken continuation state lives on the WSv2 session and cannot
@@ -564,11 +610,9 @@ func (s *OpenAIGatewayService) resolveAccountByPreviousResponseIDForCapability(
 		return 0, nil, "", nil
 	}
 	if shouldClearStickySession(account, requestedModel) || !account.IsOpenAI() || !account.IsSchedulable() {
-		_ = store.DeleteResponseAccount(ctx, derefGroupID(groupID), responseID)
 		return 0, nil, "", nil
 	}
 	if !parentHealthyForShadow(account, s.parentAccountLookup(ctx)) {
-		_ = store.DeleteResponseAccount(ctx, derefGroupID(groupID), responseID)
 		return 0, nil, "", nil
 	}
 	if requestedModel != "" && !account.IsModelSupported(requestedModel) {
@@ -593,11 +637,9 @@ func (s *OpenAIGatewayService) resolveAccountByPreviousResponseIDForCapability(
 	if s.schedulerSnapshot != nil && s.accountRepo != nil {
 		latest, latestErr := s.accountRepo.GetByID(ctx, account.ID)
 		if latestErr != nil || latest == nil {
-			_ = store.DeleteResponseAccount(ctx, derefGroupID(groupID), responseID)
 			return 0, nil, "", nil
 		}
 		if shouldClearStickySession(latest, requestedModel) || !latest.IsOpenAI() || !latest.IsSchedulable() {
-			_ = store.DeleteResponseAccount(ctx, derefGroupID(groupID), responseID)
 			return 0, nil, "", nil
 		}
 		if !s.openAIAccountMatchesSchedulingGroup(latest, groupID) {
@@ -607,7 +649,6 @@ func (s *OpenAIGatewayService) resolveAccountByPreviousResponseIDForCapability(
 			return 0, nil, "", nil
 		}
 		if !parentHealthyForShadow(latest, s.parentAccountLookup(ctx)) {
-			_ = store.DeleteResponseAccount(ctx, derefGroupID(groupID), responseID)
 			return 0, nil, "", nil
 		}
 		if requestedModel != "" && !latest.IsModelSupported(requestedModel) {
@@ -624,13 +665,11 @@ func (s *OpenAIGatewayService) resolveAccountByPreviousResponseIDForCapability(
 			return 0, nil, "", nil
 		}
 		if s.isOpenAIAccountRequestRuntimeBlocked(latest, requestedModel) {
-			_ = store.DeleteResponseAccount(ctx, derefGroupID(groupID), responseID)
 			return 0, nil, "", nil
 		}
 		account = latest
 	}
 	if requireCompact && openAICompactSupportTier(account) == 0 {
-		_ = store.DeleteResponseAccount(ctx, derefGroupID(groupID), responseID)
 		return 0, nil, "", nil
 	}
 	return accountID, account, responseID, store

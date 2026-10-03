@@ -18,6 +18,7 @@ import (
 const stickySessionPrefix = "sticky_session:"
 const openAISessionEscapePrefix = "openai_session_escape:"
 const openAISessionEscapeRoutePrefix = "openai_session_escape_route:"
+const openAIOpaqueRouteEpochPrefix = "openai_opaque_route_epoch:"
 const openAIResponsesSessionWindowPrefix = "openai_responses_session_window:"
 const liveCallPrefix = "live:call:"
 
@@ -167,6 +168,161 @@ func (c *gatewayCache) GetOpenAISessionEscapedRoute(ctx context.Context, groupID
 	}
 	sort.Slice(state.AccountIDs, func(i, j int) bool { return state.AccountIDs[i] < state.AccountIDs[j] })
 	return state, nil
+}
+
+func buildOpenAIOpaqueRouteEpochKey(groupID int64, sessionHash, requestedModel, requestedEffort string, accountID int64) string {
+	dimensions := strings.ToLower(strings.TrimSpace(requestedModel)) + "\x00" + strings.ToLower(strings.TrimSpace(requestedEffort))
+	digest := sha256.Sum256([]byte(dimensions))
+	return fmt.Sprintf("%s%d:%s:%s:%d", openAIOpaqueRouteEpochPrefix, groupID, strings.TrimSpace(sessionHash), hex.EncodeToString(digest[:8]), accountID)
+}
+
+func (c *gatewayCache) GetOpenAIOpaqueRouteEpoch(ctx context.Context, groupID int64, sessionHash, requestedModel, requestedEffort string, accountID int64, ttl time.Duration) (service.OpenAIOpaqueRouteEpochState, error) {
+	if c == nil || c.rdb == nil || strings.TrimSpace(sessionHash) == "" || strings.TrimSpace(requestedModel) == "" || accountID <= 0 || ttl <= 0 {
+		return service.OpenAIOpaqueRouteEpochState{}, nil
+	}
+	key := buildOpenAIOpaqueRouteEpochKey(groupID, sessionHash, requestedModel, requestedEffort, accountID)
+	pipe := c.rdb.TxPipeline()
+	valuesCmd := pipe.HGetAll(ctx, key)
+	pipe.Expire(ctx, key, ttl)
+	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+		return service.OpenAIOpaqueRouteEpochState{}, err
+	}
+	values, err := valuesCmd.Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return service.OpenAIOpaqueRouteEpochState{}, err
+	}
+	state := service.OpenAIOpaqueRouteEpochState{}
+	state.Epoch, _ = strconv.ParseInt(values["epoch"], 10, 64)
+	state.Bumps, _ = strconv.Atoi(values["bumps"])
+	state.WindowStartedUnix, _ = strconv.ParseInt(values["window_started_unix"], 10, 64)
+	return state, nil
+}
+
+var bumpOpenAIOpaqueRouteEpochScript = redis.NewScript(`
+local current_epoch = tonumber(redis.call('HGET', KEYS[1], 'epoch') or '0')
+local bumps = tonumber(redis.call('HGET', KEYS[1], 'bumps') or '0')
+local window_started = tonumber(redis.call('HGET', KEYS[1], 'window_started_unix') or '0')
+local expected_epoch = tonumber(ARGV[1])
+local max_bumps = tonumber(ARGV[2])
+local now_unix = tonumber(ARGV[3])
+local window_seconds = tonumber(ARGV[4])
+local ttl_ms = tonumber(ARGV[5])
+
+if current_epoch ~= expected_epoch then
+  redis.call('PEXPIRE', KEYS[1], ttl_ms)
+  return {current_epoch, bumps, window_started, current_epoch > expected_epoch and 1 or 0}
+end
+
+if window_started <= 0 or now_unix - window_started >= window_seconds then
+  bumps = 0
+  window_started = now_unix
+end
+
+if bumps >= max_bumps then
+  redis.call('HSET', KEYS[1], 'epoch', current_epoch, 'bumps', bumps, 'window_started_unix', window_started)
+  redis.call('PEXPIRE', KEYS[1], ttl_ms)
+  return {current_epoch, bumps, window_started, 0}
+end
+
+current_epoch = current_epoch + 1
+bumps = bumps + 1
+redis.call('HSET', KEYS[1], 'epoch', current_epoch, 'bumps', bumps, 'window_started_unix', window_started)
+redis.call('PEXPIRE', KEYS[1], ttl_ms)
+return {current_epoch, bumps, window_started, 1}
+`)
+
+var convergeOpenAIOpaqueRouteEpochScript = redis.NewScript(`
+local current_epoch = tonumber(redis.call('HGET', KEYS[1], 'epoch') or '0')
+local current_bumps = tonumber(redis.call('HGET', KEYS[1], 'bumps') or '0')
+local current_window = tonumber(redis.call('HGET', KEYS[1], 'window_started_unix') or '0')
+local floor_epoch = tonumber(ARGV[1])
+local floor_bumps = tonumber(ARGV[2])
+local floor_window = tonumber(ARGV[3])
+local ttl_ms = tonumber(ARGV[4])
+
+if current_epoch < floor_epoch then
+  current_epoch = floor_epoch
+  current_bumps = floor_bumps
+  current_window = floor_window
+  redis.call('HSET', KEYS[1], 'epoch', current_epoch, 'bumps', current_bumps, 'window_started_unix', current_window)
+end
+redis.call('PEXPIRE', KEYS[1], ttl_ms)
+return {current_epoch, current_bumps, current_window}
+`)
+
+func (c *gatewayCache) ConvergeOpenAIOpaqueRouteEpoch(ctx context.Context, groupID int64, sessionHash, requestedModel, requestedEffort string, accountID int64, floor service.OpenAIOpaqueRouteEpochState, ttl time.Duration) (service.OpenAIOpaqueRouteEpochState, error) {
+	if c == nil || c.rdb == nil || strings.TrimSpace(sessionHash) == "" || strings.TrimSpace(requestedModel) == "" || accountID <= 0 || floor.Epoch <= 0 || ttl <= 0 {
+		return service.OpenAIOpaqueRouteEpochState{}, nil
+	}
+	key := buildOpenAIOpaqueRouteEpochKey(groupID, sessionHash, requestedModel, requestedEffort, accountID)
+	result, err := convergeOpenAIOpaqueRouteEpochScript.Run(ctx, c.rdb, []string{key},
+		strconv.FormatInt(floor.Epoch, 10),
+		strconv.Itoa(floor.Bumps),
+		strconv.FormatInt(floor.WindowStartedUnix, 10),
+		strconv.FormatInt(ttl.Milliseconds(), 10),
+	).Int64Slice()
+	if err != nil {
+		return service.OpenAIOpaqueRouteEpochState{}, err
+	}
+	if len(result) != 3 {
+		return service.OpenAIOpaqueRouteEpochState{}, fmt.Errorf("unexpected opaque route epoch convergence result length: %d", len(result))
+	}
+	return service.OpenAIOpaqueRouteEpochState{
+		Epoch:             result[0],
+		Bumps:             int(result[1]),
+		WindowStartedUnix: result[2],
+	}, nil
+}
+
+func (c *gatewayCache) BumpOpenAIOpaqueRouteEpoch(ctx context.Context, groupID int64, sessionHash, requestedModel, requestedEffort string, accountID, expectedEpoch int64, maxBumps int, window, ttl time.Duration) (service.OpenAIOpaqueRouteEpochState, bool, error) {
+	if c == nil || c.rdb == nil || strings.TrimSpace(sessionHash) == "" || strings.TrimSpace(requestedModel) == "" || accountID <= 0 || expectedEpoch < 0 || maxBumps <= 0 || window <= 0 || ttl <= 0 {
+		return service.OpenAIOpaqueRouteEpochState{}, false, nil
+	}
+	key := buildOpenAIOpaqueRouteEpochKey(groupID, sessionHash, requestedModel, requestedEffort, accountID)
+	result, err := bumpOpenAIOpaqueRouteEpochScript.Run(ctx, c.rdb, []string{key},
+		strconv.FormatInt(expectedEpoch, 10),
+		strconv.Itoa(maxBumps),
+		strconv.FormatInt(time.Now().Unix(), 10),
+		strconv.FormatInt(int64(window/time.Second), 10),
+		strconv.FormatInt(ttl.Milliseconds(), 10),
+	).Slice()
+	if err != nil {
+		return service.OpenAIOpaqueRouteEpochState{}, false, err
+	}
+	if len(result) != 4 {
+		return service.OpenAIOpaqueRouteEpochState{}, false, fmt.Errorf("unexpected opaque route epoch script result length: %d", len(result))
+	}
+	parse := func(value any) (int64, error) {
+		switch typed := value.(type) {
+		case int64:
+			return typed, nil
+		case string:
+			return strconv.ParseInt(typed, 10, 64)
+		default:
+			return 0, fmt.Errorf("unexpected opaque route epoch value type %T", value)
+		}
+	}
+	epoch, err := parse(result[0])
+	if err != nil {
+		return service.OpenAIOpaqueRouteEpochState{}, false, err
+	}
+	bumps, err := parse(result[1])
+	if err != nil {
+		return service.OpenAIOpaqueRouteEpochState{}, false, err
+	}
+	windowStarted, err := parse(result[2])
+	if err != nil {
+		return service.OpenAIOpaqueRouteEpochState{}, false, err
+	}
+	advanced, err := parse(result[3])
+	if err != nil {
+		return service.OpenAIOpaqueRouteEpochState{}, false, err
+	}
+	return service.OpenAIOpaqueRouteEpochState{
+		Epoch:             epoch,
+		Bumps:             int(bumps),
+		WindowStartedUnix: windowStarted,
+	}, advanced == 1, nil
 }
 
 var claimOpenAIResponsesSessionWindowScript = redis.NewScript(`

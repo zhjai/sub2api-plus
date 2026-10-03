@@ -84,6 +84,7 @@ export interface OpenAIEvalSchedule {
   interval_seconds: number
   jitter_seconds: number
   sample_mode?: string
+  sample_count?: number
   last_run_at?: string | null
   next_run_at?: string | null
 }
@@ -104,7 +105,15 @@ export interface OpenAIEvalRouteConfig {
 }
 
 /** '' keeps the historical scheduler behaviour. */
-export type OpenAIEvalSchedulingPolicy = '' | 'cost_first' | 'stability_first' | 'avoid_degradation'
+export type OpenAIEvalSchedulingPolicy = '' | 'cost_first' | 'stability_first' | 'avoid_degradation' | 'custom_balance'
+
+export interface OpenAIEvalPolicyWeights {
+  cost: number
+  stability: number
+  error_rate: number
+  ttft: number
+  load: number
+}
 
 export type OpenAIEvalBPSMode = 'auto' | 'force_on' | 'force_off'
 
@@ -113,6 +122,7 @@ export interface OpenAIEvalSchedulingPolicyRule {
   /** Empty means every reasoning effort of the model. */
   reasoning_effort?: string
   policy: Exclude<OpenAIEvalSchedulingPolicy, ''>
+  custom_balance?: OpenAIEvalPolicyWeights
 }
 
 export interface OpenAIEvalConfig {
@@ -122,7 +132,37 @@ export interface OpenAIEvalConfig {
   bps_auto_enabled: boolean
   scheduling_policy?: OpenAIEvalSchedulingPolicy
   policies?: OpenAIEvalSchedulingPolicyRule[]
+  custom_balance?: OpenAIEvalPolicyWeights
+  /**
+   * BPS is decided per OAuth account, independent of the account/model/effort
+   * test targets in `accounts`. Older servers omit the field.
+   */
+  bps_accounts?: OpenAIEvalBPSAccountConfig[]
   accounts: OpenAIEvalRouteConfig[]
+}
+
+/** Runtime route of one BPS account as reported by the server. */
+export type OpenAIEvalBPSAccountState = 'native' | 'bps' | 'locked' | string
+
+export interface OpenAIEvalBPSAccountConfig {
+  account_id: number
+  /** Model used for the health check only; the whole account switches. */
+  probe_model?: string
+  mode: OpenAIEvalBPSMode
+  /** Unhealthy probes in a row before switching to BPS. */
+  failure_threshold: number
+  /** Healthy probes in a row before switching back. */
+  recovery_threshold: number
+  interval_seconds: number
+  // Read-only runtime fields; never sent back on save.
+  active?: boolean
+  state?: OpenAIEvalBPSAccountState
+  disabled_reason?: string
+  degraded_streak?: number
+  healthy_streak?: number
+  updated_at?: string | null
+  last_run_at?: string | null
+  next_run_at?: string | null
 }
 
 export interface OpenAIBPSModelState {
@@ -167,6 +207,10 @@ export interface OpenAIEvalRun {
     state_probe?: OpenAIStateProbeResult
   }
   request_count: number
+  sample_count?: number
+  expected_samples?: number
+  completed_samples?: number
+  phase?: string
   input_tokens: number
   output_tokens: number
   cost_estimate_usd?: number | null
@@ -232,6 +276,7 @@ export async function runOpenAIEval(request: {
   requested_model: string
   reasoning_effort: string
   sample_mode?: string
+  sample_count?: number
 }): Promise<OpenAIEvalRun> {
   // Fingerprint runs can make 60-400 upstream requests; the shared 30s UI
   // timeout would cancel a healthy run and incorrectly show an error.
@@ -255,7 +300,7 @@ export async function listOpenAIEvalAudit(): Promise<{ items: Array<{ id: number
   return data
 }
 
-export async function resetOpenAIBPSState(request: { account_id: number; requested_model: string }): Promise<{ state: OpenAIBPSModelState }> {
+export async function resetOpenAIBPSState(request: { account_id: number; requested_model?: string }): Promise<{ state: OpenAIBPSModelState }> {
   const { data } = await apiClient.post<{ state: OpenAIBPSModelState }>('/admin/accounts/evaluations/bps/reset', request)
   return data
 }

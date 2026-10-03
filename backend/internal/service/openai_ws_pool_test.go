@@ -797,6 +797,181 @@ func TestOpenAIWSConnPool_AcquireReusesOnlyMatchingBetaFeatures(t *testing.T) {
 	require.Equal(t, 2, dialer.DialCount())
 }
 
+func TestOpenAIWSConnPool_DoesNotReuseAcrossRouteEpochAffinity(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 2
+	cfg.Gateway.OpenAIWS.MinIdlePerAccount = 0
+	cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 2
+
+	pool := newOpenAIWSConnPool(cfg)
+	dialer := &openAIWSCountingDialer{}
+	pool.setClientDialerForTest(dialer)
+	account := &Account{ID: 129, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	baseReq := openAIWSAcquireRequest{
+		Account:            account,
+		WSURL:              "wss://example.com/v1/responses",
+		RouteEpochAffinity: "epoch-1",
+	}
+
+	first, err := pool.Acquire(context.Background(), baseReq)
+	require.NoError(t, err)
+	firstID := first.ConnID()
+	first.Release()
+
+	secondReq := baseReq
+	secondReq.RouteEpochAffinity = "epoch-2"
+	second, err := pool.Acquire(context.Background(), secondReq)
+	require.NoError(t, err)
+	require.False(t, second.Reused())
+	require.NotEqual(t, firstID, second.ConnID())
+	second.Release()
+
+	again, err := pool.Acquire(context.Background(), baseReq)
+	require.NoError(t, err)
+	require.True(t, again.Reused())
+	require.Equal(t, firstID, again.ConnID())
+	again.Release()
+	require.Equal(t, 2, dialer.DialCount())
+}
+
+func TestOpenAIWSConnPool_ResponseBoundPreferredConnMayCrossCurrentEpoch(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 2
+	cfg.Gateway.OpenAIWS.MinIdlePerAccount = 0
+	cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 2
+
+	pool := newOpenAIWSConnPool(cfg)
+	dialer := &openAIWSCountingDialer{}
+	pool.setClientDialerForTest(dialer)
+	account := &Account{
+		ID: 130, Platform: PlatformOpenAI, Type: AccountTypeAPIKey,
+		Extra: map[string]any{"openai_opaque_upstream": true},
+	}
+	first, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
+		Account:            account,
+		WSURL:              "wss://example.com/v1/responses",
+		RouteEpochAffinity: "epoch-1",
+	})
+	require.NoError(t, err)
+	firstID := first.ConnID()
+	first.Release()
+
+	continued, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
+		Account:            account,
+		WSURL:              "wss://example.com/v1/responses",
+		RouteEpochAffinity: "epoch-2",
+		PreferredConnID:    firstID,
+		PreferredConnBound: true,
+		ForcePreferredConn: true,
+	})
+	require.NoError(t, err)
+	require.True(t, continued.Reused())
+	require.Equal(t, firstID, continued.ConnID())
+	continued.Release()
+	require.Equal(t, 1, dialer.DialCount())
+}
+
+func TestOpenAIWSConnPool_ResponseBoundPreferredConnStillRequiresBetaFeatures(t *testing.T) {
+	mutations := map[string]func(http.Header){
+		"beta features": func(headers http.Header) { headers.Set("X-Codex-Beta-Features", "different-feature") },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 2
+			cfg.Gateway.OpenAIWS.MinIdlePerAccount = 0
+			cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 2
+			pool := newOpenAIWSConnPool(cfg)
+			dialer := &openAIWSCountingDialer{}
+			pool.setClientDialerForTest(dialer)
+			account := &Account{
+				ID: 131, Platform: PlatformOpenAI, Type: AccountTypeAPIKey,
+				Extra: map[string]any{"openai_opaque_upstream": true},
+			}
+			headers := stableOpenAIWSIdentityHeadersForTest()
+			first, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
+				Account: account, WSURL: "wss://example.com/v1/responses", Headers: headers, RouteEpochAffinity: "epoch-1",
+			})
+			require.NoError(t, err)
+			firstID := first.ConnID()
+			first.Release()
+
+			continuedHeaders := headers.Clone()
+			mutate(continuedHeaders)
+			_, err = pool.Acquire(context.Background(), openAIWSAcquireRequest{
+				Account: account, WSURL: "wss://example.com/v1/responses", Headers: continuedHeaders,
+				RouteEpochAffinity: "epoch-2", PreferredConnID: firstID,
+				PreferredConnBound: true, ForcePreferredConn: true,
+			})
+			require.ErrorIs(t, err, errOpenAIWSPreferredConnUnavailable)
+			require.Equal(t, 1, dialer.DialCount())
+		})
+	}
+}
+
+func TestOpenAIWSConn_ResponseBoundCompatibilityIgnoresOnlyRouteEpoch(t *testing.T) {
+	account := &Account{
+		ID: 131, Platform: PlatformOpenAI, Type: AccountTypeAPIKey,
+		Extra: map[string]any{"openai_opaque_upstream": true},
+	}
+	base := openAIWSHandshakeCompatibilityKey{
+		betaFeatures:        "feature-a",
+		routeEpochAffinity:  "epoch-1",
+		codexInstallationID: "install-a",
+		sessionIDHyphen:     "session-a",
+		sessionIDUnderscore: "session-underscore-a",
+		threadID:            "thread-a",
+		clientRequestID:     "request-a",
+		codexWindowID:       "window-a",
+	}
+	conn := &openAIWSConn{handshakeCompatibility: base}
+	req := openAIWSAcquireRequest{Account: account, PreferredConnBound: true}
+
+	epochOnly := base
+	epochOnly.routeEpochAffinity = "epoch-2"
+	require.True(t, conn.matchesBoundContinuationCompatibility(req, epochOnly))
+
+	mutations := map[string]func(*openAIWSHandshakeCompatibilityKey){
+		"beta features":         func(key *openAIWSHandshakeCompatibilityKey) { key.betaFeatures = "feature-b" },
+		"installation identity": func(key *openAIWSHandshakeCompatibilityKey) { key.codexInstallationID = "install-b" },
+		"session identity":      func(key *openAIWSHandshakeCompatibilityKey) { key.sessionIDHyphen = "session-b" },
+		"thread identity":       func(key *openAIWSHandshakeCompatibilityKey) { key.threadID = "thread-b" },
+		"request identity":      func(key *openAIWSHandshakeCompatibilityKey) { key.clientRequestID = "request-b" },
+		"window identity":       func(key *openAIWSHandshakeCompatibilityKey) { key.codexWindowID = "window-b" },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			candidate := epochOnly
+			mutate(&candidate)
+			require.False(t, conn.matchesBoundContinuationCompatibility(req, candidate))
+		})
+	}
+}
+
+func TestOpenAIWSConnPool_OrdinaryResponseBindingDoesNotRelaxEpochAffinity(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 2
+	cfg.Gateway.OpenAIWS.MinIdlePerAccount = 0
+	cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 2
+	pool := newOpenAIWSConnPool(cfg)
+	dialer := &openAIWSCountingDialer{}
+	pool.setClientDialerForTest(dialer)
+	account := &Account{ID: 132, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	first, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
+		Account: account, WSURL: "wss://example.com/v1/responses", RouteEpochAffinity: "epoch-1",
+	})
+	require.NoError(t, err)
+	firstID := first.ConnID()
+	first.Release()
+
+	_, err = pool.Acquire(context.Background(), openAIWSAcquireRequest{
+		Account: account, WSURL: "wss://example.com/v1/responses", RouteEpochAffinity: "epoch-2",
+		PreferredConnID: firstID, PreferredConnBound: true, ForcePreferredConn: true,
+	})
+	require.ErrorIs(t, err, errOpenAIWSPreferredConnUnavailable)
+	require.Equal(t, 1, dialer.DialCount())
+}
+
 func activeCodexFingerprintPoolAccountForTest(id int64) *Account {
 	return &Account{
 		ID:       id,

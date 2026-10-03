@@ -24,13 +24,18 @@ import (
 var ErrOpenAIEvalConfigRevisionConflict = errors.New("OpenAI evaluation config revision conflict")
 
 const (
-	OpenAIEvalTypeCandy                  = "candy"
-	OpenAIEvalTypeFingerprint            = "fingerprint"
-	OpenAIEvalTypeModelTrace             = "modeltrace"
-	OpenAIEvalTypeStateProbe             = "state_probe"
-	OpenAIEvalDataVersion                = "cpa-codex-candy-eval-5654020c-v1"
-	OpenAIEvalBaselineVersion            = "cpa-codex-candy-eval-5654020c-v1"
-	OpenAIEvalMinFingerprintInterval     = 24 * time.Hour
+	OpenAIEvalTypeCandy       = "candy"
+	OpenAIEvalTypeFingerprint = "fingerprint"
+	OpenAIEvalTypeModelTrace  = "modeltrace"
+	OpenAIEvalTypeStateProbe  = "state_probe"
+	// OpenAIEvalBPSAccountEffort separates account-scoped BPS probes from
+	// legacy route/model State Probe schedules. It is an internal scheduler
+	// dimension, never a user-facing reasoning effort.
+	OpenAIEvalBPSAccountEffort = "__bps_account__"
+	OpenAIEvalDataVersion      = "sub2api-candy-29-v2-cpa-fingerprint-5654020c"
+	OpenAIEvalBaselineVersion  = "cpa-codex-candy-eval-5654020c-v1"
+	// All user-facing evaluation schedules share the same 5-minute floor.
+	OpenAIEvalMinFingerprintInterval     = 5 * time.Minute
 	OpenAIEvalFingerprintQuickSamples    = 60
 	OpenAIEvalFingerprintStandardSamples = 200
 	OpenAIEvalFingerprintStrictSamples   = 400
@@ -42,7 +47,7 @@ const (
 	openAIEvalFingerprintStrictRepeats   = 25
 	openAIEvalFingerprintPermutationN    = 1000
 	OpenAIEvalModelTraceRequests         = 3
-	OpenAIEvalModelTraceMinInterval      = 24 * time.Hour
+	OpenAIEvalModelTraceMinInterval      = 5 * time.Minute
 )
 
 // OpenAIEvalSchedulingPolicy controls how eligible accounts are ranked after
@@ -53,6 +58,7 @@ const (
 	OpenAIEvalSchedulingPolicyCostFirst        = "cost_first"
 	OpenAIEvalSchedulingPolicyStabilityFirst   = "stability_first"
 	OpenAIEvalSchedulingPolicyAvoidDegradation = "avoid_degradation"
+	OpenAIEvalSchedulingPolicyCustomBalance    = "custom_balance"
 )
 
 // OpenAIEvalBPSMode is an explicit replacement for the historical bps_auto
@@ -64,9 +70,10 @@ const (
 	OpenAIEvalBPSModeForceOff = "force_off"
 )
 
-// Keep the Candy canary compatible with the upstream CPA plugin contract.
-// The prompt and data version are pinned so historical runs remain comparable.
-const OpenAIEvalCandyExpectedAnswer = 21
+// The upstream CPA plugin labels 21 as correct, but the unrestricted draw
+// problem has a 28-candy counterexample. This fork versions the corrected
+// contract instead of mixing incompatible answers into one historical probe.
+const OpenAIEvalCandyExpectedAnswer = 29
 
 // CPA Candy/Fingerprint probe and reference data are vendored from
 // haowang02/cpa-plugin-codex-candy-eval at commit 5654020c1815b4c4d29139fa76b1fbfcffd9a990.
@@ -122,8 +129,9 @@ const OpenAIEvalRouteHealthTTL = 30 * time.Minute
 var openAIEvalEffectsEnabled atomic.Bool
 
 type openAIEvalSchedulingPolicySnapshot struct {
-	Default string
-	Rules   []OpenAIEvalSchedulingPolicyRule
+	Default       string
+	CustomBalance OpenAIEvalPolicyWeights
+	Rules         []OpenAIEvalSchedulingPolicyRule
 }
 
 var openAIEvalSchedulingPolicy atomic.Value // *openAIEvalSchedulingPolicySnapshot
@@ -140,6 +148,7 @@ func SetOpenAIEvalSchedulingPolicySnapshot(config *OpenAIEvalConfig) {
 	snapshot := &openAIEvalSchedulingPolicySnapshot{}
 	if config != nil {
 		snapshot.Default = config.SchedulingPolicy
+		snapshot.CustomBalance = config.CustomBalance
 		snapshot.Rules = append([]OpenAIEvalSchedulingPolicyRule(nil), config.Policies...)
 	}
 	openAIEvalSchedulingPolicy.Store(snapshot)
@@ -157,7 +166,46 @@ func OpenAIEvalSchedulingPolicyForRequest(model, effort string) string {
 	if snapshot == nil {
 		return OpenAIEvalSchedulingPolicyLegacy
 	}
-	return OpenAIEvalSchedulingPolicyFor(&OpenAIEvalConfig{SchedulingPolicy: snapshot.Default, Policies: snapshot.Rules}, model, effort)
+	return OpenAIEvalSchedulingPolicyFor(&OpenAIEvalConfig{SchedulingPolicy: snapshot.Default, CustomBalance: snapshot.CustomBalance, Policies: snapshot.Rules}, model, effort)
+}
+
+// OpenAIEvalCustomBalanceForRequest returns the normalized custom weights for
+// a model/effort route. It is intentionally read-only and follows the same
+// most-specific rule resolution as OpenAIEvalSchedulingPolicyFor.
+func OpenAIEvalCustomBalanceForRequest(model, effort string) (OpenAIEvalPolicyWeights, bool) {
+	if !OpenAIEvalEffectsEnabled() {
+		return OpenAIEvalPolicyWeights{}, false
+	}
+	value := openAIEvalSchedulingPolicy.Load()
+	snapshot, _ := value.(*openAIEvalSchedulingPolicySnapshot)
+	if snapshot == nil {
+		return OpenAIEvalPolicyWeights{}, false
+	}
+	policy := OpenAIEvalSchedulingPolicyForRequest(model, effort)
+	if policy != OpenAIEvalSchedulingPolicyCustomBalance {
+		return OpenAIEvalPolicyWeights{}, false
+	}
+	weights := snapshot.CustomBalance
+	model = strings.ToLower(strings.TrimSpace(model))
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	for _, rule := range snapshot.Rules {
+		if rule.CustomBalance == nil || !strings.EqualFold(strings.TrimSpace(rule.RequestedModel), model) {
+			continue
+		}
+		if strings.TrimSpace(rule.ReasoningEffort) != "" && !strings.EqualFold(strings.TrimSpace(rule.ReasoningEffort), effort) {
+			continue
+		}
+		if strings.TrimSpace(rule.ReasoningEffort) != "" {
+			weights = *rule.CustomBalance
+			break
+		}
+		weights = *rule.CustomBalance
+	}
+	normalized, err := normalizeOpenAIEvalPolicyWeights(weights)
+	if err != nil {
+		return OpenAIEvalPolicyWeights{}, false
+	}
+	return normalized, true
 }
 
 func OpenAIEvalRouteHealthKey(model, effort string) string {
@@ -180,6 +228,18 @@ func normalizeOpenAIEvalBPSMode(mode string, legacyAuto bool) string {
 	}
 }
 
+// OpenAIEvalBPSProbeModel returns the model used by an account-scoped BPS
+// health probe. An empty admin value intentionally means the stable native
+// OpenAI test model, while the selected model never changes the account-wide
+// BPS state scope.
+func OpenAIEvalBPSProbeModel(model string) string {
+	model = strings.TrimSpace(model)
+	if model != "" {
+		return model
+	}
+	return openai.DefaultTestModel
+}
+
 func openAIEvalBPSModeEnabled(route OpenAIEvalAccountConfig) bool {
 	switch normalizeOpenAIEvalBPSMode(route.BPSMode, route.BPSAuto) {
 	case OpenAIEvalBPSModeForceOn, OpenAIEvalBPSModeAuto:
@@ -191,11 +251,35 @@ func openAIEvalBPSModeEnabled(route OpenAIEvalAccountConfig) bool {
 
 func normalizeOpenAIEvalSchedulingPolicy(policy string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(policy)) {
-	case "", OpenAIEvalSchedulingPolicyCostFirst, OpenAIEvalSchedulingPolicyStabilityFirst, OpenAIEvalSchedulingPolicyAvoidDegradation:
+	case "", OpenAIEvalSchedulingPolicyCostFirst, OpenAIEvalSchedulingPolicyStabilityFirst, OpenAIEvalSchedulingPolicyAvoidDegradation, OpenAIEvalSchedulingPolicyCustomBalance:
 		return strings.ToLower(strings.TrimSpace(policy)), nil
 	default:
 		return "", fmt.Errorf("unsupported scheduling policy %q", policy)
 	}
+}
+
+func normalizeOpenAIEvalPolicyWeights(weights OpenAIEvalPolicyWeights) (OpenAIEvalPolicyWeights, error) {
+	values := []float64{weights.Cost, weights.Stability, weights.ErrorRate, weights.TTFT, weights.Load}
+	total := 0.0
+	for _, value := range values {
+		if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+			return OpenAIEvalPolicyWeights{}, errors.New("custom balance weights must be finite and non-negative")
+		}
+		total += value
+	}
+	if math.IsInf(total, 0) {
+		return OpenAIEvalPolicyWeights{}, errors.New("custom balance weight total must be finite")
+	}
+	if total <= 0 {
+		return OpenAIEvalPolicyWeights{}, errors.New("custom balance requires at least one positive weight")
+	}
+	return OpenAIEvalPolicyWeights{
+		Cost:      weights.Cost / total,
+		Stability: weights.Stability / total,
+		ErrorRate: weights.ErrorRate / total,
+		TTFT:      weights.TTFT / total,
+		Load:      weights.Load / total,
+	}, nil
 }
 
 // OpenAIEvalSchedulingPolicyFor resolves the most specific configured rule.
@@ -272,27 +356,31 @@ func ReadOpenAIEvalRouteHealthFromAccount(account *Account, model, effort string
 }
 
 type OpenAIEvalRun struct {
-	ID              int64                    `json:"id"`
-	AccountID       int64                    `json:"account_id"`
-	TestType        string                   `json:"test_type"`
-	RequestedModel  string                   `json:"requested_model"`
-	UpstreamModel   string                   `json:"upstream_model,omitempty"`
-	ReasoningEffort string                   `json:"reasoning_effort"`
-	DataVersion     string                   `json:"data_version"`
-	BaselineVersion string                   `json:"baseline_version"`
-	Status          string                   `json:"status"`
-	Outcome         OpenAIEvalOutcome        `json:"outcome"`
-	RequestCount    int                      `json:"request_count"`
-	InputTokens     int64                    `json:"input_tokens"`
-	OutputTokens    int64                    `json:"output_tokens"`
-	CostEstimateUSD *float64                 `json:"cost_estimate_usd"`
-	DurationMS      int64                    `json:"duration_ms"`
-	StartedAt       time.Time                `json:"started_at"`
-	FinishedAt      time.Time                `json:"finished_at"`
-	TriggeredBy     int64                    `json:"triggered_by,omitempty"`
-	TriggerSource   string                   `json:"trigger_source"`
-	Error           string                   `json:"error,omitempty"`
-	Samples         []OpenAIEvalSampleRecord `json:"samples,omitempty"`
+	ID               int64                    `json:"id"`
+	AccountID        int64                    `json:"account_id"`
+	TestType         string                   `json:"test_type"`
+	RequestedModel   string                   `json:"requested_model"`
+	UpstreamModel    string                   `json:"upstream_model,omitempty"`
+	ReasoningEffort  string                   `json:"reasoning_effort"`
+	DataVersion      string                   `json:"data_version"`
+	BaselineVersion  string                   `json:"baseline_version"`
+	Status           string                   `json:"status"`
+	Outcome          OpenAIEvalOutcome        `json:"outcome"`
+	RequestCount     int                      `json:"request_count"`
+	InputTokens      int64                    `json:"input_tokens"`
+	OutputTokens     int64                    `json:"output_tokens"`
+	CostEstimateUSD  *float64                 `json:"cost_estimate_usd"`
+	DurationMS       int64                    `json:"duration_ms"`
+	StartedAt        time.Time                `json:"started_at"`
+	FinishedAt       time.Time                `json:"finished_at"`
+	TriggeredBy      int64                    `json:"triggered_by,omitempty"`
+	TriggerSource    string                   `json:"trigger_source"`
+	Error            string                   `json:"error,omitempty"`
+	SampleCount      int                      `json:"sample_count"`
+	ExpectedSamples  int                      `json:"expected_samples"`
+	CompletedSamples int                      `json:"completed_samples"`
+	Phase            string                   `json:"phase,omitempty"`
+	Samples          []OpenAIEvalSampleRecord `json:"samples,omitempty"`
 }
 
 type OpenAIEvalSampleRecord struct {
@@ -316,6 +404,7 @@ type OpenAIEvalScheduledRun struct {
 	RequestedModel  string
 	ReasoningEffort string
 	SampleMode      string
+	SampleCount     int
 }
 
 type OpenAIEvalAuditEvent struct {
@@ -340,11 +429,18 @@ type OpenAIEvalRepository interface {
 	ReleaseLease(context.Context, string, string) error
 }
 
+// OpenAIEvalProgressRepository is optional so in-memory test doubles and
+// rolling-upgrade adapters can keep using the base repository contract.
+type OpenAIEvalProgressRepository interface {
+	UpdateRunProgress(context.Context, int64, *OpenAIEvalRun) error
+}
+
 type OpenAIEvalSchedule struct {
 	Enabled         bool       `json:"enabled"`
 	IntervalSeconds int        `json:"interval_seconds"`
 	JitterSeconds   int        `json:"jitter_seconds"`
 	SampleMode      string     `json:"sample_mode,omitempty"`
+	SampleCount     int        `json:"sample_count,omitempty"`
 	LastRunAt       *time.Time `json:"last_run_at,omitempty"`
 	NextRunAt       *time.Time `json:"next_run_at,omitempty"`
 }
@@ -363,6 +459,34 @@ type OpenAIEvalAccountConfig struct {
 	DirectOAuthEligible bool                 `json:"direct_oauth_eligible"`
 }
 
+// OpenAIEvalBPSAccountConfig is independent from the account/model/effort
+// evaluation targets. The probe model identifies the health check only; a
+// degraded OAuth account switches as a whole.
+type OpenAIEvalBPSAccountConfig struct {
+	AccountID         int64      `json:"account_id"`
+	ProbeModel        string     `json:"probe_model,omitempty"`
+	Mode              string     `json:"mode"`
+	FailureThreshold  int        `json:"failure_threshold"`
+	RecoveryThreshold int        `json:"recovery_threshold"`
+	IntervalSeconds   int        `json:"interval_seconds"`
+	Active            bool       `json:"active"`
+	State             string     `json:"state,omitempty"`
+	DisabledReason    string     `json:"disabled_reason,omitempty"`
+	DegradedStreak    int        `json:"degraded_streak"`
+	HealthyStreak     int        `json:"healthy_streak"`
+	UpdatedAt         *time.Time `json:"updated_at,omitempty"`
+	LastRunAt         *time.Time `json:"last_run_at,omitempty"`
+	NextRunAt         *time.Time `json:"next_run_at,omitempty"`
+}
+
+type OpenAIEvalPolicyWeights struct {
+	Cost      float64 `json:"cost"`
+	Stability float64 `json:"stability"`
+	ErrorRate float64 `json:"error_rate"`
+	TTFT      float64 `json:"ttft"`
+	Load      float64 `json:"load"`
+}
+
 type OpenAIEvalConfig struct {
 	// Revision is optimistic-concurrency metadata.  Zero is accepted for
 	// legacy clients and is upgraded atomically by the repository.
@@ -371,6 +495,8 @@ type OpenAIEvalConfig struct {
 	BPSAutoEnabled   bool                             `json:"bps_auto_enabled"`
 	SchedulingPolicy string                           `json:"scheduling_policy,omitempty"`
 	Policies         []OpenAIEvalSchedulingPolicyRule `json:"policies,omitempty"`
+	CustomBalance    OpenAIEvalPolicyWeights          `json:"custom_balance,omitempty"`
+	BPSAccounts      []OpenAIEvalBPSAccountConfig     `json:"bps_accounts,omitempty"`
 	Accounts         []OpenAIEvalAccountConfig        `json:"accounts"`
 }
 
@@ -378,9 +504,10 @@ type OpenAIEvalConfig struct {
 // model and, optionally, reasoning effort.  An empty effort is the model
 // default.  More specific effort rules win at read time.
 type OpenAIEvalSchedulingPolicyRule struct {
-	RequestedModel  string `json:"requested_model"`
-	ReasoningEffort string `json:"reasoning_effort,omitempty"`
-	Policy          string `json:"policy"`
+	RequestedModel  string                   `json:"requested_model"`
+	ReasoningEffort string                   `json:"reasoning_effort,omitempty"`
+	Policy          string                   `json:"policy"`
+	CustomBalance   *OpenAIEvalPolicyWeights `json:"custom_balance,omitempty"`
 }
 
 type OpenAIEvalProbe struct {
@@ -479,9 +606,8 @@ type OpenAIEvalSampleResponse struct {
 	CompletedAt  time.Time
 }
 
-// OpenAIEvalCandyPrompt is the canonical CPA-compatible public canary. Keep
-// this text stable: the expected answer and the vendored fingerprint data are
-// versioned together, so changing the wording changes the evaluation.
+// OpenAIEvalCandyPrompt is the corrected, versioned public canary. Keep this
+// text stable: changing the wording changes the evaluation contract.
 var OpenAIEvalCandyPrompt = `不使用任何外部工具回答以下问题：
 
 在一个黑色的袋子里放有三种口味的糖果，每种糖果有两种不同的形状（圆形和五角星形，不同的形状靠手感可以分辨）。参赛者需要在活动前决定摸出的糖果数目，不能通过触摸辨别口味。那么，最少取出多少个糖果才能保证手中同时拥有不同形状的苹果味和桃子味的糖？（同时手中有圆形苹果味匹配五角星桃子味糖果，或者有圆形桃子味匹配五角星苹果味糖果都满足要求）
@@ -492,8 +618,8 @@ var OpenAIEvalCandyPrompt = `不使用任何外部工具回答以下问题：
 
 先给出整数答案，再证明该数量足够且少取一颗不够。`
 
-// Kept as a named alias for callers that need to identify the pinned CPA
-// wording. It must never diverge from OpenAIEvalCandyPrompt.
+// Kept as a legacy API name for callers that identify the pinned Candy probe.
+// It must never diverge from OpenAIEvalCandyPrompt.
 var OpenAIEvalCandyCPAReferencePrompt = OpenAIEvalCandyPrompt
 
 // OpenAIEvalSupportedModels lists text models from the versioned local OpenAI
@@ -843,8 +969,6 @@ func ScoreOpenAIEvalFingerprint(model string, samples []OpenAIEvalSample, baseli
 		}
 		return result
 	}
-	baselineCount := len(baselines)
-	alpha := .05 / float64(baselineCount)
 	for _, baseline := range baselines {
 		cellScores := make([]float64, 0, len(valid))
 		for _, probe := range OpenAIEvalFingerprintProbes {
@@ -876,15 +1000,25 @@ func ScoreOpenAIEvalFingerprint(model string, samples []OpenAIEvalSample, baseli
 		result.Status, result.Reason = "insufficient", "insufficient_cells"
 		return result
 	}
-	significant := result.PValue != nil && *result.PValue < alpha
-	if strings.EqualFold(result.NearestModel, model) && !significant {
-		result.Status, result.Reason = "consistent", "behavior_distribution_consistent_with_versioned_reference"
-	} else if significant {
-		result.Status, result.Reason = "different", "behavior_distribution_differs_from_reference"
-	} else {
-		result.Status, result.Reason = "uncertain", "fingerprint_is_identity_evidence_not_capability"
-	}
+	result.Status, result.Reason = openAIEvalAttributionVerdict(result.NearestModel)
 	return result
+}
+
+// Attribution remains a low-confidence diagnostic, not proof of the actual
+// provider route. Only the Luna family is considered a suspected downgrade.
+func openAIEvalAttributionVerdict(model string) (status, reason string) {
+	if strings.TrimSpace(model) == "" {
+		return "insufficient", "unresolved_behavioral_attribution"
+	}
+	parts := strings.FieldsFunc(strings.ToLower(strings.TrimSpace(model)), func(r rune) bool {
+		return r == '-' || r == '_' || r == '/' || r == ':' || r == '.'
+	})
+	for _, part := range parts {
+		if part == "luna" {
+			return "warning", "suspected_luna_attribution"
+		}
+	}
+	return "suspected_normal", "non_luna_behavioral_attribution"
 }
 
 func openAIEvalFingerprintPermutationPValue(a, b map[string][]string, seed string, permutations int) *float64 {

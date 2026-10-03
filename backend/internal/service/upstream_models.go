@@ -1039,6 +1039,9 @@ func buildOpenAIAPIKeyModelsRequest(ctx context.Context, account *Account, valid
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	// 账号级请求头覆写：模型列表探测与真实转发保持一致的最终头
 	account.ApplyHeaderOverrides(req.Header)
+	if account.UsesOpenAICodexProtocol() || hasCodexIdentityHeaders(req.Header) {
+		enforceCodexAcceptLanguage(req.Header)
+	}
 	return req, nil
 }
 

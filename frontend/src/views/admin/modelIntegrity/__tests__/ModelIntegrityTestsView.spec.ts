@@ -31,7 +31,7 @@ const catalog = {
   items: [{ id: 'gpt-5' }],
   baseline_version: 'cpa-v1',
   baseline_models: [],
-  candy: { expected_answer: 21, confidence: 'low', scheduling: 'alert_only' },
+  candy: { expected_answer: 29, confidence: 'low', scheduling: 'alert_only' },
   evaluation_notice: '',
   reasoning_efforts: ['', 'high'],
   fingerprint_modes: [{ id: 'quick', samples: 60 }, { id: 'standard', samples: 200 }, { id: 'strict', samples: 400 }],
@@ -52,7 +52,7 @@ function serverConfig(): OpenAIEvalConfig {
         account_id: 12,
         requested_model: 'gpt-5',
         reasoning_effort: 'high',
-        candy_schedule: schedule(3600, true),
+        candy_schedule: { ...schedule(3600, true), sample_count: 5 },
         fingerprint_schedule: { ...schedule(86400), sample_mode: 'standard' },
         modeltrace_schedule: schedule(86400),
         state_probe_schedule: schedule(21600),
@@ -110,7 +110,7 @@ describe('ModelIntegrityTestsView', () => {
     const wrapper = mountView()
     await flushPromises()
     // Candy every hour: 5 requests × 24 = 120 requests per day.
-    expect(wrapper.get('[data-testid="budget"]').text()).toContain('每天大约会发出 120 次上游请求（1 个自动计划）')
+    expect(wrapper.get('[data-testid="budget"]').text()).toContain('预计每天发出约 120 次上游请求（1 个自动计划）')
     expect(wrapper.get('[data-testid="test-candy"]').text()).toContain('每次 5 次请求')
     expect(wrapper.get('[data-testid="test-candy"]').text()).toContain('每天约 120 次请求')
     wrapper.unmount()
@@ -120,12 +120,117 @@ describe('ModelIntegrityTestsView', () => {
     const wrapper = mountView()
     await flushPromises()
     const candy = wrapper.get('[data-testid="test-candy"]')
-    expect(candy.text()).toContain('有答错')
-    expect(candy.text()).toContain('5 次里至少有 1 次没答出 21')
+    expect(candy.text()).toContain('异常')
+    expect(candy.text()).toContain('5 次中至少 1 次未答出 29')
     const probe = wrapper.get('[data-testid="test-state_probe"]')
     expect(probe.text()).toContain('只支持直连 OpenAI OAuth 账号的默认推理强度')
     expect(probe.get('[data-testid="run-state_probe"]').attributes('disabled')).toBeDefined()
     expect(wrapper.text()).not.toMatch(/路线资格|硬失败/)
+    wrapper.unmount()
+  })
+
+  it('shows non-Luna attributions as likely normal and Luna as a possible match, both marked as inferred', async () => {
+    const run = (id: number, test_type: 'modeltrace' | 'fingerprint', status: string, reason: string, extra: Record<string, unknown>) => ({
+      id, account_id: 12, test_type, requested_model: 'gpt-5', reasoning_effort: 'high', status,
+      outcome: { status, reason, sample_count: 3, expected_count: 3, confidence: 'low', scheduling: 'alert_only', ...extra },
+      request_count: 3, input_tokens: 1, output_tokens: 1, duration_ms: 1000,
+      started_at: `2026-10-01T0${id}:00:00Z`, finished_at: `2026-10-01T0${id}:00:05Z`, trigger_source: 'scheduled'
+    })
+    api.listOpenAIEvalRuns.mockResolvedValue({
+      items: [
+        run(3, 'modeltrace', 'suspected_normal', 'non_luna_behavioral_attribution', { modeltrace: { bank_revision: 'x', prediction: 'gpt-5', probability: 0.8, used_outputs: 3, requests: 3 } }),
+        run(2, 'fingerprint', 'warning', 'suspected_luna_attribution', { fingerprint: { status: 'warning', nearest_model: 'gpt-5-luna', mean_jsd: 0.1, p_value: 0.4, valid_samples: 60, required_samples: 60, cell_count: 6, evaluated_at: '' } }),
+        run(1, 'fingerprint', 'insufficient', 'unresolved_behavioral_attribution', {})
+      ]
+    })
+    const wrapper = mountView()
+    await flushPromises()
+
+    const trace = wrapper.get('[data-testid="test-modeltrace"]')
+    expect(trace.get('[data-testid="latest-status"]').text()).toBe('疑似正常')
+    expect(trace.find('.tt-result-likely').exists()).toBe(true)
+    expect(trace.text()).toContain('不代表实际路由已核实')
+    // The inference qualifier is stated once, not repeated in a second note.
+    expect(trace.text().split('不代表实际路由已核实')).toHaveLength(2)
+    expect(trace.text()).not.toContain('不参与账号调度')
+    const fingerprint = wrapper.get('[data-testid="test-fingerprint"]')
+    expect(fingerprint.get('[data-testid="latest-status"]').text()).toBe('疑似 Luna')
+    expect(fingerprint.text()).toContain('不代表已确认降智')
+    expect(fingerprint.text()).not.toContain('异常')
+
+    const statuses = () => wrapper.findAll('[data-testid="history-status"]').map(item => item.text())
+    expect(statuses()).toEqual(['疑似正常', '疑似 Luna', '证据不足'])
+    const toneFilter = wrapper.findAll('select').find(select => select.find('option[value="likely"]').exists())!
+    await toneFilter.setValue('likely')
+    expect(statuses()).toEqual(['疑似正常'])
+    await toneFilter.setValue('neutral')
+    expect(statuses()).toEqual(['证据不足'])
+    await toneFilter.setValue('attention')
+    expect(statuses()).toEqual(['疑似 Luna'])
+
+    await wrapper.get('[data-testid="history-row"]').trigger('click')
+    await flushPromises()
+    const note = document.body.querySelector('[data-testid="attribution-note"]')
+    expect(note?.textContent?.trim()).toBe('归因结果仅作提醒，不参与账号调度。')
+    expect(document.body.querySelector('[data-testid="detail-status"]')?.textContent?.trim()).toBe('疑似 Luna')
+    expect(document.body.textContent).toContain('gpt-5-luna')
+    wrapper.unmount()
+  })
+
+  it('keeps manual Candy and fingerprint parameters editable when automatic tests are off', async () => {
+    const config = serverConfig()
+    config.accounts[0].candy_schedule.enabled = false
+    config.accounts[0].fingerprint_schedule.enabled = false
+    api.getOpenAIEvalConfig.mockResolvedValue(config)
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="candy-sample-count"]').attributes('disabled')).toBeUndefined()
+    expect(wrapper.get('[data-testid="fingerprint-sample-mode"]').attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('limits a custom schedule interval only to the database storage boundary', async () => {
+    const config = serverConfig()
+    config.accounts[0].candy_schedule.interval_seconds = 17 * 60
+    api.getOpenAIEvalConfig.mockResolvedValue(config)
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    const input = wrapper.get('[data-testid="custom-interval"]')
+    expect(input.attributes('max')).toBe('35791394')
+    expect(wrapper.text()).toContain('存储上限 35,791,394')
+    wrapper.unmount()
+  })
+
+  it('polls and displays persisted sample progress while a manual run is active', async () => {
+    let finish!: (value: unknown) => void
+    api.runOpenAIEval.mockImplementation(() => new Promise(resolve => { finish = resolve }))
+    const wrapper = mountView()
+    await flushPromises()
+    api.listOpenAIEvalRuns.mockResolvedValue({
+      items: [{
+        id: 3, account_id: 12, test_type: 'candy', requested_model: 'gpt-5', reasoning_effort: 'high', status: 'running',
+        outcome: { status: 'running', reason: 'sampling', sample_count: 2, expected_count: 5, confidence: 'none', scheduling: 'disabled' },
+        request_count: 2, completed_samples: 2, expected_samples: 5, input_tokens: 1, output_tokens: 1,
+        duration_ms: 500, started_at: '2026-10-01T08:00:00Z', trigger_source: 'manual'
+      }]
+    })
+
+    await wrapper.get('[data-testid="run-candy"]').trigger('click')
+    await flushPromises()
+    const progress = wrapper.get('[data-testid="test-progress"]')
+    expect(progress.text()).toContain('正在采样 2/5')
+    expect(progress.find('.tt-progress-value').attributes('style')).toContain('40%')
+
+    finish({
+      id: 3, account_id: 12, test_type: 'candy', requested_model: 'gpt-5', reasoning_effort: 'high', status: 'pass',
+      outcome: { status: 'pass', reason: 'all_public_candy_variants_passed', sample_count: 5, expected_count: 5, confidence: 'low', scheduling: 'alert_only' },
+      request_count: 5, input_tokens: 1, output_tokens: 1, duration_ms: 900, started_at: '2026-10-01T08:00:00Z', trigger_source: 'manual'
+    })
+    await flushPromises()
     wrapper.unmount()
   })
 
@@ -175,7 +280,7 @@ describe('ModelIntegrityTestsView', () => {
     // The new direct-OAuth default-effort target can run State Probe right away.
     expect(wrapper.get('[data-testid="run-state_probe"]').attributes('disabled')).toBeUndefined()
 
-    await wrapper.get('.btn-primary').trigger('click')
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
     await flushPromises()
     const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
     expect(payload.revision).toBe(9)

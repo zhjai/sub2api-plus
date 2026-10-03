@@ -94,6 +94,23 @@ class ReleaseMatrixTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'checksum mismatch'):
             release.verify(args)
 
+    def test_prerelease_publisher_preserves_stable_fork_channel(self):
+        for simple in (False, True):
+            for version, prerelease in (
+                ('0.2.11-zhjai.14', False),
+                ('0.2.11-zhjai.14-rc.1', True),
+                ('0.2.11-zhjai.14-beta.2', True),
+                ('0.2.11-zhjai.14-alpha.1', True),
+            ):
+                with self.subTest(simple=simple, version=version), patch.dict(os.environ, {'RELEASE_VERSION': version}):
+                    release.generate_config(argparse.Namespace(mode='publish', simple=simple, output='publisher.yaml'))
+                    data = yaml.safe_load(Path('publisher.yaml').read_text())
+                    self.assertEqual(data['release']['prerelease'], prerelease)
+                    if prerelease:
+                        self.assertEqual(data['release']['make_latest'], 'false')
+                    else:
+                        self.assertNotEqual(data['release'].get('make_latest'), 'false')
+
     def test_missing_extra_and_wrong_commit_artifacts_are_rejected(self):
         args = self.fixture_artifacts(True)
         args.sha = 'b' * 40
@@ -184,6 +201,30 @@ class ReleaseMatrixTest(unittest.TestCase):
                     self.assertEqual(log.count('imagetools create'), 2)
                     self.assertIn('fixturehub/sub2api:9.8', log)
                     self.assertIn('ghcr.io/exampleowner/sub2api:9', log)
+
+    def test_prerelease_images_never_update_stable_aliases(self):
+        fake_bin = Path('bin')
+        fake_bin.mkdir()
+        docker = fake_bin / 'docker'
+        docker.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$DOCKER_LOG"\n')
+        docker.chmod(0o755)
+        for simple in (False, True):
+            with self.subTest(simple=simple):
+                log_path = Path(f'prerelease-{simple}.log').resolve()
+                env = {**os.environ, 'PATH': str(fake_bin.resolve()) + os.pathsep + os.environ['PATH'],
+                       'DOCKER_LOG': str(log_path), 'RUNNER_TEMP': self.temp.name,
+                       'RELEASE_VERSION': '0.2.11-zhjai.14-rc.1', 'RELEASE_SHA': 'a' * 40,
+                       'GITHUB_REPOSITORY': 'ExampleOwner/sub2api', 'DRY_RUN': 'false',
+                       'SIMPLE_RELEASE': str(simple).lower(), 'DOCKERHUB_USERNAME': 'fixturehub'}
+                subprocess.run(['bash', str(ROOT / '.github/release-tools/release-images.sh')], env=env, check=True)
+                log = log_path.read_text()
+                self.assertIn('--push', log)
+                self.assertIn('ghcr.io/exampleowner/sub2api:0.2.11-zhjai.14-rc.1', log)
+                self.assertNotIn(':latest', log)
+                self.assertNotIn('--tag ghcr.io/exampleowner/sub2api:0 ', log)
+                self.assertNotIn('--tag ghcr.io/exampleowner/sub2api:0.2 ', log)
+                self.assertNotIn('--tag fixturehub/sub2api:0 ', log)
+                self.assertNotIn('--tag fixturehub/sub2api:0.2 ', log)
 
 
 

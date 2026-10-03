@@ -19,14 +19,14 @@ import (
 )
 
 func TestScoreOpenAIEvalCandyRequiresCorrectLeadingAnswer(t *testing.T) {
-	for _, answer := range []string{"21", "答案：21 颗。", "二十一颗"} {
+	for _, answer := range []string{"29", "答案：29 颗。", "二十九颗"} {
 		outcome := ScoreOpenAIEvalCandy(answer)
 		require.Equal(t, "pass", outcome.Status, answer)
 		require.Equal(t, "neutral", outcome.Scheduling)
 		require.Equal(t, "low", outcome.Confidence)
 	}
 
-	for _, answer := range []string{"29", "至少 30 颗，29 颗不够。", "答案是 20，21 才是最大反例。", "二十颗", "29.5"} {
+	for _, answer := range []string{"21", "至少 30 颗，29 颗不够。", "答案是 20，29 才是最大反例。", "二十颗", "29.5"} {
 		outcome := ScoreOpenAIEvalCandy(answer)
 		require.Equal(t, "warning", outcome.Status, answer)
 		require.Equal(t, "alert_only", outcome.Scheduling)
@@ -110,7 +110,7 @@ func TestOpenAIEvalInsufficientAndFingerprintIdentityAreAlertOnly(t *testing.T) 
 	require.Nil(t, insufficient.MeanJSD)
 
 	identified := ScoreOpenAIEvalFingerprint("model-a", samples, baselines, 40)
-	require.Equal(t, "consistent", identified.Status)
+	require.Equal(t, "suspected_normal", identified.Status)
 	require.Equal(t, "alert_only", OpenAIEvalSchedulingDisposition(OpenAIEvalTypeFingerprint, OpenAIEvalOutcome{Status: "fail", Confidence: "high"}, true))
 	require.Equal(t, "alert_only", OpenAIEvalSchedulingDisposition(OpenAIEvalTypeCandy, OpenAIEvalOutcome{Status: "fail", Confidence: "high"}, true))
 	require.Equal(t, "disabled", OpenAIEvalSchedulingDisposition(OpenAIEvalTypeCandy, OpenAIEvalOutcome{Status: "fail", Confidence: "high"}, false))
@@ -258,6 +258,7 @@ type openAIEvalRepoFake struct {
 	config       *OpenAIEvalConfig
 	runs         []*OpenAIEvalRun
 	audit        []OpenAIEvalAuditEvent
+	due          []OpenAIEvalScheduledRun
 	leaseHeld    bool
 	leaseAcquire int
 	leaseRelease int
@@ -307,7 +308,7 @@ func (r *openAIEvalRepoFake) RecordAuditEvent(_ context.Context, actorID int64, 
 }
 
 func (r *openAIEvalRepoFake) ClaimDueSchedules(context.Context, time.Time, int) ([]OpenAIEvalScheduledRun, error) {
-	return nil, nil
+	return append([]OpenAIEvalScheduledRun(nil), r.due...), nil
 }
 
 func (r *openAIEvalRepoFake) AcquireLease(context.Context, string, string, time.Duration) (bool, error) {
@@ -331,14 +332,19 @@ func TestOpenAIEvalSchedulesHaveBoundedIntervalsAndFingerprintSampleModes(t *tes
 		testType string
 		wantErr  bool
 	}{
-		{name: "candy minimum", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 899}, testType: OpenAIEvalTypeCandy, wantErr: true},
-		{name: "candy accepted", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 900}, testType: OpenAIEvalTypeCandy},
-		{name: "fingerprint minimum", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 86399, SampleMode: "quick"}, testType: OpenAIEvalTypeFingerprint, wantErr: true},
+		{name: "candy minimum", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 299}, testType: OpenAIEvalTypeCandy, wantErr: true},
+		{name: "candy accepted", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 300}, testType: OpenAIEvalTypeCandy},
+		{name: "fingerprint below five minutes", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 299, SampleMode: "quick"}, testType: OpenAIEvalTypeFingerprint, wantErr: true},
 		{name: "fingerprint missing mode", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 86400}, testType: OpenAIEvalTypeFingerprint, wantErr: true},
-		{name: "fingerprint accepted", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 86400, SampleMode: "strict"}, testType: OpenAIEvalTypeFingerprint},
-		{name: "state probe minimum", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 6 * 60 * 60}, testType: OpenAIEvalTypeStateProbe},
-		{name: "state probe too frequent", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 6*60*60 - 1}, testType: OpenAIEvalTypeStateProbe, wantErr: true},
-		{name: "jitter violates minimum", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 900, JitterSeconds: 1}, testType: OpenAIEvalTypeCandy, wantErr: true},
+		{name: "fingerprint accepted", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 5 * 60, SampleMode: "strict"}, testType: OpenAIEvalTypeFingerprint},
+		{name: "model trace minimum", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 5 * 60}, testType: OpenAIEvalTypeModelTrace},
+		{name: "state probe minimum", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 5 * 60}, testType: OpenAIEvalTypeStateProbe},
+		{name: "state probe too frequent", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 5*60 - 1}, testType: OpenAIEvalTypeStateProbe, wantErr: true},
+		{name: "custom interval has no product cap", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 365 * 24 * 3600}, testType: OpenAIEvalTypeCandy},
+		{name: "custom interval must fit database storage", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: int(OpenAIEvalMaxIntervalSeconds) + 1}, testType: OpenAIEvalTypeCandy, wantErr: true},
+		{name: "jitter allowed at minimum", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 300, JitterSeconds: 150}, testType: OpenAIEvalTypeCandy},
+		{name: "jitter exceeds half interval", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 300, JitterSeconds: 151}, testType: OpenAIEvalTypeCandy, wantErr: true},
+		{name: "jitter capped at one hour", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 24 * 3600, JitterSeconds: 3601}, testType: OpenAIEvalTypeCandy, wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -366,6 +372,40 @@ func TestOpenAIEvalSaveConfigDefaultsEffectsOffAndValidatesRoutes(t *testing.T) 
 	config.Accounts = config.Accounts[:1]
 	config.Accounts[0].RequestedModel = "claude-opus"
 	require.ErrorContains(t, svc.SaveConfig(context.Background(), config, 9), "invalid evaluation route")
+}
+
+func TestOpenAIEvalBPSAccountIntervalHasNoProductCapButRejectsStorageOverflow(t *testing.T) {
+	account := &Account{ID: 61, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	accounts := &openAIAccountTestRepo{mockAccountRepoForGemini: mockAccountRepoForGemini{accountsByID: map[int64]*Account{account.ID: account}}}
+	repo := &openAIEvalRepoFake{}
+	svc := NewOpenAIEvalService(repo, accounts, nil)
+	config := &OpenAIEvalConfig{BPSAccounts: []OpenAIEvalBPSAccountConfig{{
+		AccountID: account.ID, Mode: OpenAIEvalBPSModeAuto, FailureThreshold: 3, RecoveryThreshold: 2,
+		IntervalSeconds: 365 * 24 * 3600,
+	}}}
+	require.NoError(t, svc.SaveConfig(context.Background(), config, 9))
+
+	config.BPSAccounts[0].IntervalSeconds = int(OpenAIEvalMaxIntervalSeconds) + 1
+	require.ErrorContains(t, svc.SaveConfig(context.Background(), config, 9), "fit database integer storage")
+}
+
+func TestOpenAIEvalRunnerNormalizesBPSAccountSentinelBeforePublicEffortValidation(t *testing.T) {
+	repo := &openAIEvalRepoFake{due: []OpenAIEvalScheduledRun{{
+		AccountID:       61,
+		TestType:        OpenAIEvalTypeStateProbe,
+		RequestedModel:  "gpt-5.4",
+		ReasoningEffort: OpenAIEvalBPSAccountEffort,
+	}}}
+	service := NewOpenAIEvalService(repo, nil, &AccountTestService{})
+	runner := NewOpenAIEvalRunner(repo, service)
+
+	runner.runDue(context.Background())
+
+	// ResolveOpenAIEvalTarget intentionally fails later because this focused
+	// test has no account dependencies. Reaching the lease proves the runner's
+	// internal sentinel passed through Run's public effort validation.
+	require.Equal(t, 1, repo.leaseAcquire)
+	require.Equal(t, 1, repo.leaseRelease)
 }
 
 func TestOpenAIEvalInitializeRestoresEffectsSwitch(t *testing.T) {
@@ -407,7 +447,7 @@ func TestOpenAIBPSForceOnBypassesMasterSwitchButNotLocks(t *testing.T) {
 	account := &Account{ID: 88, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	repo := &openAIEvalRepoFake{config: &OpenAIEvalConfig{
 		BPSAutoEnabled: false,
-		Accounts:       []OpenAIEvalAccountConfig{{AccountID: account.ID, RequestedModel: "gpt-6-astra", BPSMode: OpenAIEvalBPSModeForceOn}},
+		BPSAccounts:    []OpenAIEvalBPSAccountConfig{{AccountID: account.ID, Mode: OpenAIEvalBPSModeForceOn}},
 	}}
 	svc := &OpenAIGatewayService{openAIEvalRepo: repo}
 	require.True(t, svc.isOpenAIBPSForwardEligible(context.Background(), account, "gpt-6-astra"))
@@ -480,7 +520,7 @@ func TestOpenAIEvalRunCandyAndFingerprintUseSafeRouteOutcomes(t *testing.T) {
 		svc, evalRepo, healthRepo, _ := newHarness("20")
 		run, err := svc.Run(context.Background(), OpenAIEvalRunRequest{AccountID: 51, TestType: OpenAIEvalTypeCandy, RequestedModel: "gpt-5.4", ReasoningEffort: "high"}, 8, "manual")
 		require.NoError(t, err)
-		require.Equal(t, "insufficient", run.Status)
+		require.Equal(t, "warning", run.Status)
 		require.Equal(t, "alert_only", run.Outcome.Scheduling)
 		require.Len(t, evalRepo.runs, 1)
 		require.Equal(t, 1, evalRepo.leaseAcquire)
@@ -557,7 +597,7 @@ func TestResetOpenAIBPSStateIsExplicitAndAudited(t *testing.T) {
 	require.Zero(t, state.DegradedStreak)
 	require.NotZero(t, state.UpdatedAt)
 
-	stored, ok := accounts.updatedExtra[openAIBPSModelStateKey("gpt-6-astra")].(OpenAIBPSModelState)
+	stored, ok := accounts.updatedExtra[OpenAIBPSAccountStateExtraKey()].(OpenAIBPSModelState)
 	require.True(t, ok)
 	require.Empty(t, stored.DisabledReason)
 	require.Len(t, repo.audit, 1)

@@ -1769,6 +1769,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreDisabledPre
 	firstTurn := readMessage()
 	require.Equal(t, "resp_preflight_rewrite_1", gjson.GetBytes(firstTurn, "response.id").String())
 
+	require.NoError(t, svc.getOpenAIWSStateStore().BindResponseAccount(t.Context(), 0, "resp_stale_external", account.ID, time.Hour))
 	writeMessage(`{"type":"response.create","model":"gpt-5.1","stream":false,"store":false,"previous_response_id":"resp_stale_external","input":[{"type":"input_text","text":"world"}]}`)
 	secondTurn := readMessage()
 	require.Equal(t, "resp_preflight_rewrite_2", gjson.GetBytes(secondTurn, "response.id").String())
@@ -1916,6 +1917,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreDisabledPre
 	firstTurn := readMessage()
 	require.Equal(t, "resp_turn_ping_drop_1", gjson.GetBytes(firstTurn, "response.id").String())
 
+	require.NoError(t, svc.getOpenAIWSStateStore().BindResponseAccount(t.Context(), 0, "resp_stale_external", account.ID, time.Hour))
 	writeMessage(`{"type":"response.create","model":"gpt-5.1","stream":false,"store":false,"previous_response_id":"resp_stale_external","input":[{"type":"input_text","text":"world"}]}`)
 	secondTurn := readMessage()
 	require.Equal(t, "resp_turn_ping_drop_2", gjson.GetBytes(secondTurn, "response.id").String())
@@ -2057,6 +2059,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreEnabledSkip
 	firstTurn := readMessage()
 	require.Equal(t, "resp_store_enabled_1", gjson.GetBytes(firstTurn, "response.id").String())
 
+	require.NoError(t, svc.getOpenAIWSStateStore().BindResponseAccount(t.Context(), 0, "resp_stale_external", account.ID, time.Hour))
 	writeMessage(`{"type":"response.create","model":"gpt-5.1","stream":false,"store":true,"previous_response_id":"resp_stale_external"}`)
 	secondTurn := readMessage()
 	require.Equal(t, "resp_store_enabled_2", gjson.GetBytes(secondTurn, "response.id").String())
@@ -2189,6 +2192,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreDisabledPre
 	firstTurn := readMessage()
 	require.Equal(t, "resp_preflight_skip_1", gjson.GetBytes(firstTurn, "response.id").String())
 
+	require.NoError(t, svc.getOpenAIWSStateStore().BindResponseAccount(t.Context(), 0, "resp_stale_external", account.ID, time.Hour))
 	writeMessage(`{"type":"response.create","model":"gpt-5.1","stream":false,"store":false,"previous_response_id":"resp_stale_external","input":[{"type":"function_call_output","call_id":"call_1","output":"ok"}]}`)
 	secondTurn := readMessage()
 	require.Equal(t, "resp_preflight_skip_2", gjson.GetBytes(secondTurn, "response.id").String())

@@ -262,11 +262,17 @@ func newOpenAISilentRefusalFailoverError(c *gin.Context, account *Account, upstr
 	if strings.TrimSpace(upstreamRequestID) != "" {
 		headers.Set("x-request-id", strings.TrimSpace(upstreamRequestID))
 	}
-	return &UpstreamFailoverError{
+	result := &UpstreamFailoverError{
 		StatusCode:      http.StatusBadGateway,
 		ResponseBody:    openAISilentRefusalErrorBody(),
 		ResponseHeaders: headers,
 	}
+	if account != nil && account.IsOpenAIOpaqueUpstream() {
+		result.OpaqueRouteEpochEligible = true
+		result.IntegritySignal = OpenAIIntegritySignalSilentRefusal
+		result.SessionAccountEscape = true
+	}
+	return result
 }
 
 // newOpenAIResponsesEmptyCompletedFailoverError marks an empty
@@ -301,11 +307,17 @@ func newOpenAIResponsesEmptyCompletedFailoverError(c *gin.Context, account *Acco
 	if strings.TrimSpace(upstreamRequestID) != "" {
 		headers.Set("x-request-id", strings.TrimSpace(upstreamRequestID))
 	}
-	return &UpstreamFailoverError{
+	result := &UpstreamFailoverError{
 		StatusCode:      http.StatusBadGateway,
 		ResponseBody:    openAISilentRefusalErrorBody(),
 		ResponseHeaders: headers,
 	}
+	if account != nil && account.IsOpenAIOpaqueUpstream() {
+		result.OpaqueRouteEpochEligible = true
+		result.IntegritySignal = OpenAIIntegritySignalEmptyComplete
+		result.SessionAccountEscape = true
+	}
+	return result
 }
 
 func openAISilentRefusalErrorBody() []byte {

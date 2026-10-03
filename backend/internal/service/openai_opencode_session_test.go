@@ -258,6 +258,49 @@ func TestOpenCodeSessionForwardedByResponsesBuildersAfterAccountOverride(t *test
 	}
 }
 
+func TestOpenCodeSessionIsRekeyedAfterSessionResolutionForOpaqueUpstream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := openCodeSessionTestService()
+	account := openCodeSessionTestAccount("https://opencode.ai/zen/v1")
+	account.Extra = map[string]any{"openai_opaque_upstream": true}
+	body := []byte(`{"model":"gpt-5","input":"hello"}`)
+
+	tests := []struct {
+		name  string
+		build func(*gin.Context) (*http.Request, error)
+	}{
+		{
+			name: "normal responses",
+			build: func(c *gin.Context) (*http.Request, error) {
+				return svc.buildUpstreamRequest(context.Background(), c, account, body, "token", false, "", false)
+			},
+		},
+		{
+			name: "passthrough responses",
+			build: func(c *gin.Context) (*http.Request, error) {
+				return svc.buildUpstreamRequestOpenAIPassthrough(context.Background(), c, account, body, "token")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newOpenCodeSessionTestContext(t, "conversation-456")
+			c.Set(openAIOpaqueRouteEpochContextKey, openAIOpaqueRouteEpochAttempt{
+				AccountID: account.ID,
+				Epoch:     1,
+				Apply:     true,
+			})
+			req, err := tt.build(c)
+			require.NoError(t, err)
+			got := req.Header.Get(openCodeSessionHeader)
+			require.NotEmpty(t, got)
+			require.NotEqual(t, "conversation-456", got)
+			require.Equal(t, openAIOpaqueRouteEpochValue(account.ID, 1, "session", "conversation-456"), got)
+		})
+	}
+}
+
 func TestOpenCodeSessionForwardedFromPromptCacheKeyWithoutCallerHeader(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	svc := openCodeSessionTestService()

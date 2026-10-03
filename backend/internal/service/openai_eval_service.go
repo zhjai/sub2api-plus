@@ -12,15 +12,23 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 )
 
 const (
-	OpenAIEvalMinCandyInterval       = 15 * time.Minute
-	OpenAIEvalRunLeaseTTL            = 20 * time.Minute
-	OpenAIEvalRunRenewInterval       = 10 * time.Minute
-	OpenAIEvalRunMaxDuration         = 24 * time.Hour
+	OpenAIEvalMinCandyInterval = 5 * time.Minute
+	OpenAIEvalMinCandySamples  = 1
+	OpenAIEvalMaxCandySamples  = 10
+	OpenAIEvalRunLeaseTTL      = 20 * time.Minute
+	OpenAIEvalRunRenewInterval = 10 * time.Minute
+	OpenAIEvalRunMaxDuration   = 24 * time.Hour
+	// openai_eval_schedule_state.interval_seconds is a PostgreSQL INTEGER.
+	// This is a storage-safety limit, not a product limit on custom intervals.
+	OpenAIEvalMaxIntervalSeconds     = int64(1<<31 - 1)
 	OpenAIEvalMaxFingerprintRequests = 400
-	OpenAIEvalMinStateProbeInterval  = 6 * time.Hour
+	OpenAIEvalMinStateProbeInterval  = 5 * time.Minute
+	OpenAIEvalMinBPSAccountInterval  = 5 * time.Minute
 )
 
 type OpenAIEvalRunRequest struct {
@@ -29,6 +37,7 @@ type OpenAIEvalRunRequest struct {
 	RequestedModel  string `json:"requested_model"`
 	ReasoningEffort string `json:"reasoning_effort"`
 	SampleMode      string `json:"sample_mode,omitempty"`
+	SampleCount     int    `json:"sample_count,omitempty"`
 }
 
 type OpenAIEvalService struct {
@@ -76,23 +85,47 @@ func (s *OpenAIEvalService) GetConfig(ctx context.Context) (*OpenAIEvalConfig, e
 		SetOpenAIEvalSchedulingPolicySnapshot(config)
 		if s.accounts != nil {
 			accountCache := make(map[int64]*Account)
+			accountFor := func(accountID int64) *Account {
+				if account, ok := accountCache[accountID]; ok {
+					return account
+				}
+				account, _ := s.accounts.GetByID(ctx, accountID)
+				accountCache[accountID] = account
+				return account
+			}
 			for i := range config.Accounts {
 				route := &config.Accounts[i]
 				if route.ReasoningEffort != "" {
 					continue
 				}
-				account, ok := accountCache[route.AccountID]
-				if !ok {
-					account, _ = s.accounts.GetByID(ctx, route.AccountID)
-					accountCache[route.AccountID] = account
-				}
+				account := accountFor(route.AccountID)
 				if account != nil && account.IsOpenAIOAuth() {
-					state := readOpenAIBPSModelState(account, route.RequestedModel)
+					state := readOpenAIBPSAccountState(account)
 					route.BPSState = &state
 				}
 				if account != nil {
 					route.DirectOAuthEligible = account.IsOpenAIOAuth() && !account.IsShadow() && !account.IsSyntheticUITest() && !account.IsOpenAIAgentIdentity() && route.ReasoningEffort == ""
 				}
+			}
+			for i := range config.BPSAccounts {
+				item := &config.BPSAccounts[i]
+				account := accountFor(item.AccountID)
+				if account == nil || !account.IsOpenAIOAuth() {
+					item.State = "inactive"
+					continue
+				}
+				state := readOpenAIBPSAccountState(account)
+				item.Active = state.Active
+				item.DegradedStreak = state.DegradedStreak
+				item.HealthyStreak = state.HealthyStreak
+				item.DisabledReason = state.DisabledReason
+				if state.UpdatedAt.IsZero() {
+					item.UpdatedAt = nil
+				} else {
+					updated := state.UpdatedAt
+					item.UpdatedAt = &updated
+				}
+				item.State = openAIBPSConfigRuntimeState(config, *item, state)
 			}
 		}
 	}
@@ -111,6 +144,61 @@ func (s *OpenAIEvalService) SaveConfig(ctx context.Context, config *OpenAIEvalCo
 	} else {
 		config.SchedulingPolicy = normalized
 	}
+	if config.SchedulingPolicy == OpenAIEvalSchedulingPolicyCustomBalance {
+		weights, err := normalizeOpenAIEvalPolicyWeights(config.CustomBalance)
+		if err != nil {
+			return fmt.Errorf("custom balance: %w", err)
+		}
+		config.CustomBalance = weights
+	}
+	if len(config.BPSAccounts) > 5000 {
+		return errors.New("BPS config exceeds the 5000 account limit")
+	}
+	seenBPS := make(map[int64]struct{}, len(config.BPSAccounts))
+	for i := range config.BPSAccounts {
+		item := &config.BPSAccounts[i]
+		if item.AccountID <= 0 {
+			return fmt.Errorf("invalid BPS account at index %d", i)
+		}
+		if _, exists := seenBPS[item.AccountID]; exists {
+			return fmt.Errorf("duplicate BPS account at index %d", i)
+		}
+		seenBPS[item.AccountID] = struct{}{}
+		item.Mode = normalizeOpenAIEvalBPSMode(item.Mode, false)
+		if item.ProbeModel != "" && !isOpenAIEvalSupportedModel(item.ProbeModel) {
+			return fmt.Errorf("invalid BPS probe model %q", item.ProbeModel)
+		}
+		if item.FailureThreshold == 0 {
+			item.FailureThreshold = 3
+		}
+		if item.RecoveryThreshold == 0 {
+			item.RecoveryThreshold = 2
+		}
+		if item.FailureThreshold < 1 || item.FailureThreshold > 10 || item.RecoveryThreshold < 1 || item.RecoveryThreshold > 10 {
+			return fmt.Errorf("BPS account %d thresholds must be between 1 and 10", item.AccountID)
+		}
+		if item.IntervalSeconds == 0 {
+			item.IntervalSeconds = int(OpenAIEvalMinBPSAccountInterval.Seconds())
+		}
+		if item.IntervalSeconds < int(OpenAIEvalMinBPSAccountInterval.Seconds()) || int64(item.IntervalSeconds) > OpenAIEvalMaxIntervalSeconds {
+			return fmt.Errorf("BPS account %d interval must be at least %d seconds and fit database integer storage", item.AccountID, int(OpenAIEvalMinBPSAccountInterval.Seconds()))
+		}
+		// Runtime fields are a projection of accounts.extra and must never be
+		// written back by the admin config endpoint.
+		item.Active = false
+		item.State = ""
+		item.DisabledReason = ""
+		item.DegradedStreak = 0
+		item.HealthyStreak = 0
+		item.UpdatedAt = nil
+		if s.accounts == nil {
+			return errors.New("account lookup is unavailable for BPS validation")
+		}
+		account, accountErr := s.accounts.GetByID(ctx, item.AccountID)
+		if accountErr != nil || account == nil || !account.IsOpenAIOAuth() || account.IsShadow() || account.IsSyntheticUITest() || account.IsOpenAIAgentIdentity() {
+			return fmt.Errorf("BPS account %d must be a direct OpenAI OAuth account", item.AccountID)
+		}
+	}
 	for i := range config.Policies {
 		rule := &config.Policies[i]
 		if strings.TrimSpace(rule.RequestedModel) == "" || !isOpenAIEvalSupportedModel(rule.RequestedModel) {
@@ -126,6 +214,16 @@ func (s *OpenAIEvalService) SaveConfig(ctx context.Context, config *OpenAIEvalCo
 			return fmt.Errorf("policy rule %d must specify a policy", i)
 		} else {
 			rule.Policy = normalized
+		}
+		if rule.Policy == OpenAIEvalSchedulingPolicyCustomBalance {
+			if rule.CustomBalance == nil {
+				return fmt.Errorf("policy rule %d: custom balance is required", i)
+			}
+			weights, err := normalizeOpenAIEvalPolicyWeights(*rule.CustomBalance)
+			if err != nil {
+				return fmt.Errorf("policy rule %d custom balance: %w", i, err)
+			}
+			rule.CustomBalance = &weights
 		}
 	}
 	seen := make(map[string]struct{}, len(config.Accounts))
@@ -148,6 +246,9 @@ func (s *OpenAIEvalService) SaveConfig(ctx context.Context, config *OpenAIEvalCo
 		seen[key] = struct{}{}
 		if err := validateOpenAIEvalSchedule(&item.CandySchedule, OpenAIEvalTypeCandy); err != nil {
 			return fmt.Errorf("route %d Candy schedule: %w", i, err)
+		}
+		if item.CandySchedule.Enabled && item.CandySchedule.SampleCount == 0 {
+			item.CandySchedule.SampleCount = OpenAIEvalMinCandySamples
 		}
 		if err := validateOpenAIEvalSchedule(&item.FingerprintSchedule, OpenAIEvalTypeFingerprint); err != nil {
 			return fmt.Errorf("route %d Fingerprint schedule: %w", i, err)
@@ -179,11 +280,60 @@ func (s *OpenAIEvalService) SaveConfig(ctx context.Context, config *OpenAIEvalCo
 	return nil
 }
 
+func openAIBPSConfigRuntimeState(config *OpenAIEvalConfig, item OpenAIEvalBPSAccountConfig, state OpenAIBPSAccountState) string {
+	if strings.TrimSpace(state.DisabledReason) != "" {
+		return "locked"
+	}
+	mode := normalizeOpenAIEvalBPSMode(item.Mode, false)
+	if mode == OpenAIEvalBPSModeForceOff || (mode == OpenAIEvalBPSModeAuto && (config == nil || !config.BPSAutoEnabled)) {
+		return "inactive"
+	}
+	if mode == OpenAIEvalBPSModeForceOn || state.Active {
+		return "bps"
+	}
+	return "native"
+}
+
+// OpenAIEvalIntervalDuration converts a persisted schedule interval without
+// allowing integer multiplication to wrap time.Duration.
+func OpenAIEvalIntervalDuration(seconds int) (time.Duration, error) {
+	if seconds < 0 || int64(seconds) > OpenAIEvalMaxIntervalSeconds {
+		return 0, errors.New("interval does not fit database integer storage")
+	}
+	return time.Duration(seconds) * time.Second, nil
+}
+
+func OpenAIEvalMaxJitterSeconds(intervalSeconds int) int {
+	if intervalSeconds <= 0 {
+		return 0
+	}
+	maximum := intervalSeconds / 2
+	if maximum > 3600 {
+		maximum = 3600
+	}
+	remaining := OpenAIEvalMaxIntervalSeconds - int64(intervalSeconds)
+	if remaining < int64(maximum) {
+		if remaining <= 0 {
+			return 0
+		}
+		maximum = int(remaining)
+	}
+	return maximum
+}
+
 func validateOpenAIEvalSchedule(schedule *OpenAIEvalSchedule, testType string) error {
 	if !schedule.Enabled {
 		return nil
 	}
 	minimum := int(OpenAIEvalMinCandyInterval.Seconds())
+	if testType == OpenAIEvalTypeCandy {
+		if schedule.SampleCount == 0 {
+			schedule.SampleCount = OpenAIEvalMinCandySamples
+		}
+		if schedule.SampleCount < OpenAIEvalMinCandySamples || schedule.SampleCount > OpenAIEvalMaxCandySamples {
+			return fmt.Errorf("sample count must be between %d and %d", OpenAIEvalMinCandySamples, OpenAIEvalMaxCandySamples)
+		}
+	}
 	if testType == OpenAIEvalTypeFingerprint {
 		minimum = int(OpenAIEvalMinFingerprintInterval.Seconds())
 		if _, err := OpenAIEvalFingerprintSampleCount(schedule.SampleMode); err != nil {
@@ -196,11 +346,14 @@ func validateOpenAIEvalSchedule(schedule *OpenAIEvalSchedule, testType string) e
 	if testType == OpenAIEvalTypeStateProbe {
 		minimum = int(OpenAIEvalMinStateProbeInterval.Seconds())
 	}
-	if schedule.IntervalSeconds < minimum || schedule.IntervalSeconds > 30*24*3600 {
-		return fmt.Errorf("interval must be between %d seconds and 30 days", minimum)
+	if schedule.IntervalSeconds < minimum {
+		return fmt.Errorf("interval must be at least %d seconds", minimum)
 	}
-	if schedule.JitterSeconds < 0 || schedule.JitterSeconds >= schedule.IntervalSeconds-minimum+1 {
-		return errors.New("jitter must preserve the configured minimum interval")
+	if _, err := OpenAIEvalIntervalDuration(schedule.IntervalSeconds); err != nil {
+		return err
+	}
+	if schedule.JitterSeconds < 0 || schedule.JitterSeconds > OpenAIEvalMaxJitterSeconds(schedule.IntervalSeconds) {
+		return fmt.Errorf("jitter must be between 0 and %d seconds", OpenAIEvalMaxJitterSeconds(schedule.IntervalSeconds))
 	}
 	return nil
 }
@@ -215,6 +368,13 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 	if request.AccountID <= 0 || !isOpenAIEvalSupportedModel(request.RequestedModel) {
 		return nil, errors.New("a supported OpenAI model and account are required")
 	}
+	// Account-scoped automatic BPS probes use an internal scheduler sentinel,
+	// not a public reasoning-effort value. Normalize that private dimension
+	// before applying the public effort allow-list.
+	isBPSAccountProbe := source == "scheduled" && request.TestType == OpenAIEvalTypeStateProbe && request.ReasoningEffort == OpenAIEvalBPSAccountEffort
+	if isBPSAccountProbe {
+		request.ReasoningEffort = ""
+	}
 	if request.ReasoningEffort != "" && !isAllowedOpenAIEvalReasoningEffort(request.ReasoningEffort) {
 		return nil, fmt.Errorf("unsupported reasoning effort %q", request.ReasoningEffort)
 	}
@@ -227,6 +387,14 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 	if request.TestType == OpenAIEvalTypeFingerprint {
 		if _, err := OpenAIEvalFingerprintSampleCount(request.SampleMode); err != nil {
 			return nil, err
+		}
+	}
+	if request.TestType == OpenAIEvalTypeCandy {
+		if request.SampleCount == 0 {
+			request.SampleCount = OpenAIEvalMinCandySamples
+		}
+		if request.SampleCount < OpenAIEvalMinCandySamples || request.SampleCount > OpenAIEvalMaxCandySamples {
+			return nil, fmt.Errorf("sample count must be between %d and %d", OpenAIEvalMinCandySamples, OpenAIEvalMaxCandySamples)
 		}
 	}
 
@@ -266,7 +434,15 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 		<-renewDone
 	}()
 
-	target, err := s.accountTest.ResolveOpenAIEvalTarget(runCtx, request.AccountID, request.RequestedModel)
+	targetModel := request.RequestedModel
+	if isBPSAccountProbe {
+		if config, configErr := s.repo.GetConfig(runCtx); configErr == nil {
+			if bps, ok := openAIEvalBPSAccountConfigFor(config, request.AccountID); ok && strings.TrimSpace(bps.ProbeModel) != "" {
+				targetModel = strings.TrimSpace(bps.ProbeModel)
+			}
+		}
+	}
+	target, err := s.accountTest.ResolveOpenAIEvalTarget(runCtx, request.AccountID, targetModel)
 	if err != nil {
 		return nil, err
 	}
@@ -274,17 +450,46 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 		return nil, errors.New("State Probe requires a direct OpenAI OAuth account")
 	}
 	start := time.Now().UTC()
+	expectedSamples := request.SampleCount
+	switch request.TestType {
+	case OpenAIEvalTypeFingerprint:
+		expectedSamples, _ = OpenAIEvalFingerprintSampleCount(request.SampleMode)
+	case OpenAIEvalTypeModelTrace:
+		expectedSamples = OpenAIEvalModelTraceRequests
+	case OpenAIEvalTypeStateProbe:
+		expectedSamples = 2
+	}
 	run := &OpenAIEvalRun{
 		AccountID: request.AccountID, TestType: request.TestType,
 		RequestedModel: request.RequestedModel, UpstreamModel: target.UpstreamModel,
 		ReasoningEffort: request.ReasoningEffort, DataVersion: OpenAIEvalDataVersion,
 		Status: "running", StartedAt: start, TriggeredBy: actorID, TriggerSource: source,
-		Outcome: OpenAIEvalOutcome{Status: "running", Confidence: "none", Scheduling: "disabled"},
-		Samples: make([]OpenAIEvalSampleRecord, 0),
+		Outcome:         OpenAIEvalOutcome{Status: "running", Reason: "sampling", SampleCount: 0, ExpectedCount: expectedSamples, Confidence: "none", Scheduling: "disabled"},
+		SampleCount:     expectedSamples,
+		ExpectedSamples: expectedSamples,
+		Phase:           "sampling",
+		Samples:         make([]OpenAIEvalSampleRecord, 0),
 	}
 	runID, err := s.repo.CreateRun(runCtx, run)
 	if err != nil {
 		return nil, err
+	}
+	persistProgress := func() {
+		updater, ok := s.repo.(OpenAIEvalProgressRepository)
+		if !ok {
+			return
+		}
+		run.Status = "running"
+		run.DurationMS = time.Since(start).Milliseconds()
+		run.Outcome = OpenAIEvalOutcome{
+			Status: "running", Reason: run.Phase, SampleCount: run.CompletedSamples,
+			ExpectedCount: run.ExpectedSamples, Confidence: "none", Scheduling: "disabled",
+		}
+		progressCtx, progressCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer progressCancel()
+		if progressErr := updater.UpdateRunProgress(progressCtx, runID, run); progressErr != nil {
+			logger.LegacyPrintf("service.openai_eval", "[OpenAI Eval] progress update failed run=%d completed=%d expected=%d: %v", runID, run.CompletedSamples, run.ExpectedSamples, progressErr)
+		}
 	}
 	hardFailure := false
 	hardFailureCode := ""
@@ -342,7 +547,7 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 		run.Status = probe.Verdict
 		completed, finishErr := finish(nil)
 		if finishErr == nil {
-			s.applyOpenAIStateProbeBPS(ctx, target, probe)
+			s.applyOpenAIStateProbeBPS(ctx, target, probe, isBPSAccountProbe)
 		}
 		return completed, finishErr
 	}
@@ -350,16 +555,19 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 	if request.TestType == OpenAIEvalTypeCandy {
 		allPassed := true
 		validSamples := 0
-		for i := 0; i < 5; i++ {
+		for i := 0; i < request.SampleCount; i++ {
+			run.Phase = "sampling"
 			result, sampleErr := s.accountTest.RunOpenAIEvalSample(runCtx, target, OpenAIEvalCandyPrompt, request.ReasoningEffort)
 			run.RequestCount++
+			run.CompletedSamples = run.RequestCount
 			if ctxErr := runCtx.Err(); ctxErr != nil {
 				return finish(ctxErr)
 			}
 			if sampleErr != nil {
 				markHardFailure(sampleErr)
 				allPassed = false
-				run.Samples = append(run.Samples, OpenAIEvalSampleRecord{ProbeID: fmt.Sprintf("candy-21-v1-%d", i+1), ErrorCode: safeOpenAIEvalErrorCode(sampleErr)})
+				run.Samples = append(run.Samples, OpenAIEvalSampleRecord{ProbeID: fmt.Sprintf("candy-29-v2-%d", i+1), ErrorCode: safeOpenAIEvalErrorCode(sampleErr)})
+				persistProgress()
 				continue
 			}
 			validSamples++
@@ -367,13 +575,14 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 			run.OutputTokens += result.OutputTokens
 			outcome := ScoreOpenAIEvalCandy(result.Text)
 			allPassed = allPassed && outcome.Status == "pass"
-			run.Samples = append(run.Samples, OpenAIEvalSampleRecord{ProbeID: fmt.Sprintf("candy-21-v1-%d", i+1), Valid: outcome.Status == "pass", ErrorCode: outcome.Reason})
+			run.Samples = append(run.Samples, OpenAIEvalSampleRecord{ProbeID: fmt.Sprintf("candy-29-v2-%d", i+1), Valid: outcome.Status == "pass", ErrorCode: outcome.Reason})
+			persistProgress()
 		}
-		if validSamples < 5 {
+		if validSamples < request.SampleCount {
 			// A transport/upstream failure means this run did not produce
 			// enough evidence for a canary verdict. Keep it neutral in the UI
 			// and let the operational error code explain what to retry.
-			run.Outcome = OpenAIEvalOutcome{Status: "insufficient", Reason: "insufficient_valid_samples", Score: 0, SampleCount: validSamples, ExpectedCount: 5, Confidence: "none", Scheduling: "alert_only"}
+			run.Outcome = OpenAIEvalOutcome{Status: "insufficient", Reason: "insufficient_valid_samples", Score: 0, SampleCount: validSamples, ExpectedCount: request.SampleCount, Confidence: "none", Scheduling: "alert_only"}
 			run.Status = "insufficient"
 		} else if allPassed {
 			run.Outcome = OpenAIEvalOutcome{Status: "pass", Reason: "all_public_candy_variants_passed", Score: 1, SampleCount: run.RequestCount, ExpectedCount: run.RequestCount, Confidence: "low", Scheduling: "alert_only"}
@@ -424,6 +633,7 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 			fullPrompt := probe.Instructions + "\n" + prompt
 			result, sampleErr := s.accountTest.RunOpenAIEvalSample(runCtx, target, fullPrompt, request.ReasoningEffort)
 			run.RequestCount++
+			run.CompletedSamples = run.RequestCount
 			if ctxErr := runCtx.Err(); ctxErr != nil {
 				return finish(ctxErr)
 			}
@@ -432,6 +642,9 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 				code := safeOpenAIEvalErrorCode(sampleErr)
 				samples = append(samples, OpenAIEvalSample{ProbeID: probe.ID, Error: code})
 				run.Samples = append(run.Samples, OpenAIEvalSampleRecord{ProbeID: probe.ID, ErrorCode: code})
+				if run.CompletedSamples%5 == 0 || run.CompletedSamples == required {
+					persistProgress()
+				}
 				continue
 			}
 			run.InputTokens += result.InputTokens
@@ -443,6 +656,9 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 			}
 			samples = append(samples, sample)
 			run.Samples = append(run.Samples, OpenAIEvalSampleRecord{ProbeID: probe.ID, NormalizedAnswer: normalized, Valid: valid, ErrorCode: sample.Error})
+			if run.CompletedSamples%5 == 0 || run.CompletedSamples == required {
+				persistProgress()
+			}
 		}
 	}
 	result := ScoreOpenAIEvalFingerprint(request.RequestedModel, samples, OpenAIEvalFingerprintBaselines, required)
@@ -517,7 +733,52 @@ func updateOpenAIEvalRouteHealth(health OpenAIEvalRouteHealth, accountID int64, 
 }
 
 func (s *OpenAIEvalService) ListRuns(ctx context.Context, filter OpenAIEvalRunFilter) ([]OpenAIEvalRun, error) {
-	return s.repo.ListRuns(ctx, filter)
+	runs, err := s.repo.ListRuns(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	for i := range runs {
+		normalizeOpenAIEvalAttributionRun(&runs[i])
+	}
+	return runs, nil
+}
+
+// Apply the current attribution policy when reading history without rewriting
+// stored evidence. Failed/incomplete runs never become likely-normal results.
+func normalizeOpenAIEvalAttributionRun(run *OpenAIEvalRun) {
+	if run == nil {
+		return
+	}
+	switch run.Status {
+	case "attributed", "consistent", "different", "uncertain", "suspected_normal", "warning":
+	default:
+		return
+	}
+	model := ""
+	switch run.TestType {
+	case OpenAIEvalTypeModelTrace:
+		if trace := run.Outcome.ModelTrace; trace != nil && trace.UsedOutputs > 0 {
+			model = trace.Prediction
+		}
+	case OpenAIEvalTypeFingerprint:
+		if fp := run.Outcome.Fingerprint; fp != nil && fp.MeanJSD != nil && fp.CellCount >= 4 && fp.ValidSamples >= fp.RequiredSamples {
+			model = fp.NearestModel
+		}
+	default:
+		return
+	}
+	if strings.TrimSpace(model) == "" {
+		return
+	}
+	run.Status, run.Outcome.Reason = openAIEvalAttributionVerdict(model)
+	run.Outcome.Status = run.Status
+	run.Outcome.Confidence = "low"
+	run.Outcome.Scheduling = "alert_only"
+	if fp := run.Outcome.Fingerprint; run.TestType == OpenAIEvalTypeFingerprint && fp != nil {
+		copy := *fp
+		copy.Status, copy.Reason = run.Status, run.Outcome.Reason
+		run.Outcome.Fingerprint = &copy
+	}
 }
 
 func (s *OpenAIEvalService) ListAuditEvents(ctx context.Context, limit int) ([]OpenAIEvalAuditEvent, error) {

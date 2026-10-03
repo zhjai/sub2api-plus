@@ -1,10 +1,12 @@
-// Pure helpers shared by the two Model Integrity pages (降智测试 / 降智调度).
+// Pure helpers shared by the two Model Integrity pages (降智测试 / 调度策略).
 // They only describe what the backend already enforces; keep numbers here in
 // sync with backend/internal/service/openai_eval*.go instead of inventing them.
 import type {
+  OpenAIEvalBPSAccountConfig,
   OpenAIEvalBPSMode,
   OpenAIEvalConfig,
   OpenAIEvalModelCatalog,
+  OpenAIEvalPolicyWeights,
   OpenAIEvalRouteConfig,
   OpenAIEvalRun,
   OpenAIEvalSchedule,
@@ -17,7 +19,22 @@ export const TEST_TYPES: EvalTestType[] = ['candy', 'fingerprint', 'modeltrace',
 
 export const HOUR = 3600
 export const DAY = 24 * HOUR
-const MAX_INTERVAL = 30 * DAY
+export const CANDY_MIN_SAMPLES = 1
+export const CANDY_MAX_SAMPLES = 10
+export const CUSTOM_INTERVAL = 'custom'
+/** PostgreSQL INTEGER storage limit for openai_eval_schedule_state.interval_seconds. */
+export const MAX_INTERVAL_SECONDS = 2_147_483_647
+/** Custom interval inputs use whole minutes, so round the storage limit down. */
+export const MAX_INTERVAL_MINUTES = Math.floor(MAX_INTERVAL_SECONDS / 60)
+export const DEFAULT_CUSTOM_BALANCE: OpenAIEvalPolicyWeights = {
+  cost: 0.2,
+  stability: 0.3,
+  error_rate: 0.25,
+  ttft: 0.15,
+  load: 0.1
+}
+export const CUSTOM_FACTORS = ['cost', 'stability', 'error_rate', 'ttft', 'load'] as const
+export type CustomFactor = typeof CUSTOM_FACTORS[number]
 
 interface TestTypeMeta {
   scheduleKey: 'candy_schedule' | 'fingerprint_schedule' | 'modeltrace_schedule' | 'state_probe_schedule'
@@ -26,14 +43,14 @@ interface TestTypeMeta {
 }
 
 export const TEST_TYPE_META: Record<EvalTestType, TestTypeMeta> = {
-  candy: { scheduleKey: 'candy_schedule', minInterval: 15 * 60, intervals: [15 * 60, HOUR, 6 * HOUR, DAY] },
-  fingerprint: { scheduleKey: 'fingerprint_schedule', minInterval: DAY, intervals: [DAY, 3 * DAY, 7 * DAY] },
-  modeltrace: { scheduleKey: 'modeltrace_schedule', minInterval: DAY, intervals: [DAY, 3 * DAY, 7 * DAY] },
-  state_probe: { scheduleKey: 'state_probe_schedule', minInterval: 6 * HOUR, intervals: [6 * HOUR, DAY, 7 * DAY] }
+  candy: { scheduleKey: 'candy_schedule', minInterval: 5 * 60, intervals: [5 * 60, 10 * 60, 30 * 60, HOUR, 6 * HOUR, 12 * HOUR, DAY] },
+  fingerprint: { scheduleKey: 'fingerprint_schedule', minInterval: 5 * 60, intervals: [5 * 60, 10 * 60, 30 * 60, HOUR, 6 * HOUR, 12 * HOUR, DAY] },
+  modeltrace: { scheduleKey: 'modeltrace_schedule', minInterval: 5 * 60, intervals: [5 * 60, 10 * 60, 30 * 60, HOUR, 6 * HOUR, 12 * HOUR, DAY] },
+  state_probe: { scheduleKey: 'state_probe_schedule', minInterval: 5 * 60, intervals: [5 * 60, 10 * 60, 30 * 60, HOUR, 6 * HOUR, 12 * HOUR, DAY] }
 }
 
-/** Candy repeats the pinned public question five times (openai_eval_service.go). */
-export const CANDY_REQUESTS = 5
+/** Candy uses the configured sample count; one is the server default. */
+export const CANDY_REQUESTS = 1
 /** State Probe mints a ticket and continues it once. */
 export const STATE_PROBE_REQUESTS = 2
 const DEFAULT_FINGERPRINT_SAMPLES: Record<string, number> = { quick: 60, standard: 200, strict: 400 }
@@ -55,12 +72,26 @@ export function normalizeSchedule(schedule: OpenAIEvalSchedule, type: EvalTestTy
   const minimum = TEST_TYPE_META[type].minInterval
   const rawInterval = Number(schedule.interval_seconds)
   const interval = Number.isFinite(rawInterval) ? Math.trunc(rawInterval) : minimum
-  schedule.interval_seconds = Math.min(Math.max(interval, minimum), MAX_INTERVAL)
+  // Presets stop at 24 hours. Custom intervals have no product ceiling, but
+  // must fit the PostgreSQL INTEGER column used by schedule state.
+  schedule.interval_seconds = Math.min(Math.max(interval, minimum), MAX_INTERVAL_SECONDS)
   const rawJitter = Number(schedule.jitter_seconds)
   const jitter = Number.isFinite(rawJitter) ? Math.trunc(rawJitter) : 0
-  schedule.jitter_seconds = Math.min(Math.max(jitter, 0), Math.max(0, schedule.interval_seconds - minimum))
+  schedule.jitter_seconds = Math.min(Math.max(jitter, 0), maxScheduleJitterSeconds(schedule.interval_seconds))
+  if (type === 'candy') {
+    const rawSamples = Number(schedule.sample_count)
+    const samples = Number.isFinite(rawSamples) ? Math.trunc(rawSamples) : CANDY_MIN_SAMPLES
+    schedule.sample_count = Math.min(Math.max(samples, CANDY_MIN_SAMPLES), CANDY_MAX_SAMPLES)
+  }
   if (type === 'fingerprint' && !schedule.sample_mode) schedule.sample_mode = 'quick'
   return schedule
+}
+
+export function maxScheduleJitterSeconds(intervalSeconds: number): number {
+  if (!Number.isFinite(intervalSeconds) || intervalSeconds <= 0) return 0
+  const interval = Math.min(Math.floor(intervalSeconds), MAX_INTERVAL_SECONDS)
+  const storageHeadroom = MAX_INTERVAL_SECONDS - interval
+  return Math.min(Math.floor(interval / 2), HOUR, storageHeadroom)
 }
 
 export function bpsModeOf(route: Pick<OpenAIEvalRouteConfig, 'bps_mode' | 'bps_auto'>): OpenAIEvalBPSMode {
@@ -115,7 +146,15 @@ export function toSavePayload(config: OpenAIEvalConfig): OpenAIEvalConfig {
     effects_enabled: config.effects_enabled,
     bps_auto_enabled: config.bps_auto_enabled,
     scheduling_policy: config.scheduling_policy ?? '',
-    policies: (config.policies ?? []).map(rule => ({ ...rule, reasoning_effort: rule.reasoning_effort || '' })),
+    custom_balance: normalizeCustomBalance(config.custom_balance),
+    policies: (config.policies ?? []).map(rule => ({
+      ...rule,
+      reasoning_effort: rule.reasoning_effort || '',
+      ...(rule.policy === 'custom_balance'
+        ? { custom_balance: normalizeCustomBalance(rule.custom_balance ?? config.custom_balance) }
+        : {})
+    })),
+    bps_accounts: (config.bps_accounts ?? []).map(bpsAccountPayload),
     accounts: config.accounts.map(route => {
       const mode = bpsModeOf(route)
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -125,10 +164,101 @@ export function toSavePayload(config: OpenAIEvalConfig): OpenAIEvalConfig {
   }
 }
 
+// ---------------------------------------------------------------------------
+// BPS accounts (account-scoped, independent of test targets)
+// ---------------------------------------------------------------------------
+
+export const BPS_MODES: OpenAIEvalBPSMode[] = ['auto', 'force_on', 'force_off']
+export const BPS_THRESHOLD_MIN = 1
+export const BPS_THRESHOLD_MAX = 10
+export const BPS_DEFAULT_FAILURE_THRESHOLD = 3
+export const BPS_DEFAULT_RECOVERY_THRESHOLD = 2
+/** Same lower bound as the State Probe schedule (OpenAIEvalMinStateProbeInterval). */
+export const BPS_INTERVALS = [5 * 60, 10 * 60, 30 * 60, HOUR, 6 * HOUR, 12 * HOUR, DAY]
+
+function clampInt(value: unknown, min: number, max: number, fallback: number): number {
+  const raw = Number(value)
+  if (!Number.isFinite(raw)) return fallback
+  return Math.min(Math.max(Math.trunc(raw), min), max)
+}
+
+export function newBPSAccount(accountID: number, probeModel = ''): OpenAIEvalBPSAccountConfig {
+  return {
+    account_id: accountID,
+    probe_model: probeModel,
+    mode: 'auto',
+    failure_threshold: BPS_DEFAULT_FAILURE_THRESHOLD,
+    recovery_threshold: BPS_DEFAULT_RECOVERY_THRESHOLD,
+    interval_seconds: BPS_INTERVALS[0]
+  }
+}
+
+export function normalizeBPSAccount(item: OpenAIEvalBPSAccountConfig): OpenAIEvalBPSAccountConfig {
+  item.mode = BPS_MODES.includes(item.mode) ? item.mode : 'force_off'
+  item.probe_model = (item.probe_model ?? '').trim()
+  item.failure_threshold = clampInt(item.failure_threshold, BPS_THRESHOLD_MIN, BPS_THRESHOLD_MAX, BPS_DEFAULT_FAILURE_THRESHOLD)
+  item.recovery_threshold = clampInt(item.recovery_threshold, BPS_THRESHOLD_MIN, BPS_THRESHOLD_MAX, BPS_DEFAULT_RECOVERY_THRESHOLD)
+  item.interval_seconds = clampInt(item.interval_seconds, BPS_INTERVALS[0], MAX_INTERVAL_SECONDS, BPS_INTERVALS[0])
+  item.degraded_streak = Number(item.degraded_streak) || 0
+  item.healthy_streak = Number(item.healthy_streak) || 0
+  return item
+}
+
+/** Only the editable fields; runtime state is owned by the server. */
+export function bpsAccountPayload(item: OpenAIEvalBPSAccountConfig): OpenAIEvalBPSAccountConfig {
+  return {
+    account_id: item.account_id,
+    probe_model: item.probe_model ?? '',
+    mode: item.mode,
+    failure_threshold: item.failure_threshold,
+    recovery_threshold: item.recovery_threshold,
+    interval_seconds: item.interval_seconds
+  }
+}
+
+export type BPSLane = 'bps' | 'native' | 'locked' | 'inactive'
+
+/** Which route the account uses right now, from the admin's point of view. */
+export function bpsAccountLane(item: OpenAIEvalBPSAccountConfig, autoEnabled: boolean): BPSLane {
+  if (item.disabled_reason?.trim() || item.state === 'locked') return 'locked'
+  if (item.mode === 'force_off') return 'inactive'
+  if (item.mode === 'force_on') return 'bps'
+  if (!autoEnabled) return 'inactive'
+  return item.active || item.state === 'bps' ? 'bps' : 'native'
+}
+
+export function canResetBPSAccount(item: OpenAIEvalBPSAccountConfig): boolean {
+  return Boolean(item.active || item.disabled_reason || item.state === 'bps' || item.state === 'locked' || item.degraded_streak || item.healthy_streak)
+}
+
+/** Older backends emitted an all-zero object even though it cannot be saved. */
+export function normalizeCustomBalance(weights?: OpenAIEvalPolicyWeights): OpenAIEvalPolicyWeights {
+  if (!weights) return { ...DEFAULT_CUSTOM_BALANCE }
+  const values = [weights.cost, weights.stability, weights.error_rate, weights.ttft, weights.load]
+  if (values.some(value => !Number.isFinite(value) || value < 0) || values.reduce((sum, value) => sum + value, 0) <= 0) {
+    return { ...DEFAULT_CUSTOM_BALANCE }
+  }
+  return { ...weights }
+}
+
+/** False when the server would reject the weights: any negative/non-numeric value or an all-zero total. */
+export function isValidCustomBalance(weights?: OpenAIEvalPolicyWeights): boolean {
+  if (!weights) return false
+  const values = CUSTOM_FACTORS.map(factor => Number(weights[factor]))
+  return values.every(value => Number.isFinite(value) && value >= 0) && values.reduce((sum, value) => sum + value, 0) > 0
+}
+
+/** Whole-percent share of each factor after the normalization the server applies on save. */
+export function customBalanceShares(weights?: OpenAIEvalPolicyWeights): Record<CustomFactor, number> {
+  const normalized = normalizeCustomBalance(weights)
+  const total = CUSTOM_FACTORS.reduce((sum, factor) => sum + normalized[factor], 0)
+  return Object.fromEntries(CUSTOM_FACTORS.map(factor => [factor, Math.round((normalized[factor] / total) * 100)])) as Record<CustomFactor, number>
+}
+
 export function requestsPerRun(route: OpenAIEvalRouteConfig, type: EvalTestType, catalog?: OpenAIEvalModelCatalog | null, sampleMode?: string): number {
   switch (type) {
     case 'candy':
-      return CANDY_REQUESTS
+      return Math.max(1, Math.trunc(Number(route.candy_schedule.sample_count) || CANDY_REQUESTS))
     case 'state_probe':
       return STATE_PROBE_REQUESTS
     case 'modeltrace':
@@ -156,14 +286,40 @@ export function activeScheduleCount(routes: OpenAIEvalRouteConfig[]): number {
   return routes.reduce((sum, route) => sum + TEST_TYPES.filter(type => scheduleOf(route, type)?.enabled && (type !== 'state_probe' || isDirectOAuthRoute(route))).length, 0)
 }
 
-/** Result tone: only 'pass'/'consistent' are good, only 'warning'/'different' deserve attention. */
-export type ResultTone = 'ok' | 'attention' | 'neutral' | 'running'
+/**
+ * Result tone: 'pass'/'consistent' are verified good; 'suspected_normal' is an
+ * inferred non-Luna attribution and gets its own 'likely' tone so it is never
+ * mistaken for a verified pass or for degradation. Only 'warning'/'different'
+ * deserve attention; insufficient/error/unresolved stay neutral.
+ */
+export type ResultTone = 'ok' | 'likely' | 'attention' | 'neutral' | 'running'
 
 export function resultTone(status: string | undefined): ResultTone {
   if (status === 'pass' || status === 'consistent' || status === 'healthy') return 'ok'
+  if (status === 'suspected_normal') return 'likely'
   if (status === 'warning' || status === 'different' || status === 'degraded') return 'attention'
   if (status === 'running') return 'running'
   return 'neutral'
+}
+
+/** Backend reasons for ModelTrace / fingerprint attributions (openAIEvalAttributionVerdict). */
+export const LUNA_ATTRIBUTION_REASON = 'suspected_luna_attribution'
+export const NON_LUNA_ATTRIBUTION_REASON = 'non_luna_behavioral_attribution'
+
+/**
+ * Status key used for the visible label. A Luna attribution is stored as a
+ * generic 'warning'; label it "possible Luna" rather than the Candy-style
+ * "abnormal" so it never reads as confirmed degradation.
+ */
+export function runStatusKey(run: Pick<OpenAIEvalRun, 'status' | 'outcome'>): string {
+  if (run.status === 'warning' && run.outcome?.reason === LUNA_ATTRIBUTION_REASON) return 'suspected_luna'
+  return run.status
+}
+
+/** True when the run's verdict is a behavioural attribution, so the UI must say it is inferred. */
+export function isAttributionRun(run: Pick<OpenAIEvalRun, 'status' | 'outcome' | 'test_type'>): boolean {
+  if (run.test_type !== 'modeltrace' && run.test_type !== 'fingerprint') return false
+  return run.status === 'suspected_normal' || run.outcome?.reason === LUNA_ATTRIBUTION_REASON || run.outcome?.reason === NON_LUNA_ATTRIBUTION_REASON
 }
 
 export function latestRunFor(runs: OpenAIEvalRun[], route: OpenAIEvalRouteConfig, type: EvalTestType): OpenAIEvalRun | undefined {
@@ -176,7 +332,7 @@ export function latestRunFor(runs: OpenAIEvalRun[], route: OpenAIEvalRouteConfig
 // Scheduling policy
 // ---------------------------------------------------------------------------
 
-export const POLICIES: OpenAIEvalSchedulingPolicy[] = ['', 'cost_first', 'stability_first', 'avoid_degradation']
+export const POLICIES: OpenAIEvalSchedulingPolicy[] = ['', 'cost_first', 'stability_first', 'avoid_degradation', 'custom_balance']
 
 export type PolicyFactor = 'price' | 'errors' | 'speed'
 
@@ -192,7 +348,8 @@ export const POLICY_EMPHASIS: Record<string, Record<PolicyFactor, number>> = {
   '': { price: 1, errors: 2, speed: 2 },
   cost_first: { price: 4, errors: 1, speed: 1 },
   stability_first: { price: 1, errors: 4, speed: 4 },
-  avoid_degradation: { price: 0, errors: 4, speed: 3 }
+  avoid_degradation: { price: 0, errors: 4, speed: 3 },
+  custom_balance: { price: 2, errors: 2, speed: 2 }
 }
 
 export function policyKey(policy: string | undefined): string {

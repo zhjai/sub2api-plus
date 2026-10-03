@@ -622,6 +622,28 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     expect(createAccountMock.mock.calls[0]?.[0]?.extra?.openai_long_context_billing_enabled).toBe(true)
   })
 
+  it('offers and persists the opaque-upstream switch only for a custom OpenAI API-key endpoint', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    await selectButtonByText(wrapper, 'API Key')
+
+    expect(wrapper.find('[data-testid="create-openai-opaque-upstream"]').exists()).toBe(false)
+    const baseUrl = wrapper
+      .findAll('input')
+      .find((candidate) => candidate.attributes('placeholder') === 'https://api.openai.com')
+    expect(baseUrl).toBeDefined()
+    await baseUrl?.setValue('https://relay.example/v1')
+
+    const toggle = wrapper.get('[data-testid="create-openai-opaque-upstream-toggle"]')
+    await toggle.trigger('click')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('Opaque relay')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('sk-relay')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(createAccountMock.mock.calls[0]?.[0]?.extra?.openai_opaque_upstream).toBe(true)
+  })
+
   it('omits the OpenAI setting for non-OpenAI account creation', async () => {
     await submitApiKeyAccount('anthropic')
 

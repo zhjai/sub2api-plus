@@ -46,11 +46,8 @@ func (s *openaiOAuthService) ExchangeCode(ctx context.Context, code, codeVerifie
 
 	var tokenResp openai.TokenResponse
 
-	authUA, authOriginator := service.CodexCanonicalAuthIdentity()
-	resp, err := client.R().
+	resp, err := newOpenAICodexAuthRequest(client).
 		SetContext(ctx).
-		SetHeader("User-Agent", authUA).
-		SetHeader("originator", authOriginator).
 		SetFormDataFromValues(formData).
 		SetSuccessResult(&tokenResp).
 		Post(s.tokenURL)
@@ -96,11 +93,8 @@ func (s *openaiOAuthService) refreshTokenWithClientID(ctx context.Context, refre
 
 	var tokenResp openai.TokenResponse
 
-	authUA, authOriginator := service.CodexCanonicalAuthIdentity()
-	resp, err := client.R().
+	resp, err := newOpenAICodexAuthRequest(client).
 		SetContext(ctx).
-		SetHeader("User-Agent", authUA).
-		SetHeader("originator", authOriginator).
 		SetFormDataFromValues(formData).
 		SetSuccessResult(&tokenResp).
 		Post(s.tokenURL)
@@ -117,6 +111,16 @@ func (s *openaiOAuthService) refreshTokenWithClientID(ctx context.Context, refre
 	}
 
 	return &tokenResp, nil
+}
+
+func newOpenAICodexAuthRequest(client *req.Client) *req.Request {
+	headers := make(http.Header)
+	service.ApplyCodexCanonicalAuthIdentity(headers)
+	request := client.R()
+	for name, values := range headers {
+		request.SetHeader(name, strings.Join(values, ", "))
+	}
+	return request
 }
 
 func createOpenAIReqClient(proxyURL string) (*req.Client, error) {

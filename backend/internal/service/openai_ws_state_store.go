@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 
 const (
 	openAIWSResponseAccountCachePrefix = "openai:response:"
+	openAIWSResponseEpochCachePrefix   = "openai:response-epoch:"
 	openAIHTTPResponseOwnerUserPrefix  = "openai:http-response-owner:user:"
 	openAIHTTPResponseOwnerKeyPrefix   = "openai:http-response-owner:key:"
 	openAIWSStateStoreCleanupInterval  = time.Minute
@@ -23,6 +25,12 @@ const (
 
 type openAIWSAccountBinding struct {
 	accountID int64
+	expiresAt time.Time
+}
+
+type openAIWSResponseRouteEpochBinding struct {
+	accountID int64
+	epoch     int64
 	expiresAt time.Time
 }
 
@@ -69,6 +77,8 @@ type OpenAIWSStateStore interface {
 	BindResponseAccount(ctx context.Context, groupID int64, responseID string, accountID int64, ttl time.Duration) error
 	GetResponseAccount(ctx context.Context, groupID int64, responseID string) (int64, error)
 	DeleteResponseAccount(ctx context.Context, groupID int64, responseID string) error
+	BindResponseRouteEpoch(ctx context.Context, groupID int64, responseID string, accountID, epoch int64, ttl time.Duration) error
+	GetResponseRouteEpoch(ctx context.Context, groupID int64, responseID string, accountID int64) (int64, bool, error)
 	BindHTTPResponseOwner(ctx context.Context, groupID int64, responseID string, userID, apiKeyID int64, ttl time.Duration) error
 	GetHTTPResponseOwner(ctx context.Context, groupID int64, responseID string) (userID, apiKeyID int64, found bool, err error)
 
@@ -99,6 +109,8 @@ type defaultOpenAIWSStateStore struct {
 
 	responseToAccountMu  sync.RWMutex
 	responseToAccount    map[string]openAIWSAccountBinding
+	responseToEpochMu    sync.RWMutex
+	responseToEpoch      map[string]openAIWSResponseRouteEpochBinding
 	responseOwnerMu      sync.RWMutex
 	responseOwners       map[string]openAIHTTPResponseOwnerBinding
 	responseToConnMu     sync.RWMutex
@@ -119,6 +131,7 @@ func NewOpenAIWSStateStore(cache GatewayCache) OpenAIWSStateStore {
 	store := &defaultOpenAIWSStateStore{
 		cache:                   cache,
 		responseToAccount:       make(map[string]openAIWSAccountBinding, 256),
+		responseToEpoch:         make(map[string]openAIWSResponseRouteEpochBinding, 256),
 		responseOwners:          make(map[string]openAIHTTPResponseOwnerBinding, 256),
 		responseToConn:          make(map[string]openAIWSConnBinding, 256),
 		sessionToTurnState:      make(map[string]openAIWSTurnStateBinding, 256),
@@ -127,6 +140,68 @@ func NewOpenAIWSStateStore(cache GatewayCache) OpenAIWSStateStore {
 	}
 	store.lastCleanupUnixNano.Store(time.Now().UnixNano())
 	return store
+}
+
+func (s *defaultOpenAIWSStateStore) BindResponseRouteEpoch(ctx context.Context, groupID int64, responseID string, accountID, epoch int64, ttl time.Duration) error {
+	id := normalizeOpenAIWSResponseID(responseID)
+	if id == "" || accountID <= 0 || epoch < 0 {
+		return nil
+	}
+	ttl = normalizeOpenAIWSTTL(ttl)
+	s.maybeCleanup()
+	key := openAIWSResponseAccountMapKey(groupID, id)
+	s.responseToEpochMu.Lock()
+	ensureBindingCapacity(s.responseToEpoch, key, openAIWSStateStoreMaxEntriesPerMap)
+	s.responseToEpoch[key] = openAIWSResponseRouteEpochBinding{
+		accountID: accountID,
+		epoch:     epoch,
+		expiresAt: time.Now().Add(ttl),
+	}
+	s.responseToEpochMu.Unlock()
+	if s.cache == nil {
+		return nil
+	}
+	cacheCtx, cancel := withOpenAIWSStateStoreRedisTimeout(ctx)
+	defer cancel()
+	return s.cache.SetSessionAccountID(cacheCtx, groupID, openAIWSResponseEpochCacheKey(id, accountID), epoch+1, ttl)
+}
+
+func (s *defaultOpenAIWSStateStore) GetResponseRouteEpoch(ctx context.Context, groupID int64, responseID string, accountID int64) (int64, bool, error) {
+	id := normalizeOpenAIWSResponseID(responseID)
+	if id == "" || accountID <= 0 {
+		return 0, false, nil
+	}
+	s.maybeCleanup()
+	key := openAIWSResponseAccountMapKey(groupID, id)
+	now := time.Now()
+	s.responseToEpochMu.RLock()
+	binding, ok := s.responseToEpoch[key]
+	s.responseToEpochMu.RUnlock()
+	if ok && now.Before(binding.expiresAt) && binding.accountID == accountID && binding.epoch >= 0 {
+		return binding.epoch, true, nil
+	}
+	if s.cache == nil {
+		return 0, false, nil
+	}
+	cacheCtx, cancel := withOpenAIWSStateStoreRedisTimeout(ctx)
+	defer cancel()
+	encodedEpoch, err := s.cache.GetSessionAccountID(cacheCtx, groupID, openAIWSResponseEpochCacheKey(id, accountID))
+	if errors.Is(err, ErrStickySessionNotFound) {
+		return 0, false, nil
+	}
+	if err != nil || encodedEpoch <= 0 {
+		return 0, false, err
+	}
+	epoch := encodedEpoch - 1
+	s.responseToEpochMu.Lock()
+	ensureBindingCapacity(s.responseToEpoch, key, openAIWSStateStoreMaxEntriesPerMap)
+	s.responseToEpoch[key] = openAIWSResponseRouteEpochBinding{
+		accountID: accountID,
+		epoch:     epoch,
+		expiresAt: now.Add(time.Minute),
+	}
+	s.responseToEpochMu.Unlock()
+	return epoch, true, nil
 }
 
 func (s *defaultOpenAIWSStateStore) BindHTTPResponseOwner(ctx context.Context, groupID int64, responseID string, userID, apiKeyID int64, ttl time.Duration) error {
@@ -262,8 +337,13 @@ func (s *defaultOpenAIWSStateStore) GetResponseAccount(ctx context.Context, grou
 	cacheCtx, cancel := withOpenAIWSStateStoreRedisTimeout(ctx)
 	defer cancel()
 	accountID, err := s.cache.GetSessionAccountID(cacheCtx, groupID, cacheKey)
-	if err != nil || accountID <= 0 {
-		// 缓存读取失败不阻断主流程，按未命中降级。
+	if errors.Is(err, ErrStickySessionNotFound) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	if accountID <= 0 {
 		return 0, nil
 	}
 	return accountID, nil
@@ -509,6 +589,10 @@ func (s *defaultOpenAIWSStateStore) maybeCleanup() {
 	cleanupExpiredAccountBindings(s.responseToAccount, now, openAIWSStateStoreCleanupMaxPerMap)
 	s.responseToAccountMu.Unlock()
 
+	s.responseToEpochMu.Lock()
+	cleanupExpiredResponseRouteEpochBindings(s.responseToEpoch, now, openAIWSStateStoreCleanupMaxPerMap)
+	s.responseToEpochMu.Unlock()
+
 	s.responseOwnerMu.Lock()
 	cleanupExpiredHTTPResponseOwnerBindings(s.responseOwners, now, openAIWSStateStoreCleanupMaxPerMap)
 	s.responseOwnerMu.Unlock()
@@ -528,6 +612,22 @@ func (s *defaultOpenAIWSStateStore) maybeCleanup() {
 	s.sessionInvalidEncryptedMu.Lock()
 	cleanupExpiredInvalidEncryptedBindings(s.sessionInvalidEncrypted, now, openAIWSStateStoreCleanupMaxPerMap)
 	s.sessionInvalidEncryptedMu.Unlock()
+}
+
+func cleanupExpiredResponseRouteEpochBindings(bindings map[string]openAIWSResponseRouteEpochBinding, now time.Time, maxScan int) {
+	if len(bindings) == 0 || maxScan <= 0 {
+		return
+	}
+	scanned := 0
+	for key, binding := range bindings {
+		if now.After(binding.expiresAt) {
+			delete(bindings, key)
+		}
+		scanned++
+		if scanned >= maxScan {
+			break
+		}
+	}
 }
 
 func cleanupExpiredInvalidEncryptedBindings(bindings map[string]openAIWSInvalidEncryptedBinding, now time.Time, maxScan int) {
@@ -631,6 +731,11 @@ func normalizeOpenAIWSResponseID(responseID string) string {
 func openAIWSResponseAccountCacheKey(responseID string) string {
 	sum := sha256.Sum256([]byte(responseID))
 	return openAIWSResponseAccountCachePrefix + hex.EncodeToString(sum[:])
+}
+
+func openAIWSResponseEpochCacheKey(responseID string, accountID int64) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s", accountID, responseID)))
+	return openAIWSResponseEpochCachePrefix + hex.EncodeToString(sum[:])
 }
 
 func openAIHTTPResponseOwnerCacheKey(prefix, responseID string) string {

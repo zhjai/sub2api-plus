@@ -297,12 +297,30 @@ func TestEnforceCodexIdentityHeadersIsIdempotent(t *testing.T) {
 func TestEnforceCodexIdentityHeaders_NoOriginatorIsNoop(t *testing.T) {
 	h := make(http.Header)
 	h.Set("user-agent", "third-party-client/1.0.0")
+	h.Set("Accept-Language", "zh-CN,zh;q=0.9")
 
 	enforceCodexIdentityHeaders(h)
 
 	require.Empty(t, h.Get("originator"))
 	require.Empty(t, h.Get("version"))
 	require.Equal(t, "third-party-client/1.0.0", h.Get("user-agent"))
+	require.Equal(t, codexOutboundAcceptLanguage, h.Get("Accept-Language"))
+}
+
+func TestCodexIdentityHelpersAlwaysEnforceEnglishAcceptLanguage(t *testing.T) {
+	for name, apply := range map[string]func(http.Header){
+		"ensure": ensureCodexIdentityHeaders,
+		"auth":   ApplyCodexCanonicalAuthIdentity,
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := make(http.Header)
+			h.Set("Accept-Language", "zh-CN,zh;q=0.9")
+
+			apply(h)
+
+			require.Equal(t, codexOutboundAcceptLanguage, h.Get("Accept-Language"))
+		})
+	}
 }
 
 func TestNormalizeCodexClientVersion(t *testing.T) {
