@@ -9,11 +9,15 @@ const api = vi.hoisted(() => ({
   saveOpenAIEvalConfig: vi.fn(),
   resetOpenAIBPSState: vi.fn(),
   refreshOpenAIEvalQuality: vi.fn(),
+  evaluateOpenAIEvalRanking: vi.fn(),
+  getOpenAIEvalRankings: vi.fn(),
+  getOpenAIEvalRankingAccounts: vi.fn(),
   listOpenAIEvalRuns: vi.fn(),
   listOpenAIEvalAudit: vi.fn(),
   list: vi.fn(),
   listSchedulerDecisions: vi.fn()
 }))
+const groups = vi.hoisted(() => ({ getAll: vi.fn() }))
 const store = vi.hoisted(() => ({ showError: vi.fn(), showSuccess: vi.fn(), showInfo: vi.fn() }))
 
 vi.mock('@/api/admin/accounts', () => ({
@@ -22,6 +26,8 @@ vi.mock('@/api/admin/accounts', () => ({
   listSchedulerDecisions: api.listSchedulerDecisions
 }))
 vi.mock('@/stores/app', () => ({ useAppStore: () => store }))
+// The real client would attempt a network navigation, so the group list is stubbed.
+vi.mock('@/api/admin/groups', () => ({ default: groups, groupsAPI: groups }))
 vi.mock('vue-i18n', async importOriginal => ({
   ...(await importOriginal<typeof import('vue-i18n')>()),
   useI18n: () => ({ t: zhT })
@@ -112,6 +118,49 @@ beforeEach(() => {
   api.list.mockResolvedValue({ items: [{ id: 11, name: 'oauth-a', platform: 'openai', type: 'oauth' }, { id: 12, name: 'apikey-b', platform: 'openai', type: 'apikey' }] })
   api.listOpenAIEvalRuns.mockResolvedValue({ items: [] })
   api.listOpenAIEvalAudit.mockResolvedValue({ items: [] })
+  groups.getAll.mockResolvedValue([{ id: 7, name: 'openai-team', platform: 'openai' }])
+  // An empty snapshot: the new panels render but claim nothing until a real
+  // evaluation or a filtered read supplies a build.
+  api.getOpenAIEvalRankings.mockResolvedValue({
+    summary: null,
+    effective_status: 'inactive_effects_off',
+    current_config_revision: 4,
+    evaluation_in_progress: false,
+    ranking_error: null,
+    groups: [],
+    dimensions: [],
+    next_cursor: null
+  })
+  api.getOpenAIEvalRankingAccounts.mockResolvedValue({
+    summary: null,
+    effective_status: 'active',
+    current_config_revision: 4,
+    evaluation_in_progress: false,
+    ranking_error: null,
+    groups: [],
+    dimensions: [],
+    next_cursor: null
+  })
+  api.evaluateOpenAIEvalRanking.mockResolvedValue({
+    evaluation_id: 'instance-1-1',
+    record_type: 'policy_evaluation',
+    scope: 'this_instance',
+    algorithm_version: 'v1',
+    data_version: 'data-v1',
+    evaluated_at: '2026-10-03T08:00:00Z',
+    published_at: '2026-10-03T08:00:01Z',
+    next_evaluation_at: '2026-10-03T09:00:00Z',
+    next_evaluation_reason: 'interval',
+    trigger: 'manual',
+    config_revision: 4,
+    effects_enabled: true,
+    dimension_count: 0,
+    account_count: 0,
+    account_row_count: 0,
+    quality_route_count: 0,
+    truncated: false,
+    coverage: { status: 'empty', discovery_complete: true, discovered_dimension_count: 0, cached_dimension_count: 0, uncached_dimension_count: 0, wildcard_routes_present: false, reasons: [] }
+  })
   api.listSchedulerDecisions.mockResolvedValue({
     limit: 50,
     items: [{
@@ -552,8 +601,8 @@ describe('ModelIntegritySchedulingView integrity pass rate controls', () => {
 
     finish({ refreshed_at: '2026-10-03T08:00:00Z', next_refresh_at: '2026-10-03T09:00:00Z', route_count: 7 })
     await flushPromises()
-    expect(store.showSuccess).toHaveBeenCalledWith('已刷新 7 个测试对象的降智通过率。')
-    expect(wrapper.get('[data-testid="quality-refresh-routes"]').text()).toBe('本次刷新 7 个测试对象')
+    expect(store.showSuccess).toHaveBeenCalledWith('已按 7 条带有证据的路由重建排序。')
+    expect(wrapper.get('[data-testid="quality-refresh-routes"]').text()).toBe('本次刷新 7 条带有证据的路由')
     expect(wrapper.get('[data-testid="quality-refresh-status"]').text()).toContain('上次刷新')
     expect(wrapper.get('[data-testid="quality-refresh-status"]').text()).toContain('下次')
     expect(button.attributes('disabled')).toBeUndefined()
@@ -586,7 +635,10 @@ describe('ModelIntegritySchedulingView integrity pass rate controls', () => {
     // Stability first ignores the pass rate, so there is nothing to warn about.
     expect(wrapper.find('[data-testid="quality-effects-off"]').exists()).toBe(false)
     await wrapper.get('[data-testid="policy-avoid_degradation"]').setValue(true)
-    expect(wrapper.get('[data-testid="quality-effects-off"]').text()).toContain('评测影响已关闭')
+    // Selecting a real policy turns effects on visibly instead of leaving a
+    // policy saved but silently unused.
+    expect(wrapper.get('[data-testid="effects-auto-note"]').text()).toContain('已自动置为开启')
+    expect((wrapper.get('[data-testid="effects-toggle"]').element as HTMLButtonElement).getAttribute('aria-checked')).toBe('true')
   })
 
   it('keeps request errors and first-token latency apart from the pass rate in the ledger', async () => {

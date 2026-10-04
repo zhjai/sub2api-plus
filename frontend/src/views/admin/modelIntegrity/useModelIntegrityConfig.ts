@@ -1,9 +1,37 @@
 import { computed, reactive, ref } from 'vue'
-import { accountsAPI, type OpenAIEvalConfig, type OpenAIEvalModelCatalog } from '@/api/admin/accounts'
+import {
+  accountsAPI,
+  type OpenAIEvalConfig,
+  type OpenAIEvalEffectiveStatus,
+  type OpenAIEvalModelCatalog,
+  type OpenAIEvalQualityRefreshResult,
+  type OpenAIEvalRankingSnapshot,
+  type OpenAIEvalRankingSummary,
+  type RankingError
+} from '@/api/admin/accounts'
 import type { AccountListItem } from '@/types'
 import { DEFAULT_CUSTOM_BALANCE, DEFAULT_MAX_REQUEST_ATTEMPTS, DEFAULT_QUALITY_REFRESH_SECONDS, normalizeBPSAccount, normalizeCustomBalance, normalizeMaxRequestAttempts, normalizeQualityRefreshInterval, normalizeRoute, toSavePayload } from './modelIntegrity'
 
-export type SaveResult = 'saved' | 'conflict' | 'failed'
+/**
+ * 'saved_evaluation_failed' is a real, distinct outcome: the server accepted
+ * and stored the configuration but the synchronous evaluation that follows it
+ * failed, so the saved policy is not yet in force. The page must say both
+ * things rather than reporting a plain success.
+ */
+export type SaveResult = 'saved' | 'saved_evaluation_failed' | 'conflict' | 'failed'
+
+/**
+ * What the gateway is actually applying, kept separate from the editable
+ * configuration because none of it is ever saved back.
+ */
+export interface RankingState {
+  summary: OpenAIEvalRankingSummary | null
+  effectiveStatus: OpenAIEvalEffectiveStatus | null
+  error: RankingError | null
+  inProgress: boolean
+  /** Revision the published summary was built from. */
+  configRevision: number | null
+}
 
 function isConflict(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false
@@ -32,9 +60,46 @@ export function useModelIntegrityConfig() {
   const foldedLegacyStability = ref(false)
   /** The interval the server is using now; edits only apply after saving. */
   const savedQualityRefreshInterval = ref(DEFAULT_QUALITY_REFRESH_SECONDS)
+  /**
+   * What the gateway is applying now, straight from the server. This is never
+   * derived from unsaved edits: the published order belongs to a revision, and
+   * the page only ever shows the one the backend actually built.
+   */
+  const ranking = reactive<RankingState>({ summary: null, effectiveStatus: null, error: null, inProgress: false, configRevision: null })
 
   const serialized = () => JSON.stringify(toSavePayload(config))
   const dirty = computed(() => loaded.value && snapshot.value !== serialized())
+
+  /** Reads the read-only evaluation projection that accompanies a config response. */
+  function applyRanking(source: Partial<OpenAIEvalConfig>) {
+    ranking.summary = source.ranking ?? null
+    ranking.effectiveStatus = source.effective_status ?? null
+    ranking.error = source.ranking_error ?? null
+    ranking.inProgress = Boolean(source.evaluation_in_progress)
+    ranking.configRevision = ranking.summary?.config_revision ?? source.saved_revision ?? null
+  }
+
+  /**
+   * Records the snapshot returned by an explicit evaluation or a rankings
+   * read. It touches only the evaluation projection, so unsaved edits on the
+   * page survive an evaluation untouched.
+   */
+  function applyRankingSnapshot(snapshot: Partial<OpenAIEvalRankingSnapshot>) {
+    if (snapshot.summary !== undefined) ranking.summary = snapshot.summary
+    if (snapshot.ranking_error !== undefined) ranking.error = snapshot.ranking_error
+    if (snapshot.evaluation_in_progress !== undefined) ranking.inProgress = snapshot.evaluation_in_progress
+    if (snapshot.effective_status !== undefined) ranking.effectiveStatus = snapshot.effective_status
+    if (snapshot.current_config_revision !== undefined) ranking.configRevision = snapshot.current_config_revision
+  }
+
+  /** Applies a summary returned directly by the evaluate endpoint. */
+  function applyRankingSummary(summary: OpenAIEvalRankingSummary) {
+    ranking.summary = summary
+    ranking.error = null
+    ranking.inProgress = false
+    ranking.configRevision = summary.config_revision
+    if (ranking.effectiveStatus === null || ranking.effectiveStatus === 'error') ranking.effectiveStatus = summary.effects_enabled ? 'active' : 'inactive_effects_off'
+  }
 
   function apply(saved: OpenAIEvalConfig) {
     foldedLegacyStability.value = [saved.custom_balance, ...(saved.policies ?? []).map(rule => rule.custom_balance)]
@@ -56,6 +121,7 @@ export function useModelIntegrityConfig() {
     config.quality_next_refresh_at = saved.quality_next_refresh_at ?? null
     savedQualityRefreshInterval.value = config.quality_refresh_interval_seconds
     config.accounts = (saved.accounts ?? []).map(route => normalizeRoute({ ...route }))
+    applyRanking(saved)
     snapshot.value = serialized()
   }
 
@@ -95,15 +161,21 @@ export function useModelIntegrityConfig() {
     saving.value = true
     try {
       const saved = await accountsAPI.saveOpenAIEvalConfig(toSavePayload(config))
+      // The save endpoint runs the evaluation synchronously after storing, so
+      // a submitted-but-unbuilt policy arrives here as saved config plus a
+      // ranking error. Reporting that as a plain success would hide the fact
+      // that the new policy is not in force yet.
+      let authoritative = saved
       // Runtime-only fields (BPS state, OAuth eligibility) are not echoed by
       // every server version, so re-read them after a successful save.
       try {
-        apply(await accountsAPI.getOpenAIEvalConfig())
+        authoritative = await accountsAPI.getOpenAIEvalConfig()
       } catch {
-        apply(saved)
+        // Keep the PUT response; it already carries the evaluation outcome.
       }
+      apply(authoritative)
       conflict.value = false
-      return 'saved'
+      return isEvaluationError(authoritative) ? 'saved_evaluation_failed' : 'saved'
     } catch (error) {
       if (isConflict(error)) {
         conflict.value = true
@@ -113,6 +185,11 @@ export function useModelIntegrityConfig() {
     } finally {
       saving.value = false
     }
+  }
+
+  /** True when the configuration was stored but its evaluation did not complete. */
+  function isEvaluationError(source: Partial<OpenAIEvalConfig>): boolean {
+    return Boolean(source.ranking_error) || source.effective_status === 'error'
   }
 
   function accountLabel(accountID: number) {
@@ -129,10 +206,12 @@ export function useModelIntegrityConfig() {
    * Records a manual ranking refresh. Only the read-only timestamps change;
    * they are not part of the save payload, so unsaved edits stay unsaved.
    */
-  function applyQualityRefresh(result: { refreshed_at: string; next_refresh_at?: string | null }) {
-    config.quality_refreshed_at = result.refreshed_at
+  function applyQualityRefresh(result: OpenAIEvalQualityRefreshResult) {
+    if (result.refreshed_at) config.quality_refreshed_at = result.refreshed_at
     if (result.next_refresh_at !== undefined) config.quality_next_refresh_at = result.next_refresh_at
+    if (result.effective_status !== undefined || result.ranking !== undefined) applyRanking(result)
+    else applyRankingSnapshot({ ranking_error: result.ranking_error ?? null })
   }
 
-  return { config, catalog, accounts, loading, loaded, saving, conflict, loadError, dirty, load, reloadConfig, save, accountName, accountLabel, savedQualityRefreshInterval, applyQualityRefresh, foldedLegacyStability }
+  return { config, catalog, accounts, loading, loaded, saving, conflict, loadError, dirty, ranking, load, reloadConfig, save, accountName, accountLabel, savedQualityRefreshInterval, applyQualityRefresh, applyRankingSnapshot, applyRankingSummary, foldedLegacyStability }
 }

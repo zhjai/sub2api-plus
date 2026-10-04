@@ -42,6 +42,27 @@ export interface SchedulerDecisionTrace {
   requested_model?: string
   requested_reasoning_effort?: string
   scheduling_policy?: OpenAIEvalSchedulingPolicy
+  /**
+   * 'actual_dispatch' marks a real request-selection attempt. Offline
+   * evaluation never writes one of these, so this ledger only ever shows
+   * dispatch traffic that actually happened.
+   */
+  record_type?: 'actual_dispatch' | string
+  scope?: string
+  group_id?: number | null
+  /** The published evaluation generation this dispatch resolved against, if any. */
+  evaluation_id?: string | null
+  config_revision?: number
+  /**
+   * How the order was obtained: the published snapshot, a same-policy live
+   * fallback for an uncovered route, the historical scheduler, or an owner
+   * override that bypasses the order entirely.
+   */
+  ranking_basis?: 'snapshot' | 'live_fallback' | 'legacy' | 'owner' | string
+  ranking_fallback_reason?: string | null
+  selected_rank?: number | null
+  selection_model?: string
+  snapshot_evaluated_at?: string | null
   sticky_previous_hit: boolean
   sticky_session_hit: boolean
   candidate_count: number
@@ -75,6 +96,13 @@ export interface SchedulerDecisionCandidate {
   error_rate?: number
   ttft_ms?: number
   evaluation_penalty?: number
+  /** Published-order position; null when the account cannot serve the model. */
+  rank?: number | null
+  /** 0-100 weighted total computed by the server; never derived in the browser. */
+  priority_score?: number | null
+  /** Per-factor normalized scores and contributions behind priority_score. */
+  factors?: OpenAIEvalRankingFactors
+  contributions?: OpenAIEvalRankingWeights
   /**
    * Selected automatic test types (Candy / Fingerprint / ModelTrace) with a
    * fresh final verdict. Each type counts once, whatever its sample count.
@@ -173,6 +201,17 @@ export interface OpenAIEvalConfig {
   quality_refreshed_at?: string | null
   quality_next_refresh_at?: string | null
   accounts: OpenAIEvalRouteConfig[]
+  // -- Read-only scheduling evaluation projections (rc3) ---------------------
+  // Never sent back on save; the server derives them from the published build.
+  /** The ranking in force for the saved revision, if one has been built. */
+  ranking?: OpenAIEvalRankingSummary | null
+  /** Set when the last build for this revision failed; the page states it plainly. */
+  ranking_error?: RankingError | null
+  /** What the gateway is actually applying right now. */
+  effective_status?: OpenAIEvalEffectiveStatus
+  evaluation_in_progress?: boolean
+  /** Revision the server stored on the last accepted save. */
+  saved_revision?: number
 }
 
 /** Runtime route of one BPS account as reported by the server. */
@@ -328,6 +367,208 @@ export interface OpenAIEvalModelCatalog {
   modeltrace: { requests: number; bank_revision: string; candidate_count: number; scheduling: string }
 }
 
+// ---------------------------------------------------------------------------
+// Scheduling evaluation rankings
+//
+// The server publishes an immutable, per-instance ordering snapshot built with
+// the same pure scorer the gateway uses for a real request. Every number below
+// is computed server-side; the page renders it and never recalculates a score
+// or a rank in the browser.
+// ---------------------------------------------------------------------------
+
+/** Relative weight of each factor. The five values sum to 1. */
+export interface OpenAIEvalRankingWeights {
+  price: number
+  error_rate: number
+  ttft: number
+  load: number
+  quality: number
+}
+
+/**
+ * One normalized factor. `known` is false while the raw evidence is missing or
+ * unusable; `score` is then the neutral 0.5 and the page shows "unknown",
+ * never a real reading. A genuine tie also normalizes to 0.5 with known=true.
+ */
+export interface FactorMeta {
+  score: number
+  known: boolean
+  observed_at: string | null
+  unknown_reason: string | null
+}
+
+export interface OpenAIEvalRankingFactors {
+  price: FactorMeta & { rate_multiplier: number | null; source: string | null }
+  error_rate: FactorMeta & { value: number | null; sample_count: number }
+  ttft: FactorMeta & { ms: number | null; sample_count: number }
+  load: FactorMeta & { load_rate: number | null; waiting: number | null; current_concurrency: number | null }
+  quality: FactorMeta & {
+    /** 'unknown'/'insufficient'/'stale' all mean "not assessable", not "healthy". */
+    state: 'assessed' | 'unknown' | 'insufficient' | 'stale'
+    pass: number
+    suspected_pass: number
+    /** Test types selected for this route. */
+    selected: number
+    /** Selected test types that had valid evidence. */
+    evaluated: number
+    /** present only when selected > 0 and evaluated equals selected. */
+    ratio: number | null
+    expires_at: string | null
+  }
+}
+
+/** Where a candidate route came from while the order was built. */
+export type OpenAIEvalRankingSource =
+  | 'catalog' | 'account_mapping' | 'channel_mapping' | 'group_route'
+  | 'policy_rule' | 'eval_route' | 'observed_route'
+
+export interface OpenAIEvalRankingExclusion {
+  code: string
+  scope: 'account' | 'route' | 'live' | string
+  observed_at: string
+}
+
+export interface OpenAIEvalRankedAccount {
+  account_id: number
+  account_name: string
+  /** Position in the full candidate order; null when the account cannot serve the model. */
+  rank: number | null
+  /** 0-100 weighted total. */
+  priority_score: number | null
+  quality_tier: number | null
+  /** Availability at evaluation time only; an ineligible account keeps its row. */
+  eligible: boolean
+  exclusion_reason: string | null
+  exclusion_reasons?: OpenAIEvalRankingExclusion[]
+  upstream_models: string[]
+  factors: OpenAIEvalRankingFactors
+  contributions: OpenAIEvalRankingWeights
+}
+
+/** One concrete endpoint/model pair a dimension can be served by. */
+export interface OpenAIEvalSelectionModelVariant {
+  endpoint: string
+  platform: string
+  selection_model: string
+}
+
+export interface OpenAIEvalRankingDimension {
+  dimension_id: string
+  group_id: number | null
+  group_name: string
+  requested_model: string
+  /** The raw requested effort; '' means unspecified, not normalized. */
+  reasoning_effort: string
+  selection_model: string | null
+  selection_model_variants?: OpenAIEvalSelectionModelVariant[]
+  policy: OpenAIEvalSchedulingPolicy
+  weights: OpenAIEvalRankingWeights
+  ordering: 'score_desc' | 'quality_then_score' | 'legacy'
+  sources: OpenAIEvalRankingSource[]
+  candidate_count: number | null
+  eligible_count: number | null
+  preferred_account_id: number | null
+  /** 'live_fallback' means this order was computed on demand, not published. */
+  coverage_status: 'complete' | 'live_fallback' | 'no_candidates' | 'legacy'
+  fallback_reason: string | null
+  valid_until: string | null
+  /** Present only for a fully filtered request; the list omits accounts otherwise. */
+  accounts?: OpenAIEvalRankedAccount[]
+  accounts_truncated: boolean
+  accounts_next_cursor: string | null
+}
+
+export interface OpenAIEvalRankingCoverage {
+  status: 'complete' | 'partial' | 'empty'
+  discovery_complete: boolean
+  /** null when the catalog could not be counted. */
+  discovered_dimension_count: number | null
+  cached_dimension_count: number
+  uncached_dimension_count: number | null
+  wildcard_routes_present: boolean
+  reasons: string[]
+}
+
+export type OpenAIEvalRankingTrigger = 'startup' | 'policy_saved' | 'manual' | 'interval' | 'catalog_change' | 'evidence_expiry'
+
+export interface OpenAIEvalRankingSummary {
+  evaluation_id: string
+  /** Policy evaluations and actual dispatches are separate record types. */
+  record_type: 'policy_evaluation'
+  scope: string
+  algorithm_version: string
+  data_version: string
+  /** Closes the input sampling window; published_at records when the build finished. */
+  evaluated_at: string
+  published_at: string
+  next_evaluation_at: string
+  next_evaluation_reason: 'interval' | 'evidence_expiry'
+  trigger: OpenAIEvalRankingTrigger
+  config_revision: number
+  effects_enabled: boolean
+  dimension_count: number
+  account_count: number
+  account_row_count: number
+  quality_route_count: number
+  /** True when the server omitted coverage, not a paging indicator. */
+  truncated: boolean
+  coverage: OpenAIEvalRankingCoverage
+}
+
+export interface OpenAIEvalRankingGroup {
+  group_id: number | null
+  group_name: string
+  member_count: number
+  status: 'evaluated' | 'no_accounts' | 'no_models' | 'out_of_scope' | 'live_fallback'
+  reason: string | null
+}
+
+/**
+ * What is actually in force right now. 'inactive_effects_off' is a valid saved
+ * state, not a failure: the policy is stored but the gateway keeps the legacy
+ * order until evaluation effects are switched on.
+ */
+export type OpenAIEvalEffectiveStatus =
+  | 'active'
+  | 'active_partial'
+  | 'inactive_effects_off'
+  | 'inactive_legacy_policy'
+  | 'live_fallback'
+  | 'no_targets'
+  | 'error'
+
+export interface RankingError {
+  code: string
+  message: string
+  config_revision: number
+  evaluation_id: string | null
+}
+
+export interface OpenAIEvalRankingSnapshot {
+  summary: OpenAIEvalRankingSummary | null
+  effective_status: OpenAIEvalEffectiveStatus
+  current_config_revision: number
+  evaluation_in_progress: boolean
+  ranking_error: RankingError | null
+  groups: OpenAIEvalRankingGroup[]
+  /** Dimension summaries. `accounts` is present only for a fully filtered read. */
+  dimensions: OpenAIEvalRankingDimension[]
+  next_cursor: string | null
+}
+
+export interface OpenAIEvalRankingQuery {
+  /** 0 means the no-group scope; omit the field to skip filtering. */
+  group_id?: number
+  requested_model?: string
+  /** An empty string explicitly means "effort not specified". */
+  reasoning_effort?: string
+  evaluation_id?: string
+  /** Bound to an evaluation_id and filter set; a reclaimed generation returns 409. */
+  cursor?: string
+  /** Default 100, maximum 500. */
+  limit?: number
+}
+
 export async function getOpenAIEvalModels(): Promise<OpenAIEvalModelCatalog> {
   const { data } = await apiClient.get<OpenAIEvalModelCatalog>('/admin/accounts/evaluations/models')
   return data
@@ -371,9 +612,21 @@ export async function listOpenAIEvalRuns(params?: {
 }
 
 export interface OpenAIEvalQualityRefreshResult {
-  refreshed_at: string
+  refreshed_at: string | null
   next_refresh_at?: string | null
+  /**
+   * Entries actually published to the enabled quality cache. Stays 0 while
+   * evaluation effects are off. Superseded by quality_route_count below.
+   */
   route_count: number
+  /** Route count this build computed, whether or not it could be published. */
+  quality_route_count?: number
+  /** The same evaluation summary the evaluate endpoint returns. */
+  saved_revision?: number
+  ranking_error?: RankingError | null
+  effective_status?: OpenAIEvalEffectiveStatus
+  evaluation_in_progress?: boolean
+  ranking?: OpenAIEvalRankingSummary | null
 }
 
 /**
@@ -382,6 +635,51 @@ export interface OpenAIEvalQualityRefreshResult {
  */
 export async function refreshOpenAIEvalQuality(): Promise<OpenAIEvalQualityRefreshResult> {
   const { data } = await apiClient.post<OpenAIEvalQualityRefreshResult>('/admin/accounts/evaluations/quality/refresh', {})
+  return data
+}
+
+/**
+ * Runs the full scheduling evaluation now with the saved configuration and
+ * returns the published summary.
+ *
+ * The server reads the saved config itself: this endpoint takes no body and
+ * never applies unsaved page edits. It sends no upstream requests, so a slow
+ * budget means work, not provider traffic. A longer timeout than the default
+ * is allowed because the server budgets 20 seconds plus publication.
+ */
+export async function evaluateOpenAIEvalRanking(): Promise<OpenAIEvalRankingSummary> {
+  const { data } = await apiClient.post<OpenAIEvalRankingSummary>(
+    '/admin/accounts/evaluations/scheduling/evaluate',
+    {},
+    { timeout: 60 * 1000 }
+  )
+  return data
+}
+
+/**
+ * Reads the published ranking snapshot. Without a full group + model + effort
+ * filter the server returns dimension summaries only and omits every account
+ * list, so a filtered read is what fetches the ranked rows.
+ */
+export async function getOpenAIEvalRankings(query: OpenAIEvalRankingQuery = {}): Promise<OpenAIEvalRankingSnapshot> {
+  const { data } = await apiClient.get<OpenAIEvalRankingSnapshot>('/admin/accounts/evaluations/scheduling/rankings', {
+    params: query
+  })
+  return data
+}
+
+/**
+ * Reads one server-paginated page of a single dimension's ranked accounts.
+ * The cursor is bound to the evaluation generation and filters; a reclaimed
+ * generation answers 409 RANKING_SNAPSHOT_CHANGED and must be re-read, never
+ * spliced onto the previous page.
+ */
+export async function getOpenAIEvalRankingAccounts(
+  query: OpenAIEvalRankingQuery & { group_id: number; requested_model: string; reasoning_effort: string }
+): Promise<OpenAIEvalRankingSnapshot> {
+  const { data } = await apiClient.get<OpenAIEvalRankingSnapshot>('/admin/accounts/evaluations/scheduling/rankings', {
+    params: query
+  })
   return data
 }
 
@@ -1575,6 +1873,9 @@ export const accountsAPI = {
   ,runOpenAIEval
   ,listOpenAIEvalRuns
   ,refreshOpenAIEvalQuality
+  ,evaluateOpenAIEvalRanking
+  ,getOpenAIEvalRankings
+  ,getOpenAIEvalRankingAccounts
   ,listOpenAIEvalAudit
   ,resetOpenAIBPSState
 }

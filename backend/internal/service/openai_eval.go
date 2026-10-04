@@ -731,9 +731,17 @@ var openAIEvalCandyShapeQuantity = regexp.MustCompile(`^\s*(?:\*\*)?\s*(?:颗|�
 
 var openAIEvalCandyNegativeTail = regexp.MustCompile(`(?i)^(?:(?:仍然|依然|还是|仍|也|并|是|根本|还)\s*)*(?:不够|不对|不是|不成立|不足|不正确|无法(?:保证|确保)|不能(?:保证|确保)|可能失败|时(?:仍)?可能失败|is not|isn't)`)
 
+var openAIEvalCandyNumericToken = regexp.MustCompile(`(?:[0-9０-９]+(?:[.．][0-9０-９]+)?|[.．][0-9０-９]+)(?:[eE][+-]?[0-9０-９]+)?`)
+
 func leadingOpenAIEvalCandyAnswer(answer string) (int, bool) {
-	// Compare scalar conclusions together; shape-specific quantities are
-	// reasoning, not competing answers. Never accept a conflicting 21.
+	// Candy uses the configured presence rule, not a proof or conclusion check.
+	// Tokenize numbers so 121 and 21.5 cannot pass as the integer 21.
+	for _, token := range openAIEvalCandyNumericToken.FindAllString(answer, -1) {
+		if value, ok := parseEvalNumber(token); ok && value == OpenAIEvalCandyExpectedAnswer {
+			return value, true
+		}
+	}
+	// Keep extracting an explicit wrong answer when the expected number is absent.
 	var explicit int
 	found := false
 	for _, pattern := range []*regexp.Regexp{openAIEvalCandyFinalAnswer, openAIEvalCandyMinimumAnswer} {

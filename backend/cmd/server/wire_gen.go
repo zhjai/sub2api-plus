@@ -288,7 +288,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	auditLogHandler := admin.NewAuditLogHandler(auditLogService, totpService)
 	upstreamBillingProbeService := service.ProvideUpstreamBillingProbeService(accountRepository, accountTestService, settingService, leaderLockCache, db)
 	openAIEvalRepository := repository.NewOpenAIEvalRepository(db)
-	openAIEvalService := service.ProvideOpenAIEvalService(openAIEvalRepository, accountRepository, accountTestService, pricingService)
+	openAIEvalService := service.ProvideOpenAIEvalService(openAIEvalRepository, accountRepository, accountTestService, pricingService, groupRepository, channelRepository, compositeModelRouteRepository, openAIGatewayService, channelMonitorService)
 	openCodeGoUsageService := service.ProvideOpenCodeGoUsageService(accountRepository, httpUpstream, settingService, leaderLockCache, db)
 	idempotencyCoordinator := service.ProvideIdempotencyCoordinator(idempotencyRepository, configConfig)
 	claudeResetCreditService := service.ProvideClaudeResetCreditService(accountRepository, claudeTokenProvider, proxyRepository, settingService, idempotencyCoordinator, leaderLockCache)

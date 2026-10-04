@@ -16,6 +16,62 @@
       </div>
 
       <template v-else>
+        <!-- Evaluation activation: explicit, and visibly tied to the selection
+             the administrator actually made on this page. -->
+        <section class="sched-section effects" aria-labelledby="effects-title" data-testid="effects-panel">
+          <div class="effects-head">
+            <div class="sched-section-head">
+              <h2 id="effects-title" class="sched-h2">{{ t('admin.modelIntegrity.scheduling.evaluation.effects.title') }}</h2>
+              <p class="sched-hint">{{ t('admin.modelIntegrity.scheduling.evaluation.effects.hint') }}</p>
+            </div>
+            <div class="effects-controls">
+              <label class="effects-switch">
+                <Toggle v-model="config.effects_enabled" data-testid="effects-toggle" @update:model-value="markExplicitEffects" />
+                <span class="effects-switch-label">{{ t('admin.modelIntegrity.scheduling.evaluation.effects.toggle') }}</span>
+              </label>
+            </div>
+          </div>
+          <p class="effects-state" :class="`effects-state-${effectiveTone}`" data-testid="effects-state">
+            <span class="effects-state-pill">{{ t(`admin.modelIntegrity.scheduling.evaluation.effective.${effectiveKey}`) }}</span>
+            <span v-if="!config.effects_enabled" class="effects-state-body">{{ t('admin.modelIntegrity.scheduling.evaluation.effects.explicitOff') }}</span>
+          </p>
+          <p v-if="activationNote" class="effects-note" role="status" data-testid="effects-auto-note">{{ activationNote }}</p>
+        </section>
+
+        <!-- Manual evaluation. The exact button label is every locale's
+             requirement; it always runs with the saved policy. -->
+        <section class="sched-section evaluate" aria-labelledby="evaluate-title" data-testid="evaluation-panel">
+          <div class="evaluate-head">
+            <div class="sched-section-head">
+              <h2 id="evaluate-title" class="sched-h2">{{ t('admin.modelIntegrity.scheduling.evaluation.title') }}</h2>
+              <p class="sched-hint">{{ t('admin.modelIntegrity.scheduling.evaluation.hint') }}</p>
+            </div>
+            <button
+              type="button"
+              class="btn btn-primary btn-sm shrink-0"
+              :disabled="evaluating || saving || conflict"
+              :aria-busy="evaluating ? 'true' : undefined"
+              data-testid="evaluate-now"
+              @click="runEvaluation"
+            >
+              <Icon name="bolt" size="sm" :class="evaluating ? 'motion-safe:animate-pulse' : ''" />
+              {{ evaluating ? t('admin.modelIntegrity.scheduling.evaluation.running') : t('admin.modelIntegrity.scheduling.evaluation.run') }}
+            </button>
+          </div>
+          <p class="sched-note">{{ t('admin.modelIntegrity.scheduling.evaluation.runHint') }}</p>
+          <p v-if="evaluating" class="evaluate-progress" role="status" data-testid="evaluate-progress" aria-live="polite">
+            <Icon name="refresh" size="sm" class="motion-safe:animate-spin" />{{ t('admin.modelIntegrity.scheduling.evaluation.runningHint') }}
+          </p>
+          <p v-if="dirty" class="evaluate-note" data-testid="evaluate-dirty">{{ t('admin.modelIntegrity.scheduling.evaluation.dirtyNote') }}</p>
+          <p v-if="conflict" class="evaluate-note" data-testid="evaluate-blocked">{{ t('admin.modelIntegrity.scheduling.evaluation.blocked') }}</p>
+          <p v-if="evaluationMessage" class="evaluate-message" :class="evaluationError ? 'evaluate-message-error' : 'evaluate-message-ok'" :role="evaluationError ? 'alert' : 'status'" data-testid="evaluate-message">{{ evaluationMessage }}</p>
+          <p v-if="evaluationError" class="sched-note" data-testid="evaluate-kept">{{ t('admin.modelIntegrity.scheduling.evaluation.failedKept') }}</p>
+          <p v-if="confirmationMessage" class="evaluate-message evaluate-message-error" role="status" data-testid="save-evaluation-error">
+            {{ confirmationMessage }}
+            <span class="block">{{ t('admin.modelIntegrity.scheduling.evaluation.savedButFailedHint') }}</span>
+          </p>
+        </section>
+
         <div class="sched-top">
           <section class="sched-section" aria-labelledby="policy-title">
             <div class="sched-section-head">
@@ -23,7 +79,7 @@
               <p class="sched-hint">{{ t('admin.modelIntegrity.scheduling.policy.hint') }}</p>
             </div>
             <PolicyMixer
-              v-model="defaultPolicy"
+              v-model="policyChoice"
               name="default-policy"
               :label="t('admin.modelIntegrity.scheduling.policy.defaultLabel')"
             />
@@ -87,6 +143,10 @@
                 <span v-else>{{ t('admin.modelIntegrity.scheduling.quality.neverRefreshed') }}</span>
                 <span v-if="config.quality_next_refresh_at">{{ t('admin.modelIntegrity.scheduling.quality.nextRefresh', { time: formatDateTime(config.quality_next_refresh_at) }) }}</span>
                 <span v-if="lastRefreshRoutes !== null" data-testid="quality-refresh-routes">{{ t('admin.modelIntegrity.scheduling.quality.routes', { count: lastRefreshRoutes }) }}</span>
+                <span v-if="lastPublishedRoutes !== null" data-testid="quality-refresh-published">{{ t('admin.modelIntegrity.scheduling.quality.publishedRoutes', { count: lastPublishedRoutes }) }}</span>
+              </p>
+              <p v-if="lastPublishedRoutes === 0 && lastRefreshRoutes" class="sched-note" data-testid="quality-refresh-effects-off">
+                {{ t('admin.modelIntegrity.scheduling.quality.effectsOffRoutes', { count: lastRefreshRoutes }) }}
               </p>
               <p v-if="intervalPending" class="refresh-pending" data-testid="quality-interval-pending">{{ t('admin.modelIntegrity.scheduling.quality.pending', { interval: intervalText(savedQualityRefreshInterval) }) }}</p>
               <p v-if="refreshError" class="refresh-error" role="alert" data-testid="quality-refresh-error">{{ refreshError }}</p>
@@ -249,6 +309,28 @@
           <p v-if="legacyRouteCount" class="sched-note">{{ t('admin.modelIntegrity.scheduling.bps.legacyRoutes', { count: legacyRouteCount }) }}</p>
         </section>
 
+        <section class="sched-section sched-section-overflow" aria-labelledby="ranking-title">
+          <div class="sched-section-head">
+            <h2 id="ranking-title" class="sched-h2">{{ t('admin.modelIntegrity.scheduling.rank.title') }}</h2>
+            <p class="sched-hint">{{ t('admin.modelIntegrity.scheduling.rank.hint') }}</p>
+          </div>
+          <RankingBoard
+            :snapshot="rankingSnapshot"
+            :effective-status="ranking.effectiveStatus"
+            :summary-revision="ranking.summary?.config_revision ?? null"
+            :current-revision="config.revision ?? null"
+            :groups="groups"
+            :catalog-models="catalogModels"
+            :efforts="efforts"
+            :account-label="accountLabel"
+            @snapshot="onRankingSnapshot"
+          />
+          <p v-if="ranking.effectiveStatus === 'inactive_effects_off'" class="sched-warn" role="note" data-testid="ranking-effects-off">
+            <strong>{{ t('admin.modelIntegrity.scheduling.evaluation.effectsOffTitle') }}</strong>
+            {{ t('admin.modelIntegrity.scheduling.evaluation.effectsOffBody') }}
+          </p>
+        </section>
+
         <section class="sched-section" aria-labelledby="decisions-title">
           <div class="decisions-head">
             <div class="sched-section-head">
@@ -310,12 +392,15 @@ import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import ModelIntegrityShell from '@/components/admin/modelIntegrity/ModelIntegrityShell.vue'
 import PolicyMixer from '@/components/admin/modelIntegrity/PolicyMixer.vue'
 import DecisionLedger from '@/components/admin/modelIntegrity/DecisionLedger.vue'
+import RankingBoard from '@/components/admin/modelIntegrity/RankingBoard.vue'
 import BpsAccountDialog from '@/components/admin/modelIntegrity/BpsAccountDialog.vue'
 import PolicyWeightsEditor from '@/components/admin/modelIntegrity/PolicyWeightsEditor.vue'
-import { accountsAPI, listSchedulerDecisions, type OpenAIEvalBPSAccountConfig, type OpenAIEvalSchedulingPolicy, type OpenAIEvalSchedulingPolicyRule, type SchedulerDecisionTrace } from '@/api/admin/accounts'
+import { accountsAPI, listSchedulerDecisions, type OpenAIEvalBPSAccountConfig, type OpenAIEvalRankingSnapshot, type OpenAIEvalSchedulingPolicy, type OpenAIEvalSchedulingPolicyRule, type SchedulerDecisionTrace } from '@/api/admin/accounts'
+import groupsAPI from '@/api/admin/groups'
+import type { AdminGroup } from '@/types'
 import { useAppStore } from '@/stores/app'
 import { extractApiErrorMessage } from '@/utils/apiError'
-import { CUSTOM_FACTORS, CUSTOM_INTERVAL, DAY, HOUR, MAX_INTERVAL_MINUTES, QUALITY_REFRESH_INTERVALS, bpsAccountLane, bpsDisabledKey, bpsModeOf, canResetBPSAccount, customBalanceShares, isDirectOAuthRoute, isValidCustomBalance, normalizeBPSAccount, normalizeCustomBalance, normalizeQualityRefreshInterval, type BPSLane } from './modelIntegrity'
+import { CUSTOM_FACTORS, CUSTOM_INTERVAL, DAY, EFFECTIVE_KEYS, HOUR, MAX_INTERVAL_MINUTES, QUALITY_REFRESH_INTERVALS, bpsAccountLane, bpsDisabledKey, bpsModeOf, canResetBPSAccount, customBalanceShares, effectiveTone as effectiveToneOf, isDirectOAuthRoute, isValidCustomBalance, normalizeBPSAccount, normalizeCustomBalance, normalizeQualityRefreshInterval, type BPSLane } from './modelIntegrity'
 import { useModelIntegrityConfig } from './useModelIntegrityConfig'
 
 const TRACE_LIMIT = 50
@@ -324,10 +409,22 @@ const GATES = ['session', 'model', 'status', 'features', 'privacy', 'capacity'] 
 
 const { t } = useI18n()
 const appStore = useAppStore()
-const { config, catalog, accounts, loading, loaded, saving, conflict, dirty, load, reloadConfig, save, accountName, accountLabel, savedQualityRefreshInterval, applyQualityRefresh, foldedLegacyStability } = useModelIntegrityConfig()
+const { config, catalog, accounts, loading, loaded, saving, conflict, dirty, ranking, load, reloadConfig, save, accountName, accountLabel, savedQualityRefreshInterval, applyQualityRefresh, applyRankingSnapshot, applyRankingSummary, foldedLegacyStability } = useModelIntegrityConfig()
 
 const traces = ref<SchedulerDecisionTrace[]>([])
 const tracesLoading = ref(false)
+// -- Evaluation and ranking ------------------------------------------------
+const groups = ref<AdminGroup[]>([])
+const evaluating = ref(false)
+const evaluationMessage = ref('')
+const evaluationError = ref(false)
+/** Set when a save was stored but its evaluation failed; shown until the next action. */
+const confirmationMessage = ref('')
+/**
+ * A snapshot fetched by the ranking board. The composable's own projection is
+ * the fallback so a page that was never filtered still shows a status.
+ */
+const fetchedSnapshot = ref<OpenAIEvalRankingSnapshot | null>(null)
 const pendingReset = ref<OpenAIEvalBPSAccountConfig | null>(null)
 const pendingRemove = ref<OpenAIEvalBPSAccountConfig | null>(null)
 const resetting = ref(0)
@@ -338,6 +435,116 @@ const defaultPolicy = computed<OpenAIEvalSchedulingPolicy>({
   get: () => config.scheduling_policy ?? '',
   set: value => { config.scheduling_policy = value }
 })
+/** Weight selection is the event that may visibly turn effects on. */
+const policyChoice = computed<OpenAIEvalSchedulingPolicy>({
+  get: () => config.scheduling_policy ?? '',
+  set: value => {
+    const previous = config.scheduling_policy ?? ''
+    config.scheduling_policy = value
+    applyPolicyChoice(previous, value)
+  }
+})
+/** True when the administrator turned the switch themselves; suppressing the
+ *  automatic enable note in that case avoids claiming credit for their action. */
+const explicitEffectsChange = ref(false)
+const activationNote = ref('')
+
+/** Every status the server can report, with an unknown value falling back safely. */
+const effectiveKey = computed(() => (ranking.effectiveStatus && EFFECTIVE_KEYS.includes(ranking.effectiveStatus as never) ? ranking.effectiveStatus : 'inactive_legacy_policy'))
+const effectiveTone = computed(() => effectiveToneOf(ranking.effectiveStatus))
+
+function markExplicitEffects() {
+  explicitEffectsChange.value = true
+  activationNote.value = ''
+}
+
+/**
+ * Selecting a real policy is the only event that may visibly switch effects on.
+ * Loading configuration never does, and an explicit off stays off. The note
+ * names what happened so the switch never moves without explanation.
+ */
+function applyPolicyChoice(previous: OpenAIEvalSchedulingPolicy, next: OpenAIEvalSchedulingPolicy) {
+  if (next === previous) return
+  if (next !== '' && !config.effects_enabled) {
+    config.effects_enabled = true
+    activationNote.value = t('admin.modelIntegrity.scheduling.evaluation.effects.selectionEnabled')
+    return
+  }
+  activationNote.value = next === '' && config.effects_enabled && explicitEffectsChange.value
+    ? t('admin.modelIntegrity.scheduling.evaluation.effects.selectionEnabledOff')
+    : ''
+}
+
+const catalogModels = computed(() => (catalog.value?.items ?? []).map(model => model.id))
+/**
+ * The snapshot shown by the board. A fetched snapshot is authoritative; before
+ * one exists the composable's config projection supplies the same fields, so
+ * the status is never blank.
+ */
+const rankingSnapshot = computed<OpenAIEvalRankingSnapshot | null>(() => {
+  if (fetchedSnapshot.value) return fetchedSnapshot.value
+  if (!ranking.summary && !ranking.error && !ranking.effectiveStatus) return null
+  return {
+    summary: ranking.summary,
+    effective_status: (ranking.effectiveStatus ?? 'inactive_effects_off') as OpenAIEvalRankingSnapshot['effective_status'],
+    current_config_revision: config.revision ?? 0,
+    evaluation_in_progress: ranking.inProgress,
+    ranking_error: ranking.error,
+    groups: [],
+    dimensions: [],
+    next_cursor: null
+  }
+})
+
+/** Keeps the board's own snapshot and the shared projection in step. */
+function onRankingSnapshot(snapshot: OpenAIEvalRankingSnapshot) {
+  fetchedSnapshot.value = snapshot
+  applyRankingSnapshot(snapshot)
+}
+
+/**
+ * Runs the full evaluation with the saved configuration. It sends no body, so
+ * unsaved edits are neither sent nor affected; only the evaluation projection
+ * and the read-only timestamps are refreshed.
+ */
+async function runEvaluation() {
+  if (evaluating.value || saving.value || conflict.value) return
+  evaluating.value = true
+  evaluationMessage.value = ''
+  evaluationError.value = false
+  try {
+    const summary = await accountsAPI.evaluateOpenAIEvalRanking()
+    applyRankingSummary(summary)
+    // Re-read the snapshot so the status and coverage reflect what was published.
+    await refreshRanking()
+    evaluationMessage.value = summary.coverage.status === 'complete'
+      ? t('admin.modelIntegrity.scheduling.evaluation.done', { time: formatDateTime(summary.evaluated_at) })
+      : t('admin.modelIntegrity.scheduling.evaluation.donePartial', { time: formatDateTime(summary.evaluated_at) })
+  } catch (error) {
+    evaluationError.value = true
+    evaluationMessage.value = evaluationFailureText(error)
+  } finally {
+    evaluating.value = false
+  }
+}
+
+/** Distinguishes a superseded run, an unavailable service and a timeout from a plain failure. */
+function evaluationFailureText(error: unknown) {
+  const status = (error as { status?: number; response?: { status?: number } })?.response?.status ?? (error as { status?: number })?.status
+  if (status === 409) return t('admin.modelIntegrity.scheduling.evaluation.superseded')
+  if (status === 503) return t('admin.modelIntegrity.scheduling.evaluation.unavailable')
+  if (status === 504) return t('admin.modelIntegrity.scheduling.evaluation.timedOut')
+  return t('admin.modelIntegrity.scheduling.evaluation.failed', { reason: extractApiErrorMessage(error, t('admin.modelIntegrity.common.loadFailed')) })
+}
+
+/** Re-reads the ranking snapshot without touching unsaved configuration. */
+async function refreshRanking() {
+  try {
+    applyRankingSnapshot(await accountsAPI.getOpenAIEvalRankings({ limit: 200 }))
+  } catch {
+    // The board owns its own error surface; the status stays as last known.
+  }
+}
 // useModelIntegrityConfig always initialises policies to an array.
 const rules = computed(() => config.policies as OpenAIEvalSchedulingPolicyRule[])
 const efforts = computed(() => catalog.value?.reasoning_efforts?.length ? catalog.value.reasoning_efforts : [''])
@@ -351,6 +558,8 @@ const usesQuality = computed(() => usesAvoidDegradation.value ||
 const refreshing = ref(false)
 const refreshError = ref('')
 const lastRefreshRoutes = ref<number | null>(null)
+/** Routes actually written to the enabled ranking cache; 0 while effects are off. */
+const lastPublishedRoutes = ref<number | null>(null)
 const refreshCustom = ref(false)
 const qualityInterval = computed(() => normalizeQualityRefreshInterval(config.quality_refresh_interval_seconds))
 const refreshChoice = computed<number | string>({
@@ -388,8 +597,14 @@ async function refreshQuality() {
   try {
     const result = await accountsAPI.refreshOpenAIEvalQuality()
     applyQualityRefresh(result)
-    lastRefreshRoutes.value = Number(result.route_count) || 0
+    // quality_route_count counts the routes this build computed;
+    // route_count counts what was actually published, which stays 0 while
+    // evaluation effects are off. Both matter, so both are reported.
+    const computed = result.quality_route_count ?? result.route_count
+    lastRefreshRoutes.value = Number(computed) || 0
+    lastPublishedRoutes.value = Number(result.route_count) || 0
     appStore.showSuccess(t('admin.modelIntegrity.scheduling.quality.refreshDone', { count: lastRefreshRoutes.value }))
+    await refreshRanking()
     void loadTraces()
   } catch (error) {
     refreshError.value = extractApiErrorMessage(error, t('admin.modelIntegrity.scheduling.quality.refreshFailed'))
@@ -561,7 +776,21 @@ async function handleSave() {
   }
   try {
     const result = await save()
-    if (result === 'saved') appStore.showSuccess(t('admin.modelIntegrity.common.saved'))
+    if (result === 'saved') {
+      confirmationMessage.value = ''
+      appStore.showSuccess(t('admin.modelIntegrity.common.saved'))
+      // The save response carries the evaluation the server ran with it, so the
+      // board reflects the revision that was just stored.
+      fetchedSnapshot.value = null
+      await refreshRanking()
+    } else if (result === 'saved_evaluation_failed') {
+      // Saved is not the same as in force: name both, with the server's reason.
+      const reason = ranking.error?.message || t('admin.modelIntegrity.common.saveFailed')
+      confirmationMessage.value = t('admin.modelIntegrity.scheduling.evaluation.savedButFailed', { reason })
+      appStore.showError(confirmationMessage.value)
+      fetchedSnapshot.value = null
+      await refreshRanking()
+    }
   } catch (error) {
     appStore.showError(extractApiErrorMessage(error, t('admin.modelIntegrity.common.saveFailed')))
   }
@@ -582,7 +811,18 @@ async function initialLoad() {
     appStore.showError(extractApiErrorMessage(error, t('admin.modelIntegrity.common.loadFailed')))
     return
   }
+  await loadGroups()
+  await refreshRanking()
   await loadTraces()
+}
+
+/** Group names for the ranking filter; a failure here leaves the filter empty. */
+async function loadGroups() {
+  try {
+    groups.value = await groupsAPI.getAll('openai')
+  } catch {
+    groups.value = []
+  }
 }
 
 onBeforeRouteLeave(() => {
@@ -656,4 +896,21 @@ onMounted(initialLoad)
 .lane-inactive { @apply text-gray-500 dark:text-gray-400; }
 .lane-inactive::before { @apply bg-gray-300 dark:bg-dark-500; }
 .decisions-head { @apply flex flex-wrap items-start justify-between gap-3; }
+.effects-head, .evaluate-head { @apply flex flex-wrap items-start justify-between gap-4; }
+.effects-controls { @apply flex flex-wrap items-center gap-3; }
+.effects-switch { @apply flex items-center gap-3 text-sm; }
+.effects-switch-label { @apply font-medium text-gray-900 dark:text-white; }
+.effects-state { @apply flex flex-wrap items-center gap-x-3 gap-y-1 text-sm; }
+.effects-state-pill { @apply inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold; }
+.effects-state-active .effects-state-pill { @apply bg-primary-600 text-white dark:bg-primary-500; }
+.effects-state-partial .effects-state-pill { @apply bg-violet-600 text-white dark:bg-violet-500; }
+.effects-state-off .effects-state-pill { @apply bg-gray-200 text-gray-700 dark:bg-dark-700 dark:text-gray-300; }
+.effects-state-error .effects-state-pill { @apply bg-rose-600 text-white dark:bg-rose-500; }
+.effects-state-body { @apply max-w-[72ch] text-xs leading-relaxed text-gray-600 dark:text-gray-400; }
+.effects-note { @apply rounded-md bg-sky-50 px-3 py-2 text-xs leading-relaxed text-sky-900 dark:bg-sky-950/30 dark:text-sky-200; }
+.evaluate-progress { @apply flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300; }
+.evaluate-note { @apply text-xs leading-relaxed text-amber-800 dark:text-amber-300; }
+.evaluate-message { @apply max-w-[80ch] rounded-md px-3 py-2 text-sm leading-relaxed; }
+.evaluate-message-ok { @apply bg-primary-50 text-primary-900 dark:bg-primary-950/30 dark:text-primary-100; }
+.evaluate-message-error { @apply bg-rose-50 text-rose-900 dark:bg-rose-950/30 dark:text-rose-200; }
 </style>

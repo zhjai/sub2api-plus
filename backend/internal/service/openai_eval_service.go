@@ -42,6 +42,7 @@ type OpenAIEvalRunRequest struct {
 }
 
 type OpenAIEvalService struct {
+	ranking     *OpenAIEvalRankingService
 	repo        OpenAIEvalRepository
 	accounts    AccountRepository
 	accountTest *AccountTestService
@@ -67,6 +68,11 @@ func (s *OpenAIEvalService) Initialize(ctx context.Context) error {
 		return err
 	}
 	SetOpenAIEvalSchedulingPolicySnapshot(config)
+	if s.ranking != nil {
+		s.ranking.mu.Lock()
+		s.ranking.adoptLocked(config)
+		s.ranking.mu.Unlock()
+	}
 	return nil
 }
 
@@ -89,7 +95,9 @@ func (s *OpenAIEvalService) GetConfig(ctx context.Context) (*OpenAIEvalConfig, e
 		if config.MaxRequestAttempts == 0 {
 			config.MaxRequestAttempts = OpenAIEvalDefaultMaxRequestAttempts
 		}
-		SetOpenAIEvalSchedulingPolicySnapshot(config)
+		if s.ranking == nil {
+			SetOpenAIEvalSchedulingPolicySnapshot(config)
+		}
 		if s.accounts != nil {
 			accountCache := make(map[int64]*Account)
 			accountFor := func(accountID int64) *Account {
@@ -284,10 +292,24 @@ func (s *OpenAIEvalService) SaveConfig(ctx context.Context, config *OpenAIEvalCo
 			}
 		}
 	}
+	if s.ranking != nil {
+		s.ranking.mu.Lock()
+	}
 	if err := s.repo.SaveConfig(ctx, config, actorID); err != nil {
+		if s.ranking != nil {
+			s.ranking.mu.Unlock()
+		}
 		return err
 	}
-	SetOpenAIEvalSchedulingPolicySnapshot(config)
+	if s.ranking != nil {
+		s.ranking.adoptLocked(config)
+		s.ranking.mu.Unlock()
+		// A committed save is never reported as failed or retried because the
+		// independent evaluation failed. Its structured status is in the DTO.
+		_, _ = s.ranking.evaluate(ctx, "policy_saved", true)
+	} else {
+		SetOpenAIEvalSchedulingPolicySnapshot(config)
+	}
 	return nil
 }
 
@@ -598,7 +620,7 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 		for i := 0; i < request.SampleCount; i++ {
 			run.Phase = "sampling"
 			result, record, sampleErr := s.accountTest.runOpenAIEvalSampleAttempts(candyCtx, target, OpenAIEvalCandyPrompt, request.ReasoningEffort, maximum)
-			record.ProbeID = fmt.Sprintf("candy-21-v3-97623969-%d", i+1)
+			record.ProbeID = fmt.Sprintf("candy-21-v4-97623969-%d", i+1)
 			run.RequestCount += record.Attempts
 			run.CompletedSamples++
 			run.Samples = append(run.Samples, record)

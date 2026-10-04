@@ -287,8 +287,14 @@ func ProvideOpenAIEvalService(
 	accountRepo AccountRepository,
 	accountTestService *AccountTestService,
 	pricingService *PricingService,
+	groupRepo GroupRepository,
+	channelRepo ChannelRepository,
+	compositeRepo CompositeModelRouteRepository,
+	gateway *OpenAIGatewayService,
+	monitor *ChannelMonitorService,
 ) *OpenAIEvalService {
 	service := NewOpenAIEvalService(repo, accountRepo, accountTestService)
+	NewOpenAIEvalRankingService(service, groupRepo, channelRepo, compositeRepo, gateway, monitor)
 	if accountTestService != nil && accountTestService.openaiGatewayService != nil {
 		accountTestService.openaiGatewayService.openAIEvalRepo = repo
 	}

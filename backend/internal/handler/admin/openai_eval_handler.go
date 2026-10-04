@@ -23,7 +23,7 @@ func (h *AccountHandler) GetOpenAIEvalConfig(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load evaluation config"})
 		return
 	}
-	c.JSON(http.StatusOK, openAIEvalConfigQualityStatus(config))
+	c.JSON(http.StatusOK, h.openAIEvalConfigRankingStatus(config, false))
 }
 
 func (h *AccountHandler) UpdateOpenAIEvalConfig(c *gin.Context) {
@@ -78,10 +78,14 @@ func (h *AccountHandler) UpdateOpenAIEvalConfig(c *gin.Context) {
 	// immediately after saving.
 	saved, err := h.openAIEvalService.GetConfig(c.Request.Context())
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to reload evaluation config"})
+		response := h.openAIEvalConfigRankingStatus(&config, true)
+		response.RankingError = &service.OpenAIEvalRankingError{Code: "CONFIG_RELOAD_FAILED", Message: "Configuration was saved, but its runtime status could not be reloaded.", ConfigRevision: config.Revision}
+		c.JSON(http.StatusOK, response)
 		return
 	}
-	c.JSON(http.StatusOK, openAIEvalConfigQualityStatus(saved))
+	response := h.openAIEvalConfigRankingStatus(saved, true)
+	response.SavedRevision = &config.Revision
+	c.JSON(http.StatusOK, response)
 }
 
 func mergeOpenAIEvalConfigOmittedFields(incoming, current *service.OpenAIEvalConfig, fields map[string]json.RawMessage) {
@@ -295,6 +299,7 @@ func (h *AccountHandler) ListOpenAIEvalModels(c *gin.Context) {
 	bankRevision, candidateCount := service.OpenAIEvalModelTraceBankInfo()
 	c.JSON(http.StatusOK, gin.H{
 		"items":            service.OpenAIEvalSupportedModels(),
+		"data_version":     service.OpenAIEvalDataVersion,
 		"baseline_version": service.OpenAIEvalBaselineVersion,
 		"baseline_models": func() []string {
 			out := make([]string, 0, len(service.OpenAIEvalFingerprintBaselines))

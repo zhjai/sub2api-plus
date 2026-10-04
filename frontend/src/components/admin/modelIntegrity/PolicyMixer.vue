@@ -21,6 +21,25 @@
         {{ t(`admin.modelIntegrity.scheduling.policy.options.${policyKey(policy)}.name`) }}
       </span>
       <span class="mixer-effect">{{ t(`admin.modelIntegrity.scheduling.policy.options.${policyKey(policy)}.effect`) }}</span>
+      <!-- The preset weights this policy actually ranks with, including load at
+           evaluation time. The pass rate is either a weighted factor or a
+           filter, never silently dropped. -->
+      <span v-if="presetWeights(policy)" class="mixer-weights" data-testid="mixer-weights">
+        <span v-for="factor in RANKING_FACTORS" :key="factor" class="mixer-weight" :class="{ 'mixer-weight-zero': !(presetWeights(policy)![factor] > 0) }">
+          <span class="mixer-weight-name">{{ t(`admin.modelIntegrity.scheduling.rank.weights.${factor}`) }}</span>
+          <!-- The pass rate is a tier filter under avoid degradation, so it is
+               stated rather than drawn as a weight price could trade against. -->
+          <span
+            v-if="factor === 'quality' && QUALITY_MODE[policy] !== 'weighted'"
+            class="mixer-weight-value"
+            :class="`mixer-weight-mode-${QUALITY_MODE[policy]}`"
+            :data-testid="`mixer-quality-${policyKey(policy)}`"
+          >{{ t(`admin.modelIntegrity.scheduling.policy.qualityMode.${QUALITY_MODE[policy]}`) }}</span>
+          <span v-else class="mixer-weight-value tabular-nums">{{ Math.round((presetWeights(policy)![factor] ?? 0) * 100) }}%</span>
+        </span>
+      </span>
+      <!-- Policies without published preset weights (system default, custom
+           balance) keep the relative-emphasis meters instead. -->
       <span class="mixer-meters">
         <span v-for="factor in FACTORS" :key="factor" class="mixer-meter">
           <span class="mixer-meter-label">{{ t(`admin.modelIntegrity.scheduling.policy.factors.${factor}`) }}</span>
@@ -53,7 +72,8 @@
 <script setup lang="ts">
 import { useI18n } from 'vue-i18n'
 import type { OpenAIEvalSchedulingPolicy } from '@/api/admin/accounts'
-import { POLICIES, POLICY_EMPHASIS, QUALITY_MODE, policyKey, type PolicyFactor } from '@/views/admin/modelIntegrity/modelIntegrity'
+import { POLICIES, PRESET_WEIGHTS, QUALITY_MODE, RANKING_FACTORS, policyKey, type PolicyFactor } from '@/views/admin/modelIntegrity/modelIntegrity'
+import { POLICY_EMPHASIS } from '@/views/admin/modelIntegrity/modelIntegrity'
 
 withDefaults(defineProps<{
   modelValue: OpenAIEvalSchedulingPolicy
@@ -65,6 +85,11 @@ withDefaults(defineProps<{
 const emit = defineEmits<{ (e: 'update:modelValue', value: OpenAIEvalSchedulingPolicy): void }>()
 const { t } = useI18n()
 const FACTORS: PolicyFactor[] = ['quality', 'price', 'errors', 'speed']
+
+/** The published preset weights for a policy; Custom Balance has none of its own. */
+function presetWeights(policy: OpenAIEvalSchedulingPolicy) {
+  return policy !== '' && policy !== 'custom_balance' ? PRESET_WEIGHTS[policy] : null
+}
 </script>
 
 <style scoped>
@@ -78,7 +103,15 @@ const FACTORS: PolicyFactor[] = ['quality', 'price', 'errors', 'speed']
 .mixer-option-active .mixer-radio { @apply border-primary-600 dark:border-primary-400; box-shadow: inset 0 0 0 2px white; background: theme('colors.primary.600'); }
 :global(.dark) .mixer-option-active .mixer-radio { box-shadow: inset 0 0 0 2px theme('colors.dark.800'); }
 .mixer-effect { @apply min-h-[2.75rem] text-[0.8125rem] leading-relaxed text-gray-600 dark:text-gray-400; }
+.mixer-weights { @apply grid gap-1 rounded-md bg-gray-50 px-2.5 py-2 dark:bg-dark-900/60; }
+.mixer-weight { @apply flex items-baseline justify-between gap-2 text-xs text-gray-700 dark:text-gray-300; }
+.mixer-weight-zero { @apply text-gray-400 dark:text-gray-500; }
+.mixer-weight-name { @apply min-w-0 truncate; }
+.mixer-weight-value { @apply shrink-0 font-medium; }
+.mixer-weight-mode-tier { @apply text-violet-700 dark:text-violet-300; }
+.mixer-weight-mode-ignored { @apply text-gray-400 dark:text-gray-500; }
 .mixer-meters { @apply mt-auto grid gap-1.5 border-t border-gray-100 pt-3 dark:border-dark-700; }
+.mixer-weights + .mixer-meters { @apply mt-0; }
 .mixer-meter { @apply grid grid-cols-[5.5rem_1fr] items-center gap-2 text-xs text-gray-500 dark:text-gray-400; }
 .mixer-meter-track { @apply grid h-2 grid-cols-4 gap-0.5; }
 .mixer-meter-mode { @apply text-xs leading-none; }

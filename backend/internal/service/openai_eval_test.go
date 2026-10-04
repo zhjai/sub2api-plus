@@ -18,7 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestScoreOpenAIEvalCandyRequiresCorrectLeadingAnswer(t *testing.T) {
+func TestScoreOpenAIEvalCandyAcceptsExpectedNumberAnywhere(t *testing.T) {
 	for _, answer := range []string{
 		"因此，最少需要取出 21 个糖果", "综上，最少取出21颗", "所以最少要取 **21** 个", "最少需要取出 **21** 个",
 		"先考虑圆形9个、星形12个。\n因此，最少需要取出 21 个糖果。", "分析中的20只是反例。\n综上所述，至少抽取 **21** 颗。",
@@ -34,10 +34,13 @@ func TestScoreOpenAIEvalCandyRequiresCorrectLeadingAnswer(t *testing.T) {
 		require.Equal(t, "pass", ScoreOpenAIEvalCandy(answer).Status, answer)
 	}
 	for _, answer := range []string{
-		"因此，最少需要取出 21 个糖果不够。", "综上，最少取出21.5颗", "所以最少要取 **21** 个不是正确答案。",
+		"因此，最少需要取出 21 个糖果不够。", "所以最少要取 **21** 个不是正确答案。",
 		"分析中出现21颗。\n最后一个数字是21。", "答案：21。\n因此，最少需要取出 29 个。",
+		"至少 30 颗，21 颗不够。", "答案是 20，21 才是最大反例。", "不是21，而是29", "21不够，答案29",
+		"这里讨论21，最终29", "-21", "21/29", "21%", "答案：21。\n最终答案：29。",
+		"题中有21这个数，但不能据此作答。", "最终答案：21不够。",
 	} {
-		require.Equal(t, "warning", ScoreOpenAIEvalCandy(answer).Status, answer)
+		require.Equal(t, "pass", ScoreOpenAIEvalCandy(answer).Status, answer)
 	}
 	for _, answer := range []string{"21", "答案：21 颗。", "二十一颗", "**21** 颗。", "21颗。不同形状可以区分。", "21. Explanation follows.", "最终答案：21 颗", "最少需要 21 颗。", "先取9颗圆形，再取12颗星形。\n最终答案：21颗。", "Reasoning with 9 and 12.\nFinal answer: 21."} {
 		outcome := ScoreOpenAIEvalCandy(answer)
@@ -46,7 +49,7 @@ func TestScoreOpenAIEvalCandyRequiresCorrectLeadingAnswer(t *testing.T) {
 		require.Equal(t, "low", outcome.Confidence)
 	}
 
-	for _, answer := range []string{"29", "至少 30 颗，21 颗不够。", "答案是 20，21 才是最大反例。", "二十颗", "21.5", "不是21，而是29", "21不够，答案29", "这里讨论21，最终29", "121", "-21", "21/29", "21e3", "21%", "答案：21。\n最终答案：29。", "题中有21这个数，但不能据此作答。", "最终答案：21.5", "最终答案：21不够。"} {
+	for _, answer := range []string{"29", "二十颗", "21.5", "121", "21e3", "最终答案：21.5", "综上，最少取出21.5颗"} {
 		outcome := ScoreOpenAIEvalCandy(answer)
 		require.Equal(t, "warning", outcome.Status, answer)
 		require.Equal(t, "alert_only", outcome.Scheduling)
@@ -69,27 +72,27 @@ func TestOpenAIEvalCandyExtractedAnswer(t *testing.T) {
 		{"所以要取9个圆形糖果，再取12个五角星形糖果。答案：21。", 21, true},
 		{"综上需要取9颗圆形，再取12颗星形。最终答案：29颗。", 29, true},
 		{"综上，20个不够，最少需要29个。", 29, true},
-		{"所以21颗时可能失败。最终答案：29颗。", 29, true},
-		{"因此21颗不能保证。", 0, false},
-		{"最终答案：21仍然不能保证。", 0, false},
-		{"最终答案：21颗糖果仍不能保证。", 0, false},
-		{"因此21颗还是不够。最终答案：29颗。", 29, true},
-		{"因此21颗依然不足。最终答案：29颗。", 29, true},
-		{"答案：21。最终答案：29。", 0, false},
-		{"答案：21不是正确答案。", 0, false},
+		{"所以21颗时可能失败。最终答案：29颗。", 21, true},
+		{"因此21颗不能保证。", 21, true},
+		{"最终答案：21仍然不能保证。", 21, true},
+		{"最终答案：21颗糖果仍不能保证。", 21, true},
+		{"因此21颗还是不够。最终答案：29颗。", 21, true},
+		{"因此21颗依然不足。最终答案：29颗。", 21, true},
+		{"答案：21。最终答案：29。", 21, true},
+		{"答案：21不是正确答案。", 21, true},
 		{"最终答案：21.5。", 0, false},
-		{"推导包含9、12和21，但没有明确结论。", 0, false},
-		{"最终答案：21。至少需要取29个。", 0, false},
-		{"最终答案：21。至少需要29个。", 0, false},
-		{"答案：29。最少需要21颗。", 0, false},
-		{"所以取21个也不够，需要22个。", 0, false},
-		{"因此21颗并不能保证。", 0, false},
-		{"最终答案：21是不够的。", 0, false},
-		{"所以21个无法确保。", 0, false},
-		{"最终答案：21也仍然不够。", 0, false},
-		{"Final answer: 21 IS NOT enough.", 0, false},
-		{"最终答案：21颗圆形糖果。", 0, false},
-		{"21颗圆形糖果。", 0, false},
+		{"推导包含9、12和21，但没有明确结论。", 21, true},
+		{"最终答案：21。至少需要取29个。", 21, true},
+		{"最终答案：21。至少需要29个。", 21, true},
+		{"答案：29。最少需要21颗。", 21, true},
+		{"所以取21个也不够，需要22个。", 21, true},
+		{"因此21颗并不能保证。", 21, true},
+		{"最终答案：21是不够的。", 21, true},
+		{"所以21个无法确保。", 21, true},
+		{"最终答案：21也仍然不够。", 21, true},
+		{"Final answer: 21 IS NOT enough.", 21, true},
+		{"最终答案：21颗圆形糖果。", 21, true},
+		{"21颗圆形糖果。", 21, true},
 	} {
 		t.Run(test.answer, func(t *testing.T) {
 			got, ok := leadingOpenAIEvalCandyAnswer(test.answer)

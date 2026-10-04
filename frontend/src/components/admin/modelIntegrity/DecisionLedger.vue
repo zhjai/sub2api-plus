@@ -1,5 +1,11 @@
 <template>
   <div>
+    <!-- These rows are real request selections. The offline evaluation's
+         recommended order is shown on the ranking board above, never here. -->
+    <p class="ledger-banner" data-testid="dispatch-banner">
+      <Icon name="bolt" size="sm" class="mt-0.5 shrink-0" />
+      <span>{{ t('admin.modelIntegrity.scheduling.decisions.actualDispatch') }}</span>
+    </p>
     <div class="ledger-toolbar">
       <select v-model="modelFilter" class="input ledger-select" :aria-label="t('admin.modelIntegrity.scheduling.decisions.filterModel')">
         <option value="">{{ t('admin.modelIntegrity.scheduling.decisions.filterModel') }}</option>
@@ -30,7 +36,19 @@
             <p class="ledger-meta">
               <span>{{ t('admin.modelIntegrity.scheduling.decisions.policyUsed', { policy: policyName(trace.scheduling_policy) }) }}</span>
               <span v-if="trace.candidates?.length">{{ t('admin.modelIntegrity.scheduling.decisions.counts', countsOf(trace)) }}</span>
+              <span v-if="trace.ranking_basis" class="ledger-basis" :class="`ledger-basis-${basisKey(trace)}`" data-testid="dispatch-basis">
+                {{ t(`admin.modelIntegrity.scheduling.decisions.basis.${basisKey(trace)}`) }}
+              </span>
+              <span v-if="trace.selected_rank != null" data-testid="dispatch-rank">{{ t('admin.modelIntegrity.scheduling.decisions.selectedRank', { rank: trace.selected_rank }) }}</span>
+              <span v-if="trace.snapshot_evaluated_at">{{ t('admin.modelIntegrity.scheduling.decisions.snapshotAt', { time: formatAbsolute(trace.snapshot_evaluated_at) }) }}</span>
+              <span v-if="trace.config_revision != null">{{ t('admin.modelIntegrity.scheduling.rank.revision', { revision: trace.config_revision }) }}</span>
               <span v-if="trace.route_migration_active">{{ t('admin.modelIntegrity.scheduling.decisions.migration', { from: trace.migration_from_rate_multiplier ?? '—', to: trace.selected_rate_multiplier ?? '—' }) }}</span>
+            </p>
+            <p v-if="trace.ranking_basis === 'live_fallback'" class="ledger-fallback" data-testid="dispatch-fallback">
+              {{ t(`admin.modelIntegrity.scheduling.rank.fallbackReason.${fallbackReasonKey(trace.ranking_fallback_reason)}`) }}
+            </p>
+            <p v-else-if="trace.ranking_basis === 'owner'" class="ledger-fallback" data-testid="dispatch-owner">
+              {{ t('admin.modelIntegrity.scheduling.decisions.ownerOverride') }}
             </p>
             <details v-if="trace.error" class="ledger-error">
               <summary class="cursor-pointer">{{ t('admin.modelIntegrity.scheduling.decisions.errorLabel') }}</summary>
@@ -57,6 +75,7 @@
               <thead>
                 <tr>
                   <th scope="col">{{ t('admin.modelIntegrity.scheduling.decisions.columns.account') }}</th>
+                  <th scope="col" class="num">{{ t('admin.modelIntegrity.scheduling.decisions.columns.rank') }}</th>
                   <th scope="col">{{ t('admin.modelIntegrity.scheduling.decisions.columns.verdict') }}</th>
                   <th scope="col" class="cand-why">{{ t('admin.modelIntegrity.scheduling.decisions.columns.why') }}</th>
                   <th scope="col" class="num">{{ t('admin.modelIntegrity.scheduling.decisions.columns.rate') }}</th>
@@ -65,11 +84,16 @@
                   <th scope="col" class="num">{{ t('admin.modelIntegrity.scheduling.decisions.columns.load') }}</th>
                   <th v-if="hasQuality(trace)" scope="col" class="num" :title="t('admin.modelIntegrity.scheduling.decisions.qualityHint')">{{ t('admin.modelIntegrity.scheduling.decisions.columns.quality') }}</th>
                   <th scope="col">{{ t('admin.modelIntegrity.scheduling.decisions.columns.score') }}</th>
+                  <th scope="col" class="num">{{ t('admin.modelIntegrity.scheduling.decisions.columns.contribution') }}</th>
                 </tr>
               </thead>
               <tbody>
                 <tr v-for="candidate in orderCandidates(trace.candidates)" :key="candidate.account_id" :class="candidateRowClass(candidate)" data-testid="candidate-row">
                   <td class="font-medium text-gray-900 dark:text-gray-100">{{ accountLabel(candidate.account_id) }}</td>
+                  <td class="num">
+                    <span v-if="candidate.rank != null" data-testid="candidate-rank">{{ candidate.rank }}</span>
+                    <span v-else class="text-gray-400">—</span>
+                  </td>
                   <td><span class="verdict" :class="`verdict-${verdictOf(candidate)}`">{{ t(`admin.modelIntegrity.scheduling.decisions.verdict.${verdictOf(candidate)}`) }}</span></td>
                   <td class="cand-why">{{ candidateWhy(candidate) }}</td>
                   <td class="num">{{ candidate.rate_multiplier != null ? `${formatNumber(candidate.rate_multiplier)}x` : '—' }}</td>
@@ -87,9 +111,17 @@
                     <span v-else class="text-gray-400">—</span>
                   </td>
                   <td>
-                    <span v-if="candidate.eligible && candidate.score != null" class="score">
-                      <span class="score-bar" aria-hidden="true"><span class="score-fill" :style="{ width: `${scoreWidth(trace, candidate.score)}%` }" /></span>
-                      <span class="score-num">{{ formatNumber(candidate.score) }}</span>
+                    <span v-if="candidate.eligible && candidateScore(candidate) != null" class="score">
+                      <span class="score-bar" aria-hidden="true"><span class="score-fill" :style="{ width: `${scoreWidth(trace, candidateScore(candidate) as number)}%` }" /></span>
+                      <span class="score-num">{{ formatNumber(candidateScore(candidate) as number) }}</span>
+                    </span>
+                    <span v-else class="text-gray-400">—</span>
+                  </td>
+                  <td class="num">
+                    <span v-if="candidate.contributions" class="contrib" data-testid="candidate-contribution" :title="contributionTitle(candidate)">
+                      <span v-for="factor in RANKING_FACTORS" :key="factor" class="contrib-part" :class="{ 'contrib-zero': !(candidate.contributions[factor] > 0) }">
+                        {{ Math.round((candidate.contributions[factor] ?? 0) * 10) / 10 }}
+                      </span>
                     </span>
                     <span v-else class="text-gray-400">—</span>
                   </td>
@@ -109,7 +141,30 @@ import { computed, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/icons/Icon.vue'
 import type { SchedulerDecisionCandidate, SchedulerDecisionTrace } from '@/api/admin/accounts'
-import { candidateReasonKey, decisionKey, exclusionKey, orderCandidates, policyKey } from '@/views/admin/modelIntegrity/modelIntegrity'
+import { candidateReasonKey, decisionKey, exclusionKey, fallbackReasonKey, orderCandidates, policyKey, RANKING_FACTORS } from '@/views/admin/modelIntegrity/modelIntegrity'
+
+const KNOWN_BASES = new Set(['snapshot', 'live_fallback', 'legacy', 'owner'])
+
+/** Which order the request actually used, so an offline recommendation is never implied. */
+function basisKey(trace: SchedulerDecisionTrace) {
+  return trace.ranking_basis && KNOWN_BASES.has(trace.ranking_basis) ? trace.ranking_basis : 'legacy'
+}
+
+/**
+ * The published total score. Older traces only carry `score`, so it remains the
+ * fallback; a priority_score of exactly 0 is a real score and is kept.
+ */
+function candidateScore(candidate: SchedulerDecisionCandidate): number | null {
+  if (candidate.priority_score != null) return candidate.priority_score
+  return candidate.score ?? null
+}
+
+function contributionTitle(candidate: SchedulerDecisionCandidate) {
+  if (!candidate.contributions) return ''
+  return RANKING_FACTORS
+    .map(factor => `${t(`admin.modelIntegrity.scheduling.rank.weights.${factor}`)} ${candidate.contributions?.[factor] ?? 0}`)
+    .join(t('admin.modelIntegrity.scheduling.rules.weightsSeparator'))
+}
 
 const props = defineProps<{
   traces: SchedulerDecisionTrace[]
@@ -132,6 +187,8 @@ function toggle(index: number) {
 }
 
 function isProblem(trace: SchedulerDecisionTrace) {
+  // An owner override is a deliberate binding, not a routing failure.
+  if (trace.ranking_basis === 'owner' && trace.selected_account_id) return Boolean(trace.error)
   return !trace.selected_account_id || Boolean(trace.error) || trace.reason_code === 'no_selection' || trace.reason_code === 'selection_error'
 }
 
@@ -224,6 +281,16 @@ const formatAbsolute = (value: string) => {
 
 <style scoped>
 .ledger-toolbar { @apply mb-3 flex flex-wrap items-center gap-3; }
+.ledger-banner { @apply mb-3 flex items-start gap-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs leading-relaxed text-gray-600 dark:border-dark-700 dark:bg-dark-900/50 dark:text-gray-400; }
+.ledger-basis { @apply rounded px-1.5 py-0.5 font-medium; }
+.ledger-basis-snapshot { @apply bg-primary-100 text-primary-800 dark:bg-primary-900/50 dark:text-primary-200; }
+.ledger-basis-live_fallback { @apply bg-violet-100 text-violet-800 dark:bg-violet-900/50 dark:text-violet-200; }
+.ledger-basis-legacy { @apply bg-gray-100 text-gray-700 dark:bg-dark-700 dark:text-gray-300; }
+.ledger-basis-owner { @apply bg-amber-100 text-amber-900 dark:bg-amber-900/40 dark:text-amber-200; }
+.ledger-fallback { @apply mt-1 max-w-[72ch] text-xs leading-snug text-gray-500 dark:text-gray-400; }
+.contrib { @apply inline-flex gap-1 text-[11px] tabular-nums; }
+.contrib-part { @apply rounded bg-gray-100 px-1 py-0.5 text-gray-700 dark:bg-dark-700 dark:text-gray-300; }
+.contrib-zero { @apply text-gray-400 dark:text-gray-500; }
 .ledger-select { @apply h-9 w-auto min-w-[11rem] py-1 text-sm; }
 .ledger-check { @apply inline-flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300; }
 .ledger-empty { @apply rounded-lg border border-dashed border-gray-300 px-4 py-8 text-center text-sm text-gray-500 dark:border-dark-600 dark:text-gray-400; }

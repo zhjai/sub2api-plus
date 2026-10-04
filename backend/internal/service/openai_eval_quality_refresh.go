@@ -20,9 +20,10 @@ const (
 var ErrOpenAIEvalQualityRefreshSuperseded = errors.New("quality refresh superseded by a configuration change or newer refresh")
 
 type OpenAIEvalQualityRefreshResult struct {
-	RefreshedAt   time.Time `json:"refreshed_at"`
-	NextRefreshAt time.Time `json:"next_refresh_at"`
-	RouteCount    int       `json:"route_count"`
+	*OpenAIEvalRankingSummary `json:",omitempty"`
+	RefreshedAt               time.Time `json:"refreshed_at"`
+	NextRefreshAt             time.Time `json:"next_refresh_at"`
+	RouteCount                int       `json:"route_count"`
 }
 
 type openAIEvalQualityRoute struct {
@@ -255,6 +256,26 @@ func (s *OpenAIEvalService) RefreshOpenAIEvalQuality(ctx context.Context, actorI
 }
 
 func (s *OpenAIEvalService) refreshOpenAIEvalQuality(ctx context.Context, force bool) (*OpenAIEvalQualityRefreshResult, error) {
+	if s != nil && s.ranking != nil {
+		trigger := "manual"
+		if !force {
+			trigger = "interval"
+			s.ranking.mu.Lock()
+			if s.ranking.current == nil {
+				trigger = "startup"
+			} else if s.ranking.current.summary.NextEvaluationReason == "evidence_expiry" {
+				trigger = "evidence_expiry"
+			}
+			s.ranking.mu.Unlock()
+		}
+		summary, err := s.ranking.evaluate(ctx, trigger, force)
+		if err != nil {
+			return nil, err
+		}
+		status := OpenAIEvalQualityRefreshStatus()
+		status.OpenAIEvalRankingSummary = summary
+		return &status, nil
+	}
 	if s == nil || s.repo == nil || s.accounts == nil {
 		return nil, errors.New("evaluation quality service is unavailable")
 	}

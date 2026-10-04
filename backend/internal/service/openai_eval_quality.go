@@ -14,7 +14,7 @@ import (
 const (
 	// A new question or reference bank must get a new contract. Historical
 	// Candy-29 results must never be relabeled with this version.
-	OpenAIEvalQualityDataVersion            = "sub2api-candy-21-v3-cpa-97623969-modeltrace-97623969"
+	OpenAIEvalQualityDataVersion            = "sub2api-candy-21-v4-number-presence-cpa-97623969-modeltrace-97623969"
 	OpenAIEvalQualityBaselineVersion        = "cpa-codex-candy-eval-97623969-v2"
 	OpenAIEvalQualityModelTraceBankRevision = "sha256:a4e256c00444179b76f3855578660e66f30659df8c0122f1768dd05a8d705630"
 	OpenAIEvalQualityVersion                = "logical-samples-per-type-v2"

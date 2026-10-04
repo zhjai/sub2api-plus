@@ -364,6 +364,8 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		accounts.PUT("/evaluations/config", h.Admin.Account.UpdateOpenAIEvalConfig)
 		accounts.POST("/evaluations/run", h.Admin.Account.RunOpenAIEval)
 		accounts.POST("/evaluations/quality/refresh", h.Admin.Account.RefreshOpenAIEvalQuality)
+		accounts.POST("/evaluations/scheduling/evaluate", h.Admin.Account.EvaluateOpenAIScheduling)
+		accounts.GET("/evaluations/scheduling/rankings", h.Admin.Account.GetOpenAISchedulingRankings)
 		accounts.POST("/evaluations/bps/reset", h.Admin.Account.ResetOpenAIEvalBPSState)
 		accounts.GET("/evaluations/runs", h.Admin.Account.ListOpenAIEvalRuns)
 		accounts.GET("/evaluations/audit", h.Admin.Account.ListOpenAIEvalAudit)

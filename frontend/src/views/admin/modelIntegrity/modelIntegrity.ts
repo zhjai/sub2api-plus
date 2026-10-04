@@ -5,8 +5,12 @@ import type {
   OpenAIEvalBPSAccountConfig,
   OpenAIEvalBPSMode,
   OpenAIEvalConfig,
+  OpenAIEvalEffectiveStatus,
   OpenAIEvalModelCatalog,
   OpenAIEvalPolicyWeights,
+  OpenAIEvalRankedAccount,
+  OpenAIEvalRankingFactors,
+  OpenAIEvalRankingWeights,
   OpenAIEvalRouteConfig,
   OpenAIEvalRun,
   OpenAIEvalSampleRecord,
@@ -653,4 +657,208 @@ export function orderCandidates<T extends { selected: boolean; eligible: boolean
     if (score !== 0 && Number.isFinite(score)) return score
     return a.account_id - b.account_id
   })
+}
+
+// ---------------------------------------------------------------------------
+// Scheduling evaluation rankings (rc3)
+//
+// Everything here is presentation of server-computed numbers: the page never
+// derives a score, a rank or a tier. The frozen preset weights below mirror
+// openai_eval_ranking.go so the "what this policy weighs" copy on screen
+// matches the scorer the backend actually runs.
+// ---------------------------------------------------------------------------
+
+/**
+ * The preset weight sets the backend applies, as published in the frozen
+ * contract. `load` is the concurrency load measured at evaluation time; live
+ * concurrency and RPM admission are still checked separately per request.
+ */
+export const PRESET_WEIGHTS: Record<Exclude<OpenAIEvalSchedulingPolicy, '' | 'custom_balance'>, OpenAIEvalRankingWeights> = {
+  cost_first: { price: 0.6, error_rate: 0.2, ttft: 0.1, load: 0.1, quality: 0 },
+  stability_first: { price: 0.1, error_rate: 0.5, ttft: 0.3, load: 0.1, quality: 0 },
+  avoid_degradation: { price: 0.4, error_rate: 0.35, ttft: 0.15, load: 0.1, quality: 0 }
+}
+
+/** Factors in the order the ranking contract lists them. */
+export const RANKING_FACTORS: (keyof OpenAIEvalRankingWeights)[] = ['price', 'error_rate', 'ttft', 'load', 'quality']
+
+/** The weights a policy ranks with. Custom Balance reads the saved config. */
+export function weightsForPolicy(policy: OpenAIEvalSchedulingPolicy, custom?: OpenAIEvalPolicyWeights | null): OpenAIEvalRankingWeights | null {
+  if (!policy) return null
+  if (policy !== 'custom_balance') return PRESET_WEIGHTS[policy]
+  if (!custom) return null
+  const normalized = normalizeCustomBalance(custom)
+  const total = CUSTOM_FACTORS.reduce((sum, factor) => sum + Number(normalized[factor] ?? 0), 0)
+  if (total <= 0) return null
+  const share = (factor: CustomFactor) => Number(normalized[factor] ?? 0) / total
+  return { price: share('cost'), error_rate: share('error_rate'), ttft: share('ttft'), load: share('load'), quality: share('quality') }
+}
+
+/**
+ * Avoid degradation ignores the weighted quality term by design — it filters
+ * on the pass-rate tier before the weighted score is ever compared — so its
+ * quality weight is 0 and the copy must say the tier decides, not a weight.
+ */
+export function policyQualityEmphasis(policy: OpenAIEvalSchedulingPolicy): 'tier' | 'weighted' | 'ignored' {
+  if (policy === 'avoid_degradation') return 'tier'
+  if (policy === 'custom_balance') return 'weighted'
+  return 'ignored'
+}
+
+/** Number of factors a policy actually weighs, used to label the preset row. */
+export function weightedFactorCount(weights: OpenAIEvalRankingWeights): number {
+  return RANKING_FACTORS.filter(factor => weights[factor] > 0).length
+}
+
+// ---------------------------------------------------------------------------
+// Effective status
+// ---------------------------------------------------------------------------
+
+export type EffectiveTone = 'active' | 'partial' | 'off' | 'error'
+
+/** Every status the server can report, so an unknown value still gets a label. */
+export const EFFECTIVE_KEYS = [
+  'active', 'active_partial', 'inactive_effects_off', 'inactive_legacy_policy',
+  'live_fallback', 'no_targets', 'error'
+] as const
+
+export type EffectiveKey = typeof EFFECTIVE_KEYS[number]
+
+/** Tone drives the status pill colour, so a saved-but-inactive policy never reads as live. */
+export function effectiveTone(status: OpenAIEvalEffectiveStatus | null | undefined): EffectiveTone {
+  switch (status) {
+    case 'active':
+      return 'active'
+    case 'active_partial':
+    case 'live_fallback':
+      return 'partial'
+    case 'error':
+      return 'error'
+    default:
+      return 'off'
+  }
+}
+
+/**
+ * True when the saved policy is stored but the gateway is not using it. This
+ * is a valid configuration, so the page explains it rather than rejecting it.
+ */
+export function isInactiveStatus(status: OpenAIEvalEffectiveStatus | null | undefined): boolean {
+  return status === 'inactive_effects_off' || status === 'inactive_legacy_policy' || status === 'no_targets'
+}
+
+// ---------------------------------------------------------------------------
+// Unknown reasons and evidence labels
+// ---------------------------------------------------------------------------
+
+const KNOWN_UNKNOWN_REASONS = new Set([
+  'no_price_evidence', 'no_error_samples', 'no_ttft_samples', 'no_load_reading',
+  'quality_unknown', 'quality_insufficient', 'quality_stale', 'quality_expired',
+  'no_samples', 'no_evidence', 'not_selected', 'selection_mismatch', 'no_candidates'
+])
+
+/** Maps a backend unknown_reason to an i18n key under modelIntegrity.scheduling.rank.unknown. */
+export function unknownReasonKey(reason: string | null | undefined): string {
+  if (!reason) return 'generic'
+  return KNOWN_UNKNOWN_REASONS.has(reason) ? reason : 'generic'
+}
+
+const KNOWN_RANKING_SOURCES = new Set([
+  'catalog', 'account_mapping', 'channel_mapping', 'group_route',
+  'policy_rule', 'eval_route', 'observed_route'
+])
+
+export function rankingSourceKey(source: string | undefined): string {
+  return source && KNOWN_RANKING_SOURCES.has(source) ? source : 'unknown'
+}
+
+const KNOWN_EXCLUSION_SCOPES = new Set(['account', 'route', 'live'])
+
+/** Why an account could not serve this dimension. */
+export function exclusionScopeKey(scope: string | undefined): string {
+  return scope && KNOWN_EXCLUSION_SCOPES.has(scope) ? scope : 'account'
+}
+
+const KNOWN_COVERAGE_STATUSES = new Set(['complete', 'live_fallback', 'no_candidates', 'legacy'])
+
+export function coverageStatusKey(status: string | undefined): string {
+  return status && KNOWN_COVERAGE_STATUSES.has(status) ? status : 'complete'
+}
+
+const KNOWN_FALLBACK_REASONS = new Set([
+  'no_snapshot', 'dimension_not_covered', 'quality_expired', 'route_mapping_changed',
+  'unranked_candidate', 'evidence_expired', 'snapshot_superseded'
+])
+
+export function fallbackReasonKey(reason: string | null | undefined): string {
+  if (!reason) return 'generic'
+  return KNOWN_FALLBACK_REASONS.has(reason) ? reason : 'generic'
+}
+
+const KNOWN_TRIGGERS = new Set(['startup', 'policy_saved', 'manual', 'interval', 'catalog_change', 'evidence_expiry'])
+
+export function rankingTriggerKey(trigger: string | undefined): string {
+  return trigger && KNOWN_TRIGGERS.has(trigger) ? trigger : 'manual'
+}
+
+const KNOWN_ORDERINGS = new Set(['score_desc', 'quality_then_score', 'legacy'])
+
+export function orderingKey(ordering: string | undefined): string {
+  return ordering && KNOWN_ORDERINGS.has(ordering) ? ordering : 'score_desc'
+}
+
+/**
+ * Quality states that mean "not assessable". They are never rendered as a
+ * pass rate: missing integrity evidence is unknown, never healthy.
+ */
+export function isQualityAssessed(state: string | undefined): boolean {
+  return state === 'assessed'
+}
+
+/** The published pass rate, only when the server marked the route assessed. */
+export function assessedQualityRatio(factors: OpenAIEvalRankingFactors | undefined): number | null {
+  if (!factors || !isQualityAssessed(factors.quality.state)) return null
+  return factors.quality.ratio
+}
+
+/** (pass + suspected pass) / selected test types, for the "1 of 2 tests" hint. */
+export function qualityTestCounts(factors: OpenAIEvalRankingFactors | undefined): { passed: number; selected: number; evaluated: number } {
+  return {
+    passed: (factors?.quality.pass ?? 0) + (factors?.quality.suspected_pass ?? 0),
+    selected: factors?.quality.selected ?? 0,
+    evaluated: factors?.quality.evaluated ?? 0
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Evaluation generations and paging
+// ---------------------------------------------------------------------------
+
+/** A published summary that no longer describes the loaded configuration. */
+export function isStaleEvaluation(summaryRevision: number | null | undefined, currentRevision: number | null | undefined): boolean {
+  if (summaryRevision == null || currentRevision == null) return false
+  return summaryRevision !== currentRevision
+}
+
+/**
+ * True when the two snapshots come from the same evaluation generation, which
+ * is the only case where a page of accounts may be appended to the list
+ * already on screen. A cursor from a reclaimed generation must restart the
+ * list instead of splicing two builds together.
+ */
+export function canAppendPage(
+  current: { evaluation_id: string; group_id: number | null; requested_model: string; reasoning_effort: string } | null,
+  next: { evaluation_id: string; group_id: number | null; requested_model: string; reasoning_effort: string }
+): boolean {
+  if (!current) return false
+  return current.evaluation_id === next.evaluation_id &&
+    current.group_id === next.group_id &&
+    current.requested_model === next.requested_model &&
+    current.reasoning_effort === next.reasoning_effort
+}
+
+/** Deduplicates ranked rows by account so a boundary row never appears twice. */
+export function mergeRankedAccounts(existing: OpenAIEvalRankedAccount[], incoming: OpenAIEvalRankedAccount[]): OpenAIEvalRankedAccount[] {
+  const seen = new Set(existing.map(item => item.account_id))
+  return [...existing, ...incoming.filter(item => !seen.has(item.account_id))]
 }
