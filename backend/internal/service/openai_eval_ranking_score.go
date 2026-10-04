@@ -11,6 +11,9 @@ func rankingPtr[T any](value T) *T { return &value }
 func rankingUnknown(reason string) OpenAIEvalFactorMeta {
 	return OpenAIEvalFactorMeta{Score: .5, UnknownReason: rankingPtr(reason)}
 }
+func rankingDefault(reason string) OpenAIEvalFactorMeta {
+	return OpenAIEvalFactorMeta{Score: .9, UnknownReason: rankingPtr(reason), DefaultApplied: true}
+}
 func rankingKnown(score float64, at time.Time) OpenAIEvalFactorMeta {
 	return OpenAIEvalFactorMeta{Score: clamp01(score), Known: true, ObservedAt: rankingPtr(at.UTC())}
 }
@@ -60,10 +63,10 @@ type openAIEvalRankingInput struct {
 
 func emptyOpenAIEvalRankingFactors() OpenAIEvalRankingFactors {
 	return OpenAIEvalRankingFactors{
-		Price:     OpenAIEvalRankingPrice{OpenAIEvalFactorMeta: rankingUnknown("price_unavailable")},
-		ErrorRate: OpenAIEvalRankingErrorRate{OpenAIEvalFactorMeta: rankingUnknown("no_request_samples"), MonitorIDs: []int64{}},
-		TTFT:      OpenAIEvalRankingTTFT{OpenAIEvalFactorMeta: rankingUnknown("no_first_output_samples")},
-		Load:      OpenAIEvalRankingLoad{OpenAIEvalFactorMeta: rankingUnknown("load_unavailable")},
+		Price:     OpenAIEvalRankingPrice{OpenAIEvalFactorMeta: rankingDefault("price_unavailable"), Source: rankingPtr("optimistic_default")},
+		ErrorRate: OpenAIEvalRankingErrorRate{OpenAIEvalFactorMeta: rankingDefault("no_request_samples"), Source: rankingPtr("optimistic_default"), MonitorIDs: []int64{}},
+		TTFT:      OpenAIEvalRankingTTFT{OpenAIEvalFactorMeta: rankingDefault("no_first_output_samples")},
+		Load:      OpenAIEvalRankingLoad{OpenAIEvalFactorMeta: rankingDefault("load_unavailable")},
 		Quality:   OpenAIEvalRankingQuality{OpenAIEvalFactorMeta: rankingUnknown("no_selected_tests"), State: "unknown"},
 	}
 }
@@ -155,6 +158,19 @@ func scoreOpenAIEvalRanking(policy string, weights OpenAIEvalRankingWeights, inp
 }
 
 func compareRankingQuality(a, b OpenAIEvalRankingQuality) int {
+	if a.macroRatio != nil || b.macroRatio != nil {
+		left, right := rankingQualityFraction(a), rankingQualityFraction(b)
+		if left == nil && right == nil {
+			return 0
+		}
+		if left == nil {
+			return -1
+		}
+		if right == nil {
+			return 1
+		}
+		return left.Cmp(right)
+	}
 	assessment := func(q OpenAIEvalRankingQuality) *OpenAIEvalQualityAssessment {
 		if !q.Known || q.Ratio == nil {
 			return nil
@@ -187,8 +203,8 @@ func rankingFactorExpiry(f OpenAIEvalRankingFactors, weights OpenAIEvalRankingWe
 	}
 	// Each matched probe may age out before the latest probe timestamp does.
 	if weights.ErrorRate > 0 && f.ErrorRate.Source != nil && *f.ErrorRate.Source == "v1_matched_probe" {
-		for _, monitor := range f.Monitoring {
-			include(&monitor.ObservedAt, time.Duration(f.ErrorRate.WindowSeconds)*time.Second)
+		if f.monitorExpiresAt != nil && (until == nil || f.monitorExpiresAt.Before(*until)) {
+			until = f.monitorExpiresAt
 		}
 	}
 	return until
@@ -260,4 +276,18 @@ func qualityFromLatestRuns(config *OpenAIEvalConfig, accountID int64, model, eff
 		q.UnknownReason = rankingPtr("selected_test_evidence_unavailable")
 	}
 	return q
+}
+
+func rankingQualityEvidenceChanged(cfg *OpenAIEvalConfig, rows []OpenAIEvalRankedAccount, model, effort string, latest map[OpenAIEvalEvidenceKey]OpenAIEvalRun, now time.Time) bool {
+	for _, row := range rows {
+		before := row.Factors.Quality
+		after := qualityFromLatestRuns(cfg, row.AccountID, model, effort, latest, now)
+		if before.Known != after.Known || before.Pass != after.Pass || before.SuspectedPass != after.SuspectedPass || before.Selected != after.Selected || before.Evaluated != after.Evaluated {
+			return true
+		}
+		if (before.ObservedAt == nil) != (after.ObservedAt == nil) || (before.ObservedAt != nil && !before.ObservedAt.Equal(*after.ObservedAt)) {
+			return true
+		}
+	}
+	return false
 }

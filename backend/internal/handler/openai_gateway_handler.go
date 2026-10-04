@@ -3093,6 +3093,14 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, local.Error())
 				return
 			}
+			if previousResponseID != "" && requestPlatform == service.PlatformOpenAI && !previousResponseCanMove && errors.Is(err, service.ErrNoAvailableAccounts) {
+				status := coderws.StatusPolicyViolation
+				if ownerStatus, _ := openAIPreviousResponseOwnerUnavailableStatus(previousResponseOwner); ownerStatus == http.StatusServiceUnavailable {
+					status = coderws.StatusTryAgainLater
+				}
+				closeOpenAIClientWS(wsConn, status, "previous_response_id owner is unavailable for this continuation")
+				return
+			}
 			if lastFailoverErr != nil {
 				closeOpenAIWSFailoverExhausted(c, wsConn, lastFailoverErr)
 			} else {
@@ -3119,6 +3127,15 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				status = coderws.StatusTryAgainLater
 			}
 			closeOpenAIClientWS(wsConn, status, "previous_response_id owner is unavailable for this continuation")
+			return
+		}
+		if previousResponseID != "" && requestPlatform == service.PlatformOpenAI && !previousResponseCanMove &&
+			(!scheduleDecision.StickyPreviousHit || previousResponseOwner == nil || account.ID != previousResponseOwner.ID) {
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+				selection.ReleaseFunc = nil
+			}
+			closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "previous_response_id owner is unavailable for this continuation")
 			return
 		}
 		var routeEpochErr error

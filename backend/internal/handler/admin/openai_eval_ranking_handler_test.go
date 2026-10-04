@@ -60,6 +60,7 @@ func TestOpenAIRankingHandlersEvaluateReadPaginationAndSavedError(t *testing.T) 
 	router := gin.New()
 	router.POST("/evaluate", h.EvaluateOpenAIScheduling)
 	router.GET("/rankings", h.GetOpenAISchedulingRankings)
+	router.GET("/account-overview", h.GetOpenAISchedulingAccountOverview)
 	router.PUT("/config", h.UpdateOpenAIEvalConfig)
 	router.POST("/refresh", h.RefreshOpenAIEvalQuality)
 	request := func(method, path, body string) *httptest.ResponseRecorder {
@@ -79,10 +80,24 @@ func TestOpenAIRankingHandlersEvaluateReadPaginationAndSavedError(t *testing.T) 
 	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &snapshot))
 	require.Equal(t, summary.EvaluationID, snapshot.Summary.EvaluationID)
 	require.Equal(t, "inactive_effects_off", snapshot.EffectiveStatus)
+	response = request("GET", "/account-overview", "")
+	require.Equal(t, 200, response.Code)
+	var overview service.OpenAIEvalAccountOverview
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &overview))
+	require.Equal(t, summary.EvaluationID, overview.Summary.EvaluationID)
+	require.NotNil(t, overview.Accounts)
+	require.Nil(t, overview.PreviousSummary)
+	var fields map[string]any
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &fields))
+	for _, name := range []string{"summary", "previous_summary", "effective_status", "current_config_revision", "evaluation_in_progress", "ranking_error", "groups", "next_cursor", "policy", "weights", "ordering", "accounts"} {
+		require.Contains(t, fields, name)
+	}
 	for _, query := range []string{"limit=501", "limit=0", "group_id=-1", "cursor=invalid", "limit=no"} {
 		require.Equal(t, 400, request("GET", "/rankings?"+query, "").Code)
+		require.Equal(t, 400, request("GET", "/account-overview?"+query, "").Code)
 	}
 	require.Equal(t, 409, request("GET", "/rankings?evaluation_id=old-instance", "").Code)
+	require.Equal(t, 409, request("GET", "/account-overview?evaluation_id=old-instance", "").Code)
 	response = request("POST", "/refresh", "{}")
 	require.Equal(t, 200, response.Code)
 	var alias map[string]any
@@ -90,6 +105,10 @@ func TestOpenAIRankingHandlersEvaluateReadPaginationAndSavedError(t *testing.T) 
 	require.Contains(t, alias, "evaluation_id")
 	require.Contains(t, alias, "refreshed_at")
 	require.Equal(t, float64(0), alias["route_count"])
+	response = request("GET", "/account-overview?limit=500&group_id=0", "")
+	require.Equal(t, 200, response.Code)
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &overview))
+	require.Equal(t, summary.EvaluationID, overview.PreviousSummary.EvaluationID)
 	groups.err = errors.New("private diagnostic must not escape")
 	response = request("PUT", "/config", `{"effects_enabled":false,"scheduling_policy":"cost_first","accounts":[]}`)
 	require.Equal(t, 200, response.Code)
@@ -99,6 +118,13 @@ func TestOpenAIRankingHandlersEvaluateReadPaginationAndSavedError(t *testing.T) 
 	require.NotNil(t, saved["ranking_error"])
 	require.NotContains(t, response.Body.String(), "private diagnostic")
 	require.Equal(t, "cost_first", repo.config.SchedulingPolicy)
+	response = request("GET", "/account-overview", "")
+	require.Equal(t, 200, response.Code)
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &overview))
+	require.NotNil(t, overview.RankingError)
+	require.NotNil(t, overview.Summary)
+	require.NotNil(t, overview.PreviousSummary)
+	require.NotContains(t, response.Body.String(), "private diagnostic")
 }
 
 func TestOpenAIRankingHandlerUnavailableAndErrorMapping(t *testing.T) {

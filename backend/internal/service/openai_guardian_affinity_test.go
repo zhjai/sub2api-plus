@@ -373,6 +373,13 @@ func TestOpenAIGatewayService_PreviousResponseHonorsGroupAndRequiredPrivacy(t *t
 				nil, OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityResponses,
 				false, false, true,
 			)
+			require.Error(t, err, "nonmovable continuation must not escape group/privacy admission on another account")
+			require.Nil(t, selection)
+			selection, decision, err = svc.SelectAccountWithSchedulerForCapability(
+				context.Background(), &groupID, responseID, "", codexAutoReviewModel,
+				nil, OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityResponses,
+				false, true, true,
+			)
 			require.NoError(t, err)
 			require.NotNil(t, selection)
 			require.Equal(t, fallback.ID, selection.Account.ID)

@@ -328,7 +328,7 @@ export default {
           },
           stability_first: {
             name: 'Stability first',
-            effect: 'Prefers accounts with low request error rates and short first-token latency; price weight follows system settings. The integrity pass rate is not considered.'
+            effect: 'Prefers accounts with low request error rates and short first-token latency; price and load carry small fixed weights. The integrity pass rate is not considered.'
           },
           avoid_degradation: {
             name: 'Avoid degradation',
@@ -352,29 +352,23 @@ export default {
             error_rate: 'Share of real requests that failed. Not a sign of degradation.',
             ttft: 'Wait for the first output, not the time to a full answer.',
             load: 'Current concurrency and queue use.',
-            quality: 'Selected automatic tests whose verdict passed or likely passed ÷ tests selected.'
+            quality: 'Selected automatic tests whose verdict passed or likely passed ÷ tests selected. An unknown pass rate adds the neutral midpoint of this weight; that is a scoring rule, not a 50% pass rate.'
           },
           legacyFolded: 'The old “Stability” weight was merged as 60% error rate and 40% first-token latency; ranking is unchanged.',
           zeroTotal: 'Weights must add up to more than 0. Set at least one weight.'
         },
-        avoidNote: 'The integrity pass rate is counted per test: of the selected Candy, Fingerprint and ModelTrace tests, how many had a passed or likely passed verdict in their latest automatic run, divided by the number selected. Two selected with one passing is 50%; three selected with one passing is 33.3%. Each test counts once by its final verdict, whatever its sample count or retries. If any selected test has no valid verdict (insufficient evidence, request failure or expired), the rate is unknown and counts as neither passed nor degraded. “Avoid degradation” chooses from the best pass rate tier first and ranks within it by price and operational stability; if that tier has no available capacity, the next tier is tried. Account disabling, model support, capacity and continued-response account binding are still checked live.',
-        sharedNote: 'Account priority weight is the same under every policy. Load weight is adjustable only under “Custom balance”; other policies use system settings.'
+        avoidNote: 'The integrity pass rate is counted per test: of the selected Candy, Fingerprint and ModelTrace tests, how many had a passed or likely passed verdict in their latest automatic run, divided by the number selected. Two selected with one passing is 50%; three selected with one passing is 33.3%. Each test counts once by its final verdict, whatever its sample count or retries. If any selected test has no valid verdict (insufficient evidence, request failure or expired), the rate is unknown and counts as neither passed nor degraded. “Avoid degradation” chooses from the best pass rate tier first and ranks within it by price and operational stability; if that tier has no available capacity, the next tier is tried. Accounts with an unknown pass rate are tried after every assessed account. Account disabling, model support, capacity and continued-response account binding are still checked live.',
+        sharedNote: 'With any policy other than “System default” in force, the published order replaces account priority, the system scheduling weights and movable session affinity. Only a required binding, such as continuing a previous response, still keeps a request on its account. Load weight is adjustable only under “Custom balance”; the other policies use a fixed weight.'
       },
       quality: {
         title: 'Ranking evaluation interval',
         hint: 'How often the account ranking is rebuilt from stored evidence. Separate from test frequency: it sends no new test requests and runs no new integrity tests.',
         interval: 'Interval',
-        refreshNow: 'Refresh now',
-        refreshing: 'Refreshing…',
-        refreshDone: 'Rebuilt the ranking from {count} routes with stored evidence.',
-        refreshFailed: 'Refresh failed. Scheduling keeps using the previous ranking.',
-        lastRefresh: 'Last refreshed {time}',
+        lastRefresh: 'Last evaluated {time}',
+        lastRefreshTrigger: 'Last evaluated {time} ({trigger})',
         nextRefresh: 'Next {time}',
-        neverRefreshed: 'Not refreshed yet',
-        routes: '{count} routes with evidence in this refresh',
-        publishedRoutes: '{count} routes published to the ranking cache',
-        effectsOffRoutes: 'Evaluation effects are off, so nothing was published to the ranking cache. The {count} routes computed are shown for reference.',
-        pending: 'The new interval applies after saving; it still refreshes every {interval}. “Refresh now” uses the saved settings.',
+        neverRefreshed: 'Not evaluated yet',
+        pending: 'The new interval applies after saving; it still evaluates every {interval}. “Evaluate now” uses the saved settings.',
         effectsOff: 'Evaluation effects are off: the integrity pass rate does not affect ranking, and pass-rate weights in “Avoid degradation” and “Custom balance” are inactive.',
         liveChecks: 'Account disabling, model support, rate-limit cooldown, concurrency and continued-response account binding are always checked live, whatever the interval.'
       },
@@ -399,7 +393,7 @@ export default {
       gates: {
         title: 'Scheduling conditions',
         hint: 'Independent of the ranking policy. Accounts that fail any condition are excluded from this request.',
-        session: 'Continuing a previous response requires the original account; a regular session keeps its previous account unless that account is unavailable.',
+        session: 'Continuing a previous response requires the original account. Under “System default” a regular session keeps its previous account unless that account is unavailable; under any other policy it follows the published order.',
         model: 'The account supports the requested model, and its model mapping includes it.',
         status: 'The account is not paused and is not rate-limited or cooling down.',
         features: 'The account supports the features and connection type the request requires.',
@@ -505,21 +499,26 @@ export default {
       },
       decisions: {
         title: 'Recent scheduling decisions',
-        hint: 'Records how each request selected an account. Only the latest {limit} are kept and are cleared on restart.',
-        empty: 'No scheduling records. Once requests arrive, the selected account and reason are shown here.',
+        hint: 'How each real request chose an account. This instance keeps its latest {limit}, cleared on restart.',
+        empty: 'No request records on this instance.',
+        emptyInstance: 'Records are kept in this instance’s memory only, up to {limit}, and are cleared on restart. Requests handled by another instance do not appear here, so an empty list does not mean there was no traffic. Evaluation results are under Evaluations.',
         noMatch: 'No records match the filters.',
         filterModel: 'All models',
         onlyProblems: 'Only requests without a selected account',
         policyUsed: 'Policy: {policy}',
-        actualDispatch: 'Actual dispatch records. Each row is a real request that chose an account. An offline evaluation never adds a row here; its recommended order is shown on the ranking board above.',
+        actualDispatch: 'Each row is a real request choosing an account. Evaluations never add rows here; see Evaluations and the account ranking above.',
         selectedRank: 'Chosen at rank {rank} of the published order',
         snapshotAt: 'Order built {time}',
         ownerOverride: 'This request was bound to a specific account by ownership, session or previous-response rules. The evaluated order did not apply.',
+        overviewPrior: 'No candidate had evidence for this model, so the account ranking ordered them. Their pass rate for this model is still unknown.',
+        overviewPriorHint: 'Position in the account ranking, not a result for this model.',
+        overviewRank: 'Ranking {rank}',
         basis: {
           snapshot: 'Order: published evaluation',
           live_fallback: 'Order: same policy, computed at request time',
           legacy: 'Order: system scheduling weights',
-          owner: 'Order: account binding, not the evaluated order'
+          owner: 'Order: account binding, not the evaluated order',
+          overview_prior: 'Order: account ranking (no evidence for this model)'
         },
         chosen: 'Selected {account}',
         noneChosen: 'No account selected',
@@ -569,6 +568,11 @@ export default {
         quality_tier_selection: 'Chose from the best integrity pass rate tier first, then by price and operational stability within that tier.',
         no_selection: 'No account available; the request was not sent.',
         selection_error: 'Account selection failed.',
+        explicit_policy_rank: 'Took the highest-ranked account in the policy order that passed live admission.',
+        required_owner_override: 'The request had to stay on its owning account, so the policy order did not apply.',
+        selection_budget_exhausted: 'The admission check limit was reached before any ranked account could be confirmed.',
+        quality_unassessed_fallback: 'No account with a known pass rate could take the request, so one with an unknown pass rate was used.',
+        quality_weighted_selection: 'Selected by custom weights, including the integrity pass rate.',
         unknown: 'Other reason ({code}).'
       },
       exclusion: {
@@ -594,17 +598,34 @@ export default {
         quota_auto_pause: 'Quota nearly exhausted; paused automatically.',
         platform_quota: 'Platform quota limit.',
         account_nil: 'Account data missing.',
+        model_or_platform_incompatible: 'Account cannot serve this model on this platform.',
+        group_model_restricted: 'The group’s model allowlist does not include this model.',
+        oauth_only: 'The group accepts OAuth accounts only.',
+        group_inactive: 'The group is not active.',
+        account_inactive: 'Account is not active.',
+        account_disabled: 'Account scheduling is turned off.',
+        account_expired: 'Account has expired.',
+        overloaded: 'Account was overloaded upstream.',
+        rate_limited: 'Account is rate-limited.',
+        temporary_cooldown: 'Account is temporarily cooling down.',
+        quota_exceeded: 'Account quota is used up.',
+        concurrency_full_at_evaluation: 'Concurrency was full when the evaluation ran.',
+        model_runtime_cooldown: 'This model is cooling down on the account after recent errors.',
+        live_gate_changed: 'Skipped at request time: the account no longer passed a scheduling condition.',
+        database_admission_changed: 'Skipped at request time: the stored account state changed.',
+        compact_unsupported: 'Account does not support context compaction, which this request requires.',
         unknown: 'Other restriction ({code}).'
       },
       evaluation: {
         title: 'Scheduling evaluation',
         hint: 'Builds the account order the gateway schedules with, from the saved policy plus the latest price, request error, first-output latency, concurrency load and integrity evidence. It sends no test requests and uses no rate-limit slots, concurrency slots, session binding or customer balance.',
-        run: '立即评估',
+        run: 'Evaluate now',
         runHint: 'Evaluates with the saved policy. Unsaved edits on this page are kept and are not evaluated.',
         running: 'Evaluating…',
         runningHint: 'The server is rebuilding the order. Unsaved edits here are untouched.',
         done: 'Published {time}.',
         donePartial: 'Published {time} with partial coverage. Routes outside this evaluation fall back to the same policy at request time.',
+        doneReadFailed: 'Published {time}, but the new ranking could not be read: {reason}. Use Refresh in the account ranking to try again.',
         none: 'No evaluation has been published for this revision yet.',
         configuredOnly: 'Configuration saved. Evaluation has not been published for it yet.',
         superseded: 'Another configuration or a newer evaluation replaced this run. Reload, then evaluate again.',
@@ -614,13 +635,14 @@ export default {
         failedKept: 'The previous evaluation is still in force, so scheduling is unchanged.',
         savedButFailed: 'Configuration saved, but its evaluation failed: {reason}',
         savedButFailedHint: 'The saved policy is not in force yet. Evaluate again, or correct the configuration and save.',
+        savedAndEvaluated: 'Saved and evaluated with the new configuration.',
         dirtyNote: 'Evaluation always uses the saved policy, so unsaved edits are not included. Save first to evaluate them.',
         blocked: 'A configuration conflict is unresolved. Reload before evaluating.',
-        effectsOffTitle: 'Evaluation effects are off, so this order is not used for scheduling.',
+        effectsOffTitle: 'This ranking is not used for scheduling right now.',
         effectsOffBody: 'The configuration below is saved and valid. Turn on evaluation effects and save to make the gateway schedule in this order.',
         effects: {
           title: 'Evaluation effects',
-          hint: 'When on, the gateway schedules with the evaluated ranking and the saved policy. When off, it keeps the legacy order; the policy above is still stored and stays valid.',
+          hint: 'When on, the gateway picks accounts by the evaluated ranking and the saved policy. When off, it uses the system scheduling weights; the policy stays saved.',
           toggle: 'Use the evaluated ranking for scheduling',
           inactive: 'Saved but not in force',
           selectionEnabled: 'Turned on because you selected a policy. Save to apply it; turn it off and save to stop using the evaluated ranking.',
@@ -636,6 +658,141 @@ export default {
           no_targets: 'Not in force: no targets',
           error: 'Evaluation failed'
         },
+      },
+      board: {
+        title: 'Account ranking',
+        hint: 'One row per account across every group, ranked by the default policy from real evidence. Scores and ranks come from the server and are never recalculated in the browser.',
+        group: 'Group',
+        allGroups: 'All groups',
+        ungrouped: 'No group',
+        rankedBy: 'Ranked by “{policy}”',
+        evaluatedAt: 'Evaluated {time}',
+        filterNote: 'Ranks and scores are computed across all accounts. Filtering by group only hides other accounts; it does not change ranks.',
+        count: '{count} accounts',
+        countFiltered: '{count}{more} accounts in this group',
+        loading: 'Loading the account ranking…',
+        none: 'No evaluation yet. Click “Evaluate now”, or save the configuration; saving evaluates automatically.',
+        empty: 'This evaluation has no accounts to rank. Check that the groups contain active OpenAI accounts.',
+        emptyGroup: 'No account in this group was part of this evaluation.',
+        loadFailed: 'Could not load the account ranking: {reason}. The gateway keeps using the last published order.',
+        rowsKept: 'The rows below are from the last successful read of the same evaluation.',
+        rowsKeptPrevious: 'The rows below are from the previous evaluation; the new result could not be read yet.',
+        restarted: 'A newer evaluation was published, so the list was read again from the first page.',
+        restartFailed: 'The server no longer serves the evaluation this page belongs to. Click Refresh to read the list again.',
+        shown: '{shown} accounts shown',
+        loadMore: 'Load more accounts',
+        columns: {
+          rank: 'Rank',
+          account: 'Account',
+          score: 'Score',
+          qualityFirst: 'Quality first',
+          details: 'Details'
+        },
+        factors: {
+          price: 'Price',
+          error_rate: 'Errors',
+          ttft: 'First output',
+          load: 'Load',
+          quality: 'Pass rate'
+        },
+        qualityUnknown: 'Unknown',
+        operationalScore: 'Operational {score}',
+        modelsKnown: '{known} of {models} models known',
+        compositeOf: 'out of 100',
+        ineligible: 'Unavailable at evaluation',
+        moreGroups: '+{count}',
+        coverage: 'Evidence for {models} models, pass rate known for {known}',
+        coverageNone: 'No model evidence yet',
+        coverageDetail: 'Real evidence for {models} models: pass rate known for {known}, unknown for {unknown}. The account pass rate averages the known models equally; within a model, reasoning efforts are averaged first.',
+        coverageNoneDetail: 'This account has no real requests, valid scheduled tests or matched probes yet. Models that only appear in the catalog or a mapping do not count. Missing factors are scored at the labelled default.',
+        cells: 'Model and effort cells: pass rate known for {known}, unknown for {unknown}.',
+        worst: 'Lowest pass rate: {model}, {ratio}',
+        contributions: 'Score breakdown',
+        contribution: '{factor} +{value}',
+        ruleException: '{model} ({effort}) has a model rule, “{policy}”. Requests for it follow that rule, not this ranking.',
+        exclusionScope: {
+          account: 'Account: ',
+          route: 'Route: ',
+          live: 'Live: '
+        },
+        probe: 'Matched probe {model} at {time}',
+        probeLatency: 'Total round trip {ms} ms, not first-output latency.',
+        noModels: 'No model evidence counts toward this account.',
+        models: {
+          model: 'Model',
+          effort: 'Reasoning effort',
+          upstream: 'Upstream model',
+          policy: 'Policy',
+          defaultPolicy: 'Default policy'
+        },
+        showDetails: 'Show details',
+        hideDetails: 'Hide details',
+        notWeighted: 'Not weighted',
+        points: '{score} pts',
+        raw: {
+          none: 'No data',
+          unknown: 'Unknown',
+          perModel: 'Per model'
+        },
+        source: {
+          measured: 'Measured',
+          probe: 'Probe',
+          default: 'Default',
+          mixed: 'Mixed',
+          neutral: 'Neutral',
+          unknown: 'Unknown',
+          other: 'Other'
+        },
+        sourceHint: {
+          measured: 'From real requests, valid scheduled tests, or the account’s own price and load.',
+          probe: 'From a probe matched to this account, model and reasoning effort. Used only to estimate the error rate.',
+          default: 'No real data, so the labelled default score is used. This is not a measurement.',
+          mixed: 'Some models have measured or probe data and the rest use the labelled default. Open the details to see each model.',
+          neutral: 'Pass rate unknown, so it is scored at the neutral midpoint. This is not a 50% pass rate.',
+          unknown: 'No usable evidence.',
+          other: 'The server reported an unlisted source. It is not treated as a measurement.'
+        },
+        ordering: {
+          score_desc: 'Ordered by score, highest first; ties by account ID.',
+          quality_then_score: 'Ordered by pass rate, highest first, with unknown after every known rate. Equal pass rates are ordered by the operational score (price, errors, first output and load), then by account ID.',
+          legacy: 'Ordered by the system scheduling weights, as before this feature was enabled.'
+        },
+        inactive: {
+          inactive_effects_off: 'Evaluation effects are off, so this ranking is for reference. Turn on “Use the evaluated ranking for scheduling” above and save to apply it.',
+          inactive_legacy_policy: 'The default policy is “System default”, so the gateway uses the system scheduling weights. This ranking is for reference.',
+          no_targets: 'There is nothing to rank, so this ranking is not used for scheduling.'
+        }
+      },
+      records: {
+        title: 'Records',
+        tabs: {
+          evaluations: 'Evaluations',
+          requests: 'Request routing'
+        },
+        evaluationsHint: 'Completed evaluations the server keeps: the current one and the one before. Every manual, scheduled or save-triggered evaluation creates a record, whether or not any real request has arrived.',
+        inProgress: 'Evaluating…',
+        failed: 'The latest evaluation failed: {reason}',
+        failedNoPrevious: 'No evaluation has completed yet, so the gateway uses the system scheduling weights.',
+        empty: 'No evaluation records yet. After “Evaluate now” or a save, the record appears here immediately.',
+        current: 'Current',
+        previous: 'Previous',
+        trigger: {
+          startup: 'Service start',
+          policy_saved: 'Saved configuration',
+          manual: 'Manual',
+          interval: 'Scheduled',
+          catalog_change: 'Catalog change',
+          evidence_expiry: 'Evidence expiry'
+        },
+        accounts: 'Accounts',
+        revision: 'Revision',
+        inputsUntil: 'Inputs up to',
+        coverage: 'Coverage',
+        applied: 'Used for scheduling',
+        appliedYes: 'Yes',
+        appliedNo: 'No, effects were off',
+        next: 'Next evaluation {time}',
+        requestsFailed: 'Could not load request records: {reason}'
       },
       rank: {
         title: 'Account ranking',
@@ -771,6 +928,7 @@ export default {
           emptyFiltered: 'No account in this scope matches the current description.',
           loadMore: 'Load more accounts',
           loadingMore: 'Loading…',
+          qualityNeutral: 'Scored at the neutral midpoint: +{value} of 100. Not a measured pass rate.',
           shown: 'Showing {shown} of {total}',
           showAll: 'Show every account',
           unknown: 'Unknown',
@@ -801,7 +959,13 @@ export default {
           no_evidence: 'No evidence was collected for this factor.',
           not_selected: 'This account was not selected for the relevant tests.',
           selection_mismatch: 'Evidence exists for a different model or reasoning effort.',
-          no_candidates: 'This scope has no candidates, so nothing was measured.'
+          no_candidates: 'This scope has no candidates, so nothing was measured.',
+          price_unavailable: 'No billing multiplier is available for this account.',
+          no_request_samples: 'No real request results in the window, so no error rate is known.',
+          no_first_output_samples: 'No first-output latency sample is available.',
+          load_unavailable: 'No concurrency reading was available when this evaluation ran.',
+          no_selected_tests: 'No automatic integrity test is selected for this route.',
+          selected_test_evidence_unavailable: 'Some selected tests have no valid verdict, so the pass rate is unknown.'
         },
         ordering: {
           score_desc: 'Ordered by total score, highest first; ties by account ID.',
@@ -823,7 +987,20 @@ export default {
           route_mapping_changed: 'The account-to-model route mapping changed after publication.',
           unranked_candidate: 'An account that can serve this request is missing from the published order.',
           evidence_expired: 'The evidence behind this build expired.',
-          snapshot_superseded: 'A newer configuration replaced the evaluation this order came from.'
+          snapshot_superseded: 'A newer configuration replaced the evaluation this order came from.',
+          snapshot_missing: 'No published order was available when this request arrived.',
+          config_revision_changed: 'The configuration changed after the order was published.',
+          dimension_not_cached: 'This group, model and effort combination is not in the published order.',
+          dimension_capacity_fallback: 'This scope was published without a precomputed order, so it is ranked at request time.',
+          snapshot_expired: 'The published order had passed its validity window.',
+          selection_model_changed: 'The upstream model for this request no longer matches the published order.',
+          account_mapping_changed: 'An account’s model mapping changed after the order was published.',
+          snapshot_bytes_limit: 'The published order reached its size limit, so this scope was left out.',
+          snapshot_capacity: 'The published order reached its scope limit, so this scope was left out.',
+          request_metrics_updated: 'New request results arrived for this model, so the order was computed again from them.',
+          quality_evidence_updated: 'New integrity test results arrived for this model, so the order was computed again.',
+          quality_evidence_unavailable: 'Integrity results could not be read for this request, so the order was computed live.',
+          monitoring_unavailable: 'Probe results could not be read for this request, so the order was computed live.'
         },
         source: {
           title: 'Where this scope came from',
@@ -844,7 +1021,12 @@ export default {
         higher_rate_candidate: 'Higher multiplier than the previous account.',
         below_migration_rate: 'Lower multiplier than the previous account; not considered for this switch.',
         quality_tier_top_k_candidate: 'In the best integrity pass rate tier; a candidate by score.',
-        quality_lower_tier_fallback: 'Higher pass rate tiers had no available capacity, so this tier was used.'
+        quality_lower_tier_fallback: 'Higher pass rate tiers had no available capacity, so this tier was used.',
+        explicit_policy_rank: 'Placed by the published policy order.',
+        live_admission_skipped: 'Skipped at request time; the next account in the order was tried.',
+        required_owner_override: 'The account the request had to stay on.',
+        quality_unassessed_fallback: 'Pass rate unknown, so tried after every assessed account.',
+        overview_prior: 'Placed by the account ranking; no evidence for this model yet.'
       }
     }
   }

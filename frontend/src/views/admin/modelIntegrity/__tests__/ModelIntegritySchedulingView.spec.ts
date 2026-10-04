@@ -12,6 +12,7 @@ const api = vi.hoisted(() => ({
   evaluateOpenAIEvalRanking: vi.fn(),
   getOpenAIEvalRankings: vi.fn(),
   getOpenAIEvalRankingAccounts: vi.fn(),
+  getOpenAIEvalAccountOverview: vi.fn(),
   listOpenAIEvalRuns: vi.fn(),
   listOpenAIEvalAudit: vi.fn(),
   list: vi.fn(),
@@ -109,6 +110,14 @@ function mountView() {
       stubs: { AppLayout: { template: '<div><slot /></div>' }, RouterLink: RouterLinkStub, Teleport: true }
     }
   })
+}
+
+/** Request records live on their own tab, next to the evaluation records. */
+async function mountOnRequests() {
+  const wrapper = mountView()
+  await flushPromises()
+  await wrapper.get('[data-testid="records-tab-requests"]').trigger('click')
+  return wrapper
 }
 
 beforeEach(() => {
@@ -409,8 +418,7 @@ describe('ModelIntegritySchedulingView', () => {
   })
 
   it('explains the latest decision and each candidate in plain words', async () => {
-    const wrapper = mountView()
-    await flushPromises()
+    const wrapper = await mountOnRequests()
 
     const row = wrapper.get('[data-testid="decision-row"]')
     expect(row.text()).toContain('选中 oauth-a #11')
@@ -434,8 +442,7 @@ describe('ModelIntegritySchedulingView', () => {
       { account_id: 13, eligible: true, selected: false, in_top_k: true, score: 0.4 }
     ]
     api.listSchedulerDecisions.mockResolvedValue({ limit: 50, items: [trace] })
-    const wrapper = mountView()
-    await flushPromises()
+    const wrapper = await mountOnRequests()
     await wrapper.get('[data-testid="decision-row"] .ledger-toggle').trigger('click')
     expect(wrapper.text()).toContain('降智通过率')
     const cells = wrapper.findAll('[data-testid="candidate-quality"]')
@@ -460,8 +467,7 @@ describe('ModelIntegritySchedulingView', () => {
       { account_id: 14, eligible: true, selected: false, in_top_k: false, score: 0.2, quality_state: 'unassessed', evaluated_count: 2, pass_count: 2, suspected_pass_count: 0, quality_ratio: 1 }
     ]
     api.listSchedulerDecisions.mockResolvedValue({ limit: 50, items: [trace] })
-    const wrapper = mountView()
-    await flushPromises()
+    const wrapper = await mountOnRequests()
     await wrapper.get('[data-testid="decision-row"] .ledger-toggle').trigger('click')
     const cells = wrapper.findAll('[data-testid="candidate-quality"]')
     expect(cells[0].text()).toContain('50.0%')
@@ -476,8 +482,7 @@ describe('ModelIntegritySchedulingView', () => {
     const decisions = await api.listSchedulerDecisions()
     const trace = { ...decisions.items[0], scheduling_policy: 'avoid_degradation' }
     api.listSchedulerDecisions.mockResolvedValue({ limit: 50, items: [trace] })
-    const wrapper = mountView()
-    await flushPromises()
+    const wrapper = await mountOnRequests()
     await wrapper.get('[data-testid="decision-row"] .ledger-toggle').trigger('click')
     const cells = wrapper.findAll('[data-testid="candidate-quality"]')
     expect(cells.map(cell => cell.text())).toEqual(['未知', '—'])
@@ -575,36 +580,38 @@ describe('ModelIntegritySchedulingView integrity pass rate controls', () => {
     expect((minutes.element as HTMLInputElement).value).toBe('5')
     await minutes.setValue('95')
     await minutes.trigger('change')
-    expect(wrapper.get('[data-testid="quality-interval-pending"]').text()).toContain('当前仍按每 6 小时刷新')
+    expect(wrapper.get('[data-testid="quality-interval-pending"]').text()).toContain('当前仍按每 6 小时评估')
 
     await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
     await flushPromises()
     expect((api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig).quality_refresh_interval_seconds).toBe(95 * 60)
   })
 
-  it('refreshes the ranking now, shows the result and keeps unsaved edits unsaved', async () => {
+  it('evaluates from the interval row, shows the last and next time, and keeps unsaved edits unsaved', async () => {
     api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ quality_refreshed_at: null }))
+    // The summary the default mock resolves with, reused as the finished run.
+    const base = await api.evaluateOpenAIEvalRanking()
+    api.evaluateOpenAIEvalRanking.mockClear()
     let finish!: (value: unknown) => void
-    api.refreshOpenAIEvalQuality.mockImplementation(() => new Promise(resolve => { finish = resolve }))
+    api.evaluateOpenAIEvalRanking.mockImplementation(() => new Promise(resolve => { finish = resolve }))
     const wrapper = mountView()
     await flushPromises()
-    expect(wrapper.get('[data-testid="quality-refresh-status"]').text()).toContain('尚未刷新')
+    expect(wrapper.get('[data-testid="quality-refresh-status"]').text()).toContain('尚未评估')
 
     await wrapper.get('[data-testid="quality-interval"]').setValue('600')
     expect(wrapper.text()).toContain('有未保存的更改')
-    const button = wrapper.get('[data-testid="quality-refresh-now"]')
+    const button = wrapper.get('[data-testid="evaluate-now"]')
     await button.trigger('click')
     expect(button.attributes('disabled')).toBeDefined()
-    expect(button.text()).toContain('正在刷新')
+    expect(button.text()).toContain('正在评估')
     await button.trigger('click')
-    expect(api.refreshOpenAIEvalQuality).toHaveBeenCalledTimes(1)
+    expect(api.evaluateOpenAIEvalRanking).toHaveBeenCalledTimes(1)
 
-    finish({ refreshed_at: '2026-10-03T08:00:00Z', next_refresh_at: '2026-10-03T09:00:00Z', route_count: 7 })
+    finish({ ...base, trigger: 'manual' })
     await flushPromises()
-    expect(store.showSuccess).toHaveBeenCalledWith('已按 7 条带有证据的路由重建排序。')
-    expect(wrapper.get('[data-testid="quality-refresh-routes"]').text()).toBe('本次刷新 7 条带有证据的路由')
-    expect(wrapper.get('[data-testid="quality-refresh-status"]').text()).toContain('上次刷新')
-    expect(wrapper.get('[data-testid="quality-refresh-status"]').text()).toContain('下次')
+    expect(wrapper.get('[data-testid="last-evaluated"]').text()).toContain('上次评估')
+    expect(wrapper.get('[data-testid="last-evaluated"]').text()).toContain('手动评估')
+    expect(wrapper.get('[data-testid="next-evaluation"]').text()).toContain('下次')
     expect(button.attributes('disabled')).toBeUndefined()
     // The unsaved interval is untouched and still pending; nothing was saved.
     expect((wrapper.get('[data-testid="quality-interval"]').element as HTMLSelectElement).value).toBe('600')
@@ -613,18 +620,18 @@ describe('ModelIntegritySchedulingView integrity pass rate controls', () => {
     expect(api.saveOpenAIEvalConfig).not.toHaveBeenCalled()
   })
 
-  it('reports a failed refresh with the server message and keeps the last refresh time', async () => {
+  it('reports a failed evaluation with the server message and keeps the last evaluation time', async () => {
     api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ quality_refreshed_at: '2026-10-03T07:00:00Z' }))
-    api.refreshOpenAIEvalQuality.mockRejectedValue({ message: 'quality refresh is already running' })
+    api.evaluateOpenAIEvalRanking.mockRejectedValue({ error: 'evaluation is already running' })
     const wrapper = mountView()
     await flushPromises()
     const before = wrapper.get('[data-testid="quality-refresh-status"]').text()
-    await wrapper.get('[data-testid="quality-refresh-now"]').trigger('click')
+    await wrapper.get('[data-testid="evaluate-now"]').trigger('click')
     await flushPromises()
-    expect(wrapper.get('[data-testid="quality-refresh-error"]').text()).toBe('quality refresh is already running')
-    expect(store.showError).toHaveBeenCalledWith('quality refresh is already running')
+    expect(wrapper.get('[data-testid="evaluate-message"]').text()).toContain('evaluation is already running')
+    expect(wrapper.get('[data-testid="evaluate-kept"]').exists()).toBe(true)
     expect(wrapper.get('[data-testid="quality-refresh-status"]').text()).toBe(before)
-    expect(wrapper.get('[data-testid="quality-refresh-now"]').attributes('disabled')).toBeUndefined()
+    expect(wrapper.get('[data-testid="evaluate-now"]').attributes('disabled')).toBeUndefined()
     expect(wrapper.text()).not.toContain('有未保存的更改')
   })
 
@@ -646,8 +653,7 @@ describe('ModelIntegritySchedulingView integrity pass rate controls', () => {
     const trace = { ...decisions.items[0], scheduling_policy: 'avoid_degradation' }
     trace.candidates = [{ ...trace.candidates[0], error_rate: 0.4, ttft_ms: 3000, evaluated_count: 3, pass_count: 3, suspected_pass_count: 0, quality_ratio: 1, quality_contribution: 0 }]
     api.listSchedulerDecisions.mockResolvedValue({ limit: 50, items: [trace] })
-    const wrapper = mountView()
-    await flushPromises()
+    const wrapper = await mountOnRequests()
     await wrapper.get('[data-testid="decision-row"] .ledger-toggle').trigger('click')
     const row = wrapper.get('[data-testid="candidate-row"]')
     expect(row.text()).toContain('40.0%')

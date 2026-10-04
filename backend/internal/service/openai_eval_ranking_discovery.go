@@ -365,9 +365,11 @@ func (r *OpenAIEvalRankingService) build(ctx context.Context, cfg *OpenAIEvalCon
 		r.gateway.persistentOpenAIAccountScheduler()
 		stats = r.gateway.openaiAccountStats
 	}
+	gen.metricVersions = stats.rankingVersions()
+	buildAccountOverview(gen, cfg, scopes, all, loads, stats, latest, monitoring, now, oauthRate)
+	gen.priorComplete = coverage.DiscoveryComplete && len(coverage.Reasons) == 0
 	// Reserve room for group/status metadata; account rows dominate the budget.
 	bytes, discovered := 1<<20, 0
-	unique := make(map[int64]bool)
 	qualityRoutes := make(map[string]bool)
 	for _, scope := range scopes {
 		group := OpenAIEvalRankingGroup{GroupName: scope.group.Name, MemberCount: len(scope.accounts), Status: "evaluated"}
@@ -423,7 +425,13 @@ func (r *OpenAIEvalRankingService) build(ctx context.Context, cfg *OpenAIEvalCon
 				if len(scope.accounts) == 0 {
 					dim.CoverageStatus = "no_candidates"
 				}
-				if gen.summary.DimensionCount >= openAIRankingDimensionLimit || gen.summary.AccountRowCount+len(scope.accounts) > openAIRankingRowLimit || bytes >= openAIRankingByteLimit {
+				if len(variants) > 0 && dim.SelectionModel == nil {
+					// Endpoint-specific models cannot share one cached operational
+					// score. Dispatch scores the actual selected model instead.
+					dim.CoverageStatus = "live_fallback"
+					dim.FallbackReason = rankingPtr("selection_model_variants")
+					dim.ValidUntil = nil
+				} else if gen.summary.DimensionCount >= openAIRankingDimensionLimit || gen.summary.AccountRowCount+len(scope.accounts) > openAIRankingRowLimit || bytes >= openAIRankingByteLimit {
 					dim.CoverageStatus = "live_fallback"
 					dim.FallbackReason = rankingPtr("snapshot_capacity")
 					dim.ValidUntil = nil
@@ -432,12 +440,12 @@ func (r *OpenAIEvalRankingService) build(ctx context.Context, cfg *OpenAIEvalCon
 					for _, account := range scope.accounts {
 						f := stats.rankingFactors(account.ID, model, effort, now)
 						f.Quality = qualityFromLatestRuns(cfg, account.ID, model, effort, latest, now)
-						applyRankingMonitor(&f, monitoring, account.ID, model, effort, now)
 						load := loads[account.ID]
 						if load != nil {
 							f.Load = OpenAIEvalRankingLoad{OpenAIEvalFactorMeta: rankingKnown(1-clamp01(float64(load.LoadRate)/100), now), LoadRate: rankingPtr(load.LoadRate), Waiting: rankingPtr(load.WaitingCount), CurrentConcurrency: rankingPtr(load.CurrentConcurrency)}
 						}
 						compatible, upstream, exclusions := rankingOfflineExclusions(account, scope, model, variants, load, now)
+						applyRankingMonitorModels(&f, monitoring, account.ID, upstream, effort, now)
 						exclusions = append(exclusions, r.offlineRuntimeExclusions(account, variants, now)...)
 						inputs = append(inputs, openAIEvalRankingInput{account, f, exclusions, compatible, upstream})
 					}
@@ -467,7 +475,6 @@ func (r *OpenAIEvalRankingService) build(ctx context.Context, cfg *OpenAIEvalCon
 						gen.summary.DimensionCount++
 						gen.summary.AccountRowCount += len(dim.Accounts)
 						for _, a := range dim.Accounts {
-							unique[a.AccountID] = true
 							q := a.Factors.Quality
 							if q.Known {
 								qualityRoutes[(openAIEvalQualityRoute{AccountID: a.AccountID, Model: model, Effort: effort}).key()] = true
@@ -518,10 +525,11 @@ func (r *OpenAIEvalRankingService) build(ctx context.Context, cfg *OpenAIEvalCon
 	if !coverage.DiscoveryComplete {
 		coverage.Reasons = append(coverage.Reasons, "discovery_incomplete")
 	}
-	gen.summary.AccountCount = len(unique)
+	gen.summary.AccountCount = len(gen.overview)
 	gen.summary.QualityRouteCount = len(qualityRoutes)
 	gen.summary.Coverage = coverage
 	gen.summary.Truncated = discovered > gen.summary.DimensionCount || !coverage.DiscoveryComplete
+	gen.priorComplete = gen.priorComplete && !gen.summary.Truncated && !coverage.WildcardRoutesPresent
 	gen.summary.NextEvaluationAt = gen.deadline.UTC()
 	return gen, nil
 }

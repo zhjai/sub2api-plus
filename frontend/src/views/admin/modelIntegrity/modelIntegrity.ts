@@ -7,15 +7,18 @@ import type {
   OpenAIEvalConfig,
   OpenAIEvalEffectiveStatus,
   OpenAIEvalModelCatalog,
+  OpenAIEvalOverviewModel,
   OpenAIEvalPolicyWeights,
-  OpenAIEvalRankedAccount,
+  OpenAIEvalRankingFactorKey,
   OpenAIEvalRankingFactors,
   OpenAIEvalRankingWeights,
   OpenAIEvalRouteConfig,
   OpenAIEvalRun,
   OpenAIEvalSampleRecord,
   OpenAIEvalSchedule,
-  OpenAIEvalSchedulingPolicy
+  OpenAIEvalSchedulingPolicy,
+  OpenAIEvalSchedulingPolicyRule,
+  SchedulerDecisionCandidate
 } from '@/api/admin/accounts'
 import type { Account } from '@/types'
 
@@ -573,7 +576,9 @@ export type PolicyFactor = 'quality' | 'price' | 'errors' | 'speed'
  * lifts error ≥2.5, ttft ≥1.5 and ignores the pass rate; avoid_degradation
  * first keeps only the best known pass-rate tier, then ranks it with error
  * ≥2.5, ttft ≥1.25 and cost scaled by 0.25. Custom balance weighs the pass
- * rate as one factor among the others. Load and priority are untouched.
+ * rate as one factor among the others. These are display levels only; once a
+ * ranking policy is in force the published order (PRESET_WEIGHTS below)
+ * replaces account priority, the system weights and movable session affinity.
  */
 export const POLICY_EMPHASIS: Record<string, Record<PolicyFactor, number>> = {
   '': { quality: 0, price: 1, errors: 2, speed: 2 },
@@ -609,7 +614,13 @@ const KNOWN_EXCLUSIONS = new Set([
   'model_not_supported', 'account_model_not_owned', 'capability_mismatch', 'channel_upstream_restricted',
   'exec_capability_cooldown', 'shadow_parent_unhealthy', 'evaluation_hard_failure', 'proxy_stream_quarantined',
   'compact_support_unknown', 'concurrency_full', 'conn_queue_full', 'model_rate_limited', 'upstream_rate_limited',
-  'account_nil'
+  'account_nil',
+  // Ranking evaluation (openai_eval_ranking_discovery.go / _availability.go).
+  'model_or_platform_incompatible', 'group_model_restricted', 'oauth_only', 'group_inactive', 'account_inactive',
+  'account_disabled', 'account_expired', 'overloaded', 'rate_limited', 'temporary_cooldown', 'quota_exceeded',
+  'concurrency_full_at_evaluation', 'model_runtime_cooldown',
+  // Ranked dispatch live admission (recordOpenAIRankedSkip).
+  'live_gate_changed', 'database_admission_changed', 'compact_unsupported'
 ])
 
 /** Maps a backend exclusion code to an i18n key suffix under modelIntegrity.exclusion. */
@@ -624,7 +635,10 @@ export function exclusionKey(code: string | undefined): string {
 const KNOWN_DECISIONS = new Set([
   'load_balance_selection', 'session_sticky', 'previous_response_sticky', 'guardian_parent_sticky', 'sticky_escape',
   'rate_ladder_same_rate', 'rate_ladder_upgrade', 'rate_ladder_lower_rate_fallback', 'quality_tier_selection',
-  'no_selection', 'selection_error'
+  'no_selection', 'selection_error',
+  // Ranked dispatch and quality-aware selection (openai_account_scheduler*.go).
+  'explicit_policy_rank', 'required_owner_override', 'selection_budget_exhausted', 'quality_unassessed_fallback',
+  'quality_weighted_selection'
 ])
 
 export function decisionKey(code: string | undefined): string {
@@ -633,7 +647,10 @@ export function decisionKey(code: string | undefined): string {
 
 const KNOWN_CANDIDATE_REASONS = new Set([
   'score_top_k_candidate', 'ranked_below_top_k', 'same_rate_candidate', 'higher_rate_candidate', 'below_migration_rate',
-  'quality_tier_top_k_candidate', 'quality_lower_tier_fallback'
+  'quality_tier_top_k_candidate', 'quality_lower_tier_fallback',
+  'explicit_policy_rank', 'live_admission_skipped', 'required_owner_override', 'quality_unassessed_fallback',
+  // A fully cold pool ordered by the account overview (rc4).
+  'overview_prior'
 ])
 
 export function candidateReasonKey(code: string | undefined): string | null {
@@ -754,7 +771,10 @@ export function isInactiveStatus(status: OpenAIEvalEffectiveStatus | null | unde
 const KNOWN_UNKNOWN_REASONS = new Set([
   'no_price_evidence', 'no_error_samples', 'no_ttft_samples', 'no_load_reading',
   'quality_unknown', 'quality_insufficient', 'quality_stale', 'quality_expired',
-  'no_samples', 'no_evidence', 'not_selected', 'selection_mismatch', 'no_candidates'
+  'no_samples', 'no_evidence', 'not_selected', 'selection_mismatch', 'no_candidates',
+  // Codes the scorer writes today (openai_eval_ranking_score.go).
+  'price_unavailable', 'no_request_samples', 'no_first_output_samples', 'load_unavailable', 'no_selected_tests',
+  'selected_test_evidence_unavailable'
 ])
 
 /** Maps a backend unknown_reason to an i18n key under modelIntegrity.scheduling.rank.unknown. */
@@ -787,7 +807,12 @@ export function coverageStatusKey(status: string | undefined): string {
 
 const KNOWN_FALLBACK_REASONS = new Set([
   'no_snapshot', 'dimension_not_covered', 'quality_expired', 'route_mapping_changed',
-  'unranked_candidate', 'evidence_expired', 'snapshot_superseded'
+  'unranked_candidate', 'evidence_expired', 'snapshot_superseded',
+  // Dispatch-time fallbacks (explicitRanking) and publication limits.
+  'snapshot_missing', 'config_revision_changed', 'dimension_not_cached', 'dimension_capacity_fallback',
+  'snapshot_expired', 'selection_model_changed', 'account_mapping_changed', 'snapshot_bytes_limit', 'snapshot_capacity',
+  // Exact scoring after fresh evidence or an uncertain read (rc4).
+  'request_metrics_updated', 'quality_evidence_updated', 'quality_evidence_unavailable', 'monitoring_unavailable'
 ])
 
 export function fallbackReasonKey(reason: string | null | undefined): string {
@@ -840,25 +865,242 @@ export function isStaleEvaluation(summaryRevision: number | null | undefined, cu
   return summaryRevision !== currentRevision
 }
 
-/**
- * True when the two snapshots come from the same evaluation generation, which
- * is the only case where a page of accounts may be appended to the list
- * already on screen. A cursor from a reclaimed generation must restart the
- * list instead of splicing two builds together.
- */
-export function canAppendPage(
-  current: { evaluation_id: string; group_id: number | null; requested_model: string; reasoning_effort: string } | null,
-  next: { evaluation_id: string; group_id: number | null; requested_model: string; reasoning_effort: string }
-): boolean {
-  if (!current) return false
-  return current.evaluation_id === next.evaluation_id &&
-    current.group_id === next.group_id &&
-    current.requested_model === next.requested_model &&
-    current.reasoning_effort === next.reasoning_effort
-}
-
 /** Deduplicates ranked rows by account so a boundary row never appears twice. */
-export function mergeRankedAccounts(existing: OpenAIEvalRankedAccount[], incoming: OpenAIEvalRankedAccount[]): OpenAIEvalRankedAccount[] {
+export function mergeRankedAccounts<T extends { account_id: number }>(existing: T[], incoming: T[]): T[] {
   const seen = new Set(existing.map(item => item.account_id))
   return [...existing, ...incoming.filter(item => !seen.has(item.account_id))]
+}
+
+// ---------------------------------------------------------------------------
+// Account overview (rc4)
+//
+// One row per unique account. The only filter is the group, and it hides rows
+// without changing a score or a rank. Pages continue one generation and one
+// group filter; anything else restarts the list.
+// ---------------------------------------------------------------------------
+
+/** Accounts per page; the server default is 100 and its maximum 500. */
+export const OVERVIEW_PAGE_SIZE = 100
+
+/** The generation and group filter a list on screen belongs to. */
+export interface OverviewBinding {
+  evaluationId: string
+  /** null for all groups. */
+  groupId: number | null
+}
+
+export function sameOverviewBinding(a: OverviewBinding | null, b: OverviewBinding | null): boolean {
+  return Boolean(a && b) && a!.evaluationId === b!.evaluationId && a!.groupId === b!.groupId
+}
+
+/** How a leaderboard read ended, so a caller never reports a failed read as updated. */
+export type RankingReadOutcome = { ok: true; evaluationId: string } | { ok: false; message: string }
+
+/**
+ * True when the order puts the pass rate first. The main score cell then shows
+ * the pass rate above the operational score, never the score alone.
+ */
+export function isQualityFirst(ordering: string | null | undefined, policy: OpenAIEvalSchedulingPolicy | null | undefined): boolean {
+  return ordering === 'quality_then_score' || (!ordering && policy === 'avoid_degradation')
+}
+
+export type FactorSourceKind = 'measured' | 'probe' | 'default' | 'mixed' | 'neutral' | 'unknown' | 'other'
+
+const MEASURED_SOURCES = new Set([
+  'measured', 'actual', 'real', 'request', 'requests', 'request_metrics', 'real_requests', 'runtime',
+  'scheduled_tests', 'scheduled_quality', 'evaluation', 'quality_evidence', 'load_snapshot', 'account',
+  'account_rate', 'oauth_scheduling_rate', 'upstream_reported_rate',
+  'request_ewma_account_model_effort', 'request_ttft_account_model_effort', 'macro_evidence'
+])
+const PROBE_SOURCES = new Set(['probe', 'v1_matched_probe', 'matched_probe', 'probe_estimate'])
+const DEFAULT_SOURCES = new Set(['default', 'labeled_default', 'optimistic_default'])
+const NEUTRAL_SOURCES = new Set(['neutral', 'legacy_neutral', 'neutral_default'])
+const UNKNOWN_SOURCES = new Set(['unknown', 'missing', 'none'])
+
+/** Groups a server source code; an unrecognised code is never promoted to "measured". */
+export function sourceKind(source: string | null | undefined): FactorSourceKind | null {
+  if (!source) return null
+  const code = source.trim().toLowerCase()
+  if (MEASURED_SOURCES.has(code)) return 'measured'
+  if (PROBE_SOURCES.has(code)) return 'probe'
+  if (DEFAULT_SOURCES.has(code)) return 'default'
+  if (NEUTRAL_SOURCES.has(code)) return 'neutral'
+  if (UNKNOWN_SOURCES.has(code)) return 'unknown'
+  return 'other'
+}
+
+/**
+ * Where a factor value came from, from what the server reports: the labelled
+ * default flag, then the factor's own source code, then whether it is known.
+ * An unassessed pass rate that still contributed points is the neutral rule.
+ * A default is only ever labelled when the server says one was applied, and
+ * an unrecognised source is never promoted to "measured".
+ */
+export function factorSourceKind(
+  factor: OpenAIEvalRankingFactorKey,
+  factors: OpenAIEvalRankingFactors,
+  contributions?: Pick<OpenAIEvalRankingWeights, 'quality'> | null
+): FactorSourceKind {
+  if (factor === 'quality') {
+    if (isQualityAssessed(factors.quality.state) && factors.quality.ratio != null) return 'measured'
+    return (contributions?.quality ?? 0) > 0 ? 'neutral' : 'unknown'
+  }
+  const meta = factors[factor]
+  if (meta.default_applied) return meta.known ? 'mixed' : 'default'
+  const own = factor === 'price' ? factors.price.source : factor === 'error_rate' ? factors.error_rate.source : null
+  const kind = sourceKind(own)
+  if (kind === 'default' || kind === 'probe' || kind === 'unknown') return kind
+  if (!meta.known) return 'unknown'
+  return kind === 'other' ? 'other' : 'measured'
+}
+
+/**
+ * The account-level kind, refined by the per-model cells it averages. The
+ * account error rate is a macro over model cells, so it is "probe" only when
+ * every cell was a probe and "mixed" when probes and real requests were mixed.
+ */
+export function accountFactorSourceKind(
+  factor: OpenAIEvalRankingFactorKey,
+  factors: OpenAIEvalRankingFactors,
+  models: Pick<OpenAIEvalOverviewModel, 'factors'>[],
+  contributions?: Pick<OpenAIEvalRankingWeights, 'quality'> | null
+): FactorSourceKind {
+  const own = factorSourceKind(factor, factors, contributions)
+  if (factor !== 'error_rate' && factor !== 'ttft') return own
+  if (own !== 'measured' || !models.length) return own
+  const kinds = new Set(models.map(model => factorSourceKind(factor, model.factors)))
+  if (kinds.size === 1) return [...kinds][0]
+  return 'mixed'
+}
+
+/** The raw reading behind a factor, or null. A missing reading is never 0. */
+export function factorRawValue(factor: OpenAIEvalRankingFactorKey, factors: OpenAIEvalRankingFactors): number | null {
+  switch (factor) {
+    case 'price':
+      return factors.price.rate_multiplier ?? null
+    case 'error_rate':
+      return factors.error_rate.value ?? null
+    case 'ttft':
+      return factors.ttft.ms ?? null
+    case 'load':
+      return factors.load.load_rate ?? null
+    case 'quality':
+      return assessedQualityRatio(factors)
+  }
+}
+
+/**
+ * Model rules that override the default policy for a model this account has
+ * evidence for. They stay authoritative at request time, so each one is shown
+ * as an exception to the overview order.
+ */
+export function ruleExceptionsFor(
+  rules: OpenAIEvalSchedulingPolicyRule[],
+  models: Pick<OpenAIEvalOverviewModel, 'requested_model' | 'reasoning_effort'>[],
+  defaultPolicy: OpenAIEvalSchedulingPolicy
+): OpenAIEvalSchedulingPolicyRule[] {
+  return rules.filter(rule => {
+    if (!rule.requested_model || rule.policy === defaultPolicy && rule.policy !== 'custom_balance') return false
+    const model = rule.requested_model.toLowerCase()
+    const effort = (rule.reasoning_effort || '').toLowerCase()
+    return models.some(item => item.requested_model.toLowerCase() === model && (!effort || (item.reasoning_effort || '').toLowerCase() === effort))
+  })
+}
+
+/** A reclaimed generation answers 409 RANKING_SNAPSHOT_CHANGED. */
+export function isRankingSnapshotChanged(error: unknown): boolean {
+  const e = error as { status?: number; code?: unknown; response?: { status?: number } } | null
+  if (!e || typeof e !== 'object') return false
+  return e.code === 'RANKING_SNAPSHOT_CHANGED' || e.status === 409 || e.response?.status === 409
+}
+
+/**
+ * The ranking endpoints answer `{ error, code }` without a message, so the
+ * readable text is in `error`; the client's generic message is the fallback.
+ */
+export function rankingErrorText(error: unknown, fallback: string): string {
+  const e = error as { error?: unknown; message?: unknown; response?: { data?: { error?: unknown; message?: unknown } } } | null
+  const candidates = [e?.error, e?.response?.data?.error, e?.message, e?.response?.data?.message]
+  const text = candidates.find((value): value is string => typeof value === 'string' && value.trim() !== '')
+  return text ?? fallback
+}
+
+// ---------------------------------------------------------------------------
+// Actual dispatch readings
+//
+// Ranked dispatch records the published factors as nested objects. Older
+// traces carry flat scalars, which the server omitted when they were zero or
+// unmeasured. The nested factor wins whenever it is present; the scalar is
+// read only for a trace that has no nested factor. Missing evidence is
+// "unknown", never a zero.
+// ---------------------------------------------------------------------------
+
+export type DispatchFactor = 'price' | 'error_rate' | 'ttft' | 'load'
+
+export type DispatchReading =
+  | { kind: 'value'; value: number }
+  | { kind: 'unknown'; reason: string | null }
+  /** A historical excluded candidate that was never measured. */
+  | { kind: 'none' }
+
+export function dispatchFactorReading(candidate: SchedulerDecisionCandidate, factor: DispatchFactor): DispatchReading {
+  const factors = candidate.factors
+  const nested = factors?.[factor]
+  if (nested) {
+    const raw = factor === 'price'
+      ? factors!.price.rate_multiplier
+      : factor === 'error_rate'
+        ? factors!.error_rate.value
+        : factor === 'ttft'
+          ? factors!.ttft.ms
+          : factors!.load.load_rate
+    if (nested.known && raw != null) return { kind: 'value', value: raw }
+    return { kind: 'unknown', reason: nested.unknown_reason ?? null }
+  }
+  const scalar = factor === 'price'
+    ? candidate.rate_multiplier
+    : factor === 'error_rate'
+      ? candidate.error_rate
+      : factor === 'ttft'
+        ? candidate.ttft_ms
+        : candidate.load_rate
+  if (factor === 'price') return scalar != null ? { kind: 'value', value: scalar } : { kind: 'none' }
+  // Historical traces only measured candidates that could serve the request.
+  if (!candidate.eligible) return { kind: 'none' }
+  return scalar != null ? { kind: 'value', value: scalar } : { kind: 'unknown', reason: null }
+}
+
+export type DispatchQuality =
+  | { kind: 'assessed'; ratio: number; pass: number; suspected: number; evaluated: number }
+  | { kind: 'unknown'; reason: string | null }
+  | { kind: 'none' }
+
+/**
+ * The pass rate a dispatch candidate was ranked with. Only an assessed state
+ * with a published ratio is a pass rate; anything else is unknown. A neutral
+ * scoring contribution is never turned into a ratio.
+ */
+export function dispatchQuality(candidate: SchedulerDecisionCandidate): DispatchQuality {
+  const quality = candidate.factors?.quality
+  if (quality) {
+    if (isQualityAssessed(quality.state) && quality.ratio != null) {
+      return { kind: 'assessed', ratio: quality.ratio, pass: quality.pass ?? 0, suspected: quality.suspected_pass ?? 0, evaluated: quality.selected || quality.evaluated || 0 }
+    }
+    return { kind: 'unknown', reason: quality.unknown_reason ?? (quality.state ? `quality_${quality.state}` : null) }
+  }
+  if (candidate.quality_state !== 'unassessed' && candidate.quality_ratio != null && Number(candidate.evaluated_count) > 0) {
+    return { kind: 'assessed', ratio: candidate.quality_ratio, pass: candidate.pass_count ?? 0, suspected: candidate.suspected_pass_count ?? 0, evaluated: Number(candidate.evaluated_count) }
+  }
+  return candidate.eligible ? { kind: 'unknown', reason: null } : { kind: 'none' }
+}
+
+/**
+ * Points of 100 an unassessed pass rate still contributed. Custom balance
+ * scores unknown evidence at the neutral midpoint, which is a scoring rule,
+ * not a measured 50 % pass rate.
+ */
+export function neutralQualityContribution(contributions: Pick<OpenAIEvalRankingWeights, 'quality'> | null | undefined, assessed: boolean): number | null {
+  if (assessed) return null
+  const value = contributions?.quality
+  return value != null && value > 0 ? value : null
 }

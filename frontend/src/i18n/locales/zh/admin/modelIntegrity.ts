@@ -328,7 +328,7 @@ export default {
           },
           stability_first: {
             name: '优先稳定',
-            effect: '优先调度请求错误率低、首包延迟短的账号；价格权重沿用系统设置，不参考降智通过率。'
+            effect: '优先调度请求错误率低、首包延迟短的账号；价格与负载使用较小的固定权重，不参考降智通过率。'
           },
           avoid_degradation: {
             name: '避免降智',
@@ -352,29 +352,23 @@ export default {
             error_rate: '真实请求的出错比例，与降智无关。',
             ttft: '首个输出的等待时间，不代表完整回答的耗时。',
             load: '当前并发与排队占用。',
-            quality: '已勾选的自动测试中，结论为通过或疑似通过的项数 ÷ 勾选项数。'
+            quality: '已勾选的自动测试中，结论为通过或疑似通过的项数 ÷ 勾选项数。通过率未知时按该权重的中性值计分，这是计分规则，不代表 50% 通过率。'
           },
           legacyFolded: '旧版「稳定性」权重已按 60% 错误率、40% 首包延迟并入，排序结果不变。',
           zeroTotal: '权重合计须大于 0，请至少为一项设置权重。'
         },
-        avoidNote: '降智通过率按测试项计算：已勾选的糖果题、行为指纹、ModelTrace 中，最近一次自动测试结论为通过或疑似通过的项数 ÷ 勾选项数。例如勾选两项、通过一项为 50%，勾选三项、通过一项为 33.3%。每项只看最终结论，与采样次数和重试无关。任一勾选项缺少有效结论（证据不足、请求失败或已过期）时，通过率为未知，既不算通过也不算降智。「避免降智」先从通过率最高的一档中选择，同一档内按价格与运行稳定性排序；该档没有可用容量时再依次尝试下一档。账号停用、模型支持、容量和续写响应的账号绑定仍实时判断。',
-        sharedNote: '账号优先级权重在各策略下保持不变；负载权重仅在「自定义平衡」下按设置调整，其余策略沿用系统设置。'
+        avoidNote: '降智通过率按测试项计算：已勾选的糖果题、行为指纹、ModelTrace 中，最近一次自动测试结论为通过或疑似通过的项数 ÷ 勾选项数。例如勾选两项、通过一项为 50%，勾选三项、通过一项为 33.3%。每项只看最终结论，与采样次数和重试无关。任一勾选项缺少有效结论（证据不足、请求失败或已过期）时，通过率为未知，既不算通过也不算降智。「避免降智」先从通过率最高的一档中选择，同一档内按价格与运行稳定性排序；该档没有可用容量时再依次尝试下一档。通过率未知的账号排在所有已评估账号之后。账号停用、模型支持、容量和续写响应的账号绑定仍实时判断。',
+        sharedNote: '选用「系统默认」以外的策略后，已发布的顺序会取代账号优先级、系统调度权重和可迁移的会话粘性；只有续写响应等必须绑定的请求仍留在原账号。负载权重仅在「自定义平衡」下可调，其余策略使用固定权重。'
       },
       quality: {
         title: '调度评估间隔',
         hint: '按此间隔从已保存的证据重建账号排序。它与测试频率无关：不会发出新的测试请求，也不会运行新的降智测试。',
         interval: '评估间隔',
-        refreshNow: '立即刷新',
-        refreshing: '正在刷新…',
-        refreshDone: '已按 {count} 条带有证据的路由重建排序。',
-        refreshFailed: '刷新失败，调度仍使用上一次的排序。',
-        lastRefresh: '上次刷新 {time}',
+        lastRefresh: '上次评估 {time}',
+        lastRefreshTrigger: '上次评估 {time}（{trigger}）',
         nextRefresh: '下次 {time}',
-        neverRefreshed: '尚未刷新',
-        routes: '本次刷新 {count} 条带有证据的路由',
-        publishedRoutes: '已发布 {count} 条路由到排序缓存',
-        effectsOffRoutes: '评测影响已关闭，因此没有写入排序缓存。上方 {count} 条为本次算出的路由数，仅供参考。',
-        pending: '新的间隔在保存后生效；当前仍按{interval}刷新。「立即刷新」使用已保存的配置。',
+        neverRefreshed: '尚未评估',
+        pending: '新的间隔在保存后生效；当前仍按{interval}评估。「立即评估」使用已保存的配置。',
         effectsOff: '评测影响已关闭：降智通过率不会影响排序，「避免降智」与「自定义平衡」中的通过率权重暂不生效。',
         liveChecks: '账号停用、模型支持、限流冷却、并发和续写响应的账号绑定始终实时判断，不受评估间隔影响。'
       },
@@ -399,7 +393,7 @@ export default {
       gates: {
         title: '调度条件',
         hint: '与排序策略无关。不满足任一条件的账号不参与本次调度。',
-        session: '续写上一条响应时须使用原账号；普通会话优先沿用上次的账号，原账号不可用时再切换。',
+        session: '续写上一条响应时须使用原账号。「系统默认」策略下，普通会话优先沿用上次的账号，原账号不可用时再切换；其他策略下按已发布的顺序选择。',
         model: '账号支持所请求的模型，且模型映射包含该模型。',
         status: '账号未暂停调度，且不处于限流或冷却状态。',
         features: '账号支持本次请求所需的功能与连接方式。',
@@ -505,21 +499,26 @@ export default {
       },
       decisions: {
         title: '最近调度记录',
-        hint: '记录每次请求的账号选择过程，仅保留最近 {limit} 条，服务重启后清空。',
-        empty: '暂无调度记录。产生请求后将显示选中的账号及原因。',
+        hint: '每次真实请求选择账号的过程。当前实例仅保留最近 {limit} 条，服务重启后清空。',
+        empty: '本实例暂无请求调度记录。',
+        emptyInstance: '记录只保存在当前服务实例的内存中，最多 {limit} 条，重启后清空；由其他实例处理的请求不会显示在这里。因此空列表不代表没有流量。评估结果见「评估记录」。',
         noMatch: '没有符合筛选条件的记录。',
         filterModel: '全部模型',
         onlyProblems: '仅显示未选中账号的记录',
         policyUsed: '策略：{policy}',
-        actualDispatch: '实际调度记录。每一行都是真实请求选择账号的过程。离线评估不会在此新增记录；其推荐顺序显示在上方的排序看板中。',
+        actualDispatch: '每一行都是一次真实请求选择账号的过程。评估不会在这里新增记录，评估结果见「评估记录」和上方的账号排行。',
         selectedRank: '在已发布顺序中排第 {rank} 位',
         snapshotAt: '顺序生成于 {time}',
         ownerOverride: '该请求因归属、会话或续写响应规则绑定了指定账号，未按评估顺序选择。',
+        overviewPrior: '候选账号都没有该模型的证据，因此按账号排行排序（总榜先验）。它们在该模型上的通过率仍为未知。',
+        overviewPriorHint: '账号排行中的名次，不是该模型的结果。',
+        overviewRank: '总榜第 {rank}',
         basis: {
           snapshot: '顺序：已发布的评估',
           live_fallback: '顺序：请求时按同一策略计算',
           legacy: '顺序：系统调度权重',
-          owner: '顺序：账号绑定，非评估顺序'
+          owner: '顺序：账号绑定，非评估顺序',
+          overview_prior: '顺序：总榜先验（该模型暂无证据）'
         },
         chosen: '选中 {account}',
         noneChosen: '未选中账号',
@@ -569,6 +568,11 @@ export default {
         quality_tier_selection: '先在降智通过率最高的一档中选择；同一档内按价格与运行稳定性评分。',
         no_selection: '无可用账号，请求未发出。',
         selection_error: '账号选择出错。',
+        explicit_policy_rank: '按策略顺序选用了通过实时准入的最高名次账号。',
+        required_owner_override: '该请求必须留在所属账号上，因此未按策略顺序选择。',
+        selection_budget_exhausted: '准入检查次数已用完，未能确认任何排名账号。',
+        quality_unassessed_fallback: '通过率已知的账号都无法承接该请求，改用通过率未知的账号。',
+        quality_weighted_selection: '按包含降智通过率的自定义权重选择。',
         unknown: '其他原因（{code}）。'
       },
       exclusion: {
@@ -594,6 +598,22 @@ export default {
         quota_auto_pause: '额度即将用尽，已自动暂停。',
         platform_quota: '受平台额度限制。',
         account_nil: '账号信息缺失。',
+        model_or_platform_incompatible: '该账号无法在此平台上服务该模型。',
+        group_model_restricted: '分组的模型白名单不包含该模型。',
+        oauth_only: '该分组仅接受 OAuth 账号。',
+        group_inactive: '分组未启用。',
+        account_inactive: '账号未启用。',
+        account_disabled: '账号已关闭调度。',
+        account_expired: '账号已过期。',
+        overloaded: '账号在上游过载。',
+        rate_limited: '账号已被限流。',
+        temporary_cooldown: '账号处于临时冷却中。',
+        quota_exceeded: '账号额度已用完。',
+        concurrency_full_at_evaluation: '评估时并发已满。',
+        model_runtime_cooldown: '该模型在此账号上近期出错，正在冷却。',
+        live_gate_changed: '请求时跳过：账号已不再满足某项调度条件。',
+        database_admission_changed: '请求时跳过：账号的存储状态已变化。',
+        compact_unsupported: '账号不支持上下文压缩，而该请求需要。',
         unknown: '其他限制（{code}）。'
       },
       evaluation: {
@@ -606,6 +626,7 @@ export default {
         done: '已发布，采集截止 {time}。',
         donePartial: '已发布，采集截止 {time}，覆盖不完整。未覆盖的路由在请求时按同一策略回退。',
         none: '该版本尚未发布评估结果。',
+        doneReadFailed: '已发布，采集截止 {time}，但新的账号排行读取失败：{reason}。请在账号排行中点击「刷新」重试。',
         configuredOnly: '配置已保存，但尚未发布对应的评估结果。',
         superseded: '该次评估已被新的配置或更新的评估取代。请重新加载后再评估。',
         unavailable: '评估服务暂不可用，请稍后重试。',
@@ -614,13 +635,14 @@ export default {
         failedKept: '仍沿用上一次评估结果，账号排序未改变。',
         savedButFailed: '配置已保存，但对应评估失败：{reason}',
         savedButFailedHint: '已保存的策略尚未生效。可重新评估，或修正配置后再次保存。',
+        savedAndEvaluated: '已保存，并已按新配置完成评估。',
         dirtyNote: '评估始终使用已保存的策略，未保存的修改不会计入。要先保存才能评估这些修改。',
         blocked: '存在未解决的配置冲突，请重新加载后再评估。',
-        effectsOffTitle: '评测影响已关闭，该顺序不会用于调度。',
+        effectsOffTitle: '该排行目前不用于调度。',
         effectsOffBody: '下方配置已保存且有效。开启评测影响并保存后，网关才会按该顺序调度。',
         effects: {
           title: '评测影响',
-          hint: '开启后，网关按评估出的排序和已保存的策略调度；关闭时仍沿用原有顺序，上方的策略仍会保存并保持有效。',
+          hint: '开启后，网关按评估出的账号排行和已保存的策略选择账号；关闭时沿用系统调度权重，策略仍会保存。',
           toggle: '使用评估排序进行调度',
           inactive: '已保存但未生效',
           selectionEnabled: '因为你选择了调度策略，已自动置为开启。保存后生效；如需停用评估排序，请关闭后保存。',
@@ -636,6 +658,141 @@ export default {
           no_targets: '未生效：没有测试对象',
           error: '评估失败'
         },
+      },
+      board: {
+        title: '账号排行',
+        hint: '每个账号一行，覆盖全部分组，按默认策略和真实证据排序。分数与名次由服务端计算，浏览器不会重新计算。',
+        group: '分组',
+        allGroups: '全部分组',
+        ungrouped: '无分组',
+        rankedBy: '按「{policy}」排序',
+        evaluatedAt: '评估于 {time}',
+        filterNote: '名次与分数按全部账号计算；分组筛选只隐藏其他账号，不改变名次。',
+        count: '{count} 个账号',
+        countFiltered: '该分组 {count}{more} 个账号',
+        loading: '正在读取账号排行…',
+        none: '尚无评估结果。点击「立即评估」，或保存配置（保存时会自动评估）。',
+        empty: '本次评估没有可排序的账号。请检查分组中是否有启用的 OpenAI 账号。',
+        emptyGroup: '该分组在本次评估中没有账号。',
+        loadFailed: '账号排行读取失败：{reason}。网关继续使用上一次发布的顺序。',
+        rowsKept: '下方为同一评估中上次成功读取的结果。',
+        rowsKeptPrevious: '下方为上一次评估的结果，新的结果尚未读取成功。',
+        restarted: '已发布新的评估，列表已从第一页重新读取。',
+        restartFailed: '服务端已不再提供这一页所属的评估，请点击「刷新」重新读取。',
+        shown: '已显示 {shown} 个账号',
+        loadMore: '加载更多账号',
+        columns: {
+          rank: '名次',
+          account: '账号',
+          score: '综合分',
+          qualityFirst: '降智优先',
+          details: '详情'
+        },
+        factors: {
+          price: '价格',
+          error_rate: '错误率',
+          ttft: '首包',
+          load: '负载',
+          quality: '通过率'
+        },
+        qualityUnknown: '未知',
+        operationalScore: '运行分 {score}',
+        modelsKnown: '{known}/{models} 个模型已知',
+        compositeOf: '满分 100',
+        ineligible: '评估时不可用',
+        moreGroups: '+{count}',
+        coverage: '{models} 个模型有证据，{known} 个通过率已知',
+        coverageNone: '暂无模型证据',
+        coverageDetail: '共 {models} 个模型有真实证据：{known} 个通过率已知，{unknown} 个未知。账号通过率为已知模型的等权平均；每个模型内先平均各推理强度。',
+        coverageNoneDetail: '该账号还没有真实请求、有效的定时测试或匹配的探测证据。仅出现在模型目录或映射中的模型不计入。缺失的因子按标注的默认值计分。',
+        cells: '模型与推理强度组合：{known} 个通过率已知，{unknown} 个未知。',
+        worst: '通过率最低的模型：{model}，{ratio}',
+        contributions: '得分构成',
+        contribution: '{factor} +{value}',
+        ruleException: '{model}（{effort}）设有模型规则「{policy}」，该模型的请求按规则排序，不按本排行。',
+        exclusionScope: {
+          account: '账号：',
+          route: '路由：',
+          live: '实时：'
+        },
+        probe: '匹配的探测 {model}，{time}',
+        probeLatency: '总耗时 {ms} ms，不是首包延迟。',
+        noModels: '没有可计入该账号的模型证据。',
+        models: {
+          model: '模型',
+          effort: '推理强度',
+          upstream: '上游模型',
+          policy: '适用策略',
+          defaultPolicy: '默认策略'
+        },
+        showDetails: '展开详情',
+        hideDetails: '收起详情',
+        notWeighted: '不计分',
+        points: '{score} 分',
+        raw: {
+          none: '无数据',
+          unknown: '未知',
+          perModel: '见各模型'
+        },
+        source: {
+          measured: '实测',
+          probe: '探测',
+          default: '默认',
+          mixed: '混合',
+          neutral: '中性',
+          unknown: '未知',
+          other: '其他'
+        },
+        sourceHint: {
+          measured: '来自真实请求、有效的定时测试，或账号自身的价格与负载。',
+          probe: '来自与该账号、模型和推理强度匹配的探测，仅用于估算错误率。',
+          default: '没有真实数据，按标注的默认分计，不是实测结果。',
+          mixed: '部分模型有实测或探测数据，其余按标注的默认分计。展开详情可查看每个模型。',
+          neutral: '通过率未知，按中性值计分，不代表 50% 通过率。',
+          unknown: '没有可用证据。',
+          other: '服务端报告了未列出的来源，不视为实测。'
+        },
+        ordering: {
+          score_desc: '按综合分从高到低排列，同分按账号 ID。',
+          quality_then_score: '先按通过率从高到低排列，未知排在所有已知之后；通过率相同时按运行分（价格、错误率、首包、负载加权）排列，再按账号 ID。',
+          legacy: '按系统调度权重排列，与启用本功能前一致。'
+        },
+        inactive: {
+          inactive_effects_off: '评测影响已关闭，此排行仅供参考。开启上方「使用评估排序进行调度」并保存后生效。',
+          inactive_legacy_policy: '默认策略为「系统默认」，网关按系统调度权重选择账号，此排行仅供参考。',
+          no_targets: '没有可排序的对象，此排行不会用于调度。'
+        }
+      },
+      records: {
+        title: '记录',
+        tabs: {
+          evaluations: '评估记录',
+          requests: '请求调度'
+        },
+        evaluationsHint: '服务端保存的已完成评估（当前与上一次）。手动、定时或保存触发的每次评估都会生成记录，与是否有真实请求无关。',
+        inProgress: '正在评估…',
+        failed: '最近一次评估失败：{reason}',
+        failedNoPrevious: '还没有成功完成的评估，网关按系统调度权重选择账号。',
+        empty: '还没有评估记录。点击「立即评估」或保存配置后，记录会立即出现在这里。',
+        current: '当前',
+        previous: '上一次',
+        trigger: {
+          startup: '服务启动',
+          policy_saved: '保存配置',
+          manual: '手动评估',
+          interval: '定时评估',
+          catalog_change: '模型目录变化',
+          evidence_expiry: '证据到期'
+        },
+        accounts: '账号数',
+        revision: '配置版本',
+        inputsUntil: '采集截止',
+        coverage: '覆盖',
+        applied: '用于调度',
+        appliedYes: '是',
+        appliedNo: '否，评测影响已关闭',
+        next: '下次评估 {time}',
+        requestsFailed: '请求调度记录读取失败：{reason}'
       },
       rank: {
         title: '账号排序',
@@ -773,6 +930,7 @@ export default {
           loadingMore: '加载中…',
           shown: '已显示 {shown}/{total}',
           showAll: '显示全部账号',
+          qualityNeutral: '按中性值计分：+{value} / 100，不是实测通过率。',
           unknown: '未知',
           unknownHint: '没有可用证据，该因素取中性值，绝不会被当作良好读数。',
           contribution: '在 100 分中贡献 {value}',
@@ -801,7 +959,13 @@ export default {
           no_evidence: '该因素没有采集到证据。',
           not_selected: '该账号未被纳入相关测试。',
           selection_mismatch: '证据属于其他模型或推理强度。',
-          no_candidates: '该范围没有候选账号，因此没有可测量对象。'
+          no_candidates: '该范围没有候选账号，因此没有可测量对象。',
+          price_unavailable: '该账号没有可用的计费倍率。',
+          no_request_samples: '窗口内没有真实请求结果，错误率未知。',
+          no_first_output_samples: '没有首包延迟样本。',
+          load_unavailable: '评估时没有读取到并发数据。',
+          no_selected_tests: '该路由未勾选任何自动降智测试。',
+          selected_test_evidence_unavailable: '部分已勾选的测试没有有效结论，通过率未知。'
         },
         ordering: {
           score_desc: '按总分从高到低排序，同分按账号 ID 升序。',
@@ -823,7 +987,20 @@ export default {
           route_mapping_changed: '发布之后账号与模型的映射发生了变化。',
           unranked_candidate: '有账号可以服务该请求，但不在已发布的顺序内。',
           evidence_expired: '该次评估所依据的证据已过期。',
-          snapshot_superseded: '更新的配置已取代该顺序所属的评估。'
+          snapshot_superseded: '更新的配置已取代该顺序所属的评估。',
+          snapshot_missing: '请求到达时没有可用的已发布顺序。',
+          config_revision_changed: '顺序发布后配置已变更。',
+          dimension_not_cached: '该分组、模型与推理强度组合不在已发布的顺序中。',
+          dimension_capacity_fallback: '该范围发布时没有预先计算的顺序，因此在请求时排序。',
+          snapshot_expired: '已发布的顺序已超出有效期。',
+          selection_model_changed: '该请求的上游模型与已发布顺序不一致。',
+          account_mapping_changed: '顺序发布后，某个账号的模型映射已变更。',
+          snapshot_bytes_limit: '已发布的顺序达到大小上限，该范围未包含在内。',
+          snapshot_capacity: '已发布的顺序达到范围上限，该范围未包含在内。',
+          request_metrics_updated: '该模型有新的请求结果，已按最新数据重新计算顺序。',
+          quality_evidence_updated: '该模型有新的降智测试结果，已重新计算顺序。',
+          quality_evidence_unavailable: '本次请求未能读取降智测试结果，顺序为实时计算。',
+          monitoring_unavailable: '本次请求未能读取探测结果，顺序为实时计算。'
         },
         source: {
           title: '该范围的来源',
@@ -844,7 +1021,12 @@ export default {
         higher_rate_candidate: '倍率高于原账号。',
         below_migration_rate: '倍率低于原账号，本次切换不考虑。',
         quality_tier_top_k_candidate: '属于降智通过率最高的一档，按分数进入候选。',
-        quality_lower_tier_fallback: '更高通过率档位暂无可用容量，改从此档位选择。'
+        quality_lower_tier_fallback: '更高通过率档位暂无可用容量，改从此档位选择。',
+        explicit_policy_rank: '按已发布的策略顺序排位。',
+        live_admission_skipped: '请求时被跳过，改试顺序中的下一个账号。',
+        required_owner_override: '该请求必须留在的账号。',
+        quality_unassessed_fallback: '通过率未知，在所有已评估账号之后尝试。',
+        overview_prior: '按账号排行排位；该模型暂无证据。'
       }
     }
   }

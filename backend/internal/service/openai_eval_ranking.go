@@ -21,11 +21,18 @@ const (
 )
 
 type openAIRankingGeneration struct {
-	summary    OpenAIEvalRankingSummary
-	groups     []OpenAIEvalRankingGroup
-	dimensions []OpenAIEvalRankingDimension
-	byKey      map[string]int
-	deadline   time.Time
+	summary         OpenAIEvalRankingSummary
+	previousSummary *OpenAIEvalRankingSummary
+	groups          []OpenAIEvalRankingGroup
+	dimensions      []OpenAIEvalRankingDimension
+	byKey           map[string]int
+	deadline        time.Time
+	overview        []OpenAIEvalAccountOverviewRow
+	policy          string
+	weights         OpenAIEvalRankingWeights
+	ordering        string
+	priorComplete   bool
+	metricVersions  map[openAIAccountRuntimeRouteKey]uint64
 }
 type openAIRankingBuild struct {
 	revision   int64
@@ -187,6 +194,10 @@ func (r *OpenAIEvalRankingService) evaluate(ctx context.Context, trigger string,
 		return nil, build.err
 	}
 	snapshot.summary.PublishedAt = r.now().UTC()
+	if r.current != nil {
+		summary := r.current.summary
+		snapshot.previousSummary = &summary
+	}
 	r.previous, r.current, r.lastError = r.current, snapshot, nil
 	// Compatibility quality lookup and ranking publication share this commit.
 	cache := openAIEvalQualitySnapshots
@@ -231,7 +242,7 @@ func (s *OpenAIEvalService) EvaluateScheduling(ctx context.Context, actorID int6
 }
 
 func rankingDimensionKey(groupID int64, model, effort string) string {
-	payload, _ := json.Marshal([]any{groupID, model, NormalizeMaxReasoningEffort(effort)})
+	payload, _ := json.Marshal([]any{groupID, model, normalizeOpenAIAccountRuntimeRoutePart(effort, 64)})
 	digest := sha256.Sum256(payload)
 	return hex.EncodeToString(digest[:])
 }
@@ -269,7 +280,7 @@ func (r *OpenAIEvalRankingService) observe(groupID int64, model, effort string) 
 		delete(r.observed, oldestKey)
 		r.observedEvictions++
 	}
-	r.observed[key] = openAIRankingObservedRoute{groupID, model, NormalizeMaxReasoningEffort(effort), now}
+	r.observed[key] = openAIRankingObservedRoute{groupID, model, normalizeOpenAIAccountRuntimeRoutePart(effort, 64), now}
 }
 
 func (r *OpenAIEvalRankingService) statusLocked(snapshot *openAIRankingGeneration) OpenAIEvalRankingSnapshot {
@@ -292,10 +303,14 @@ func (r *OpenAIEvalRankingService) statusLocked(snapshot *openAIRankingGeneratio
 			if summary.Coverage.Status == "partial" {
 				result.EffectiveStatus = "active_partial"
 			}
-			if summary.DimensionCount == 0 {
+			if summary.DimensionCount == 0 && len(snapshot.overview) == 0 {
 				result.EffectiveStatus = "no_targets"
 			}
 		}
+	}
+	if snapshot != nil && snapshot.previousSummary != nil {
+		summary := *snapshot.previousSummary
+		result.PreviousSummary = &summary
 	}
 	if r.lastError != nil && result.EffectiveStatus != "inactive_effects_off" && result.EffectiveStatus != "inactive_legacy_policy" {
 		result.EffectiveStatus = "error"

@@ -222,10 +222,18 @@ func (r *channelMonitorRepository) ListEnabled(ctx context.Context) ([]*service.
 
 func (r *channelMonitorRepository) MarkChecked(ctx context.Context, id int64, checkedAt time.Time) error {
 	client := clientFromContext(ctx, r.client)
-	if err := client.ChannelMonitor.UpdateOneID(id).
-		SetLastCheckedAt(checkedAt).
-		Exec(ctx); err != nil {
+	// Ent's update default changes updated_at even for runtime-only writes.
+	// Keep configuration revision time intact without a read/write race.
+	result, err := client.ExecContext(ctx, `UPDATE channel_monitors SET last_checked_at = $1 WHERE id = $2`, checkedAt, id)
+	if err != nil {
 		return translatePersistenceError(err, service.ErrChannelMonitorNotFound, nil)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return service.ErrChannelMonitorNotFound
 	}
 	return nil
 }

@@ -17,7 +17,11 @@
       </label>
     </div>
 
-    <p v-if="traces.length === 0" class="ledger-empty">{{ t('admin.modelIntegrity.scheduling.decisions.empty') }}</p>
+    <!-- Records live in this instance's memory only, so an empty list is not proof of no traffic. -->
+    <div v-if="traces.length === 0" class="ledger-empty" data-testid="requests-empty">
+      <p class="font-medium text-gray-700 dark:text-gray-300">{{ t('admin.modelIntegrity.scheduling.decisions.empty') }}</p>
+      <p class="mx-auto mt-1 max-w-[64ch] text-xs leading-relaxed">{{ t('admin.modelIntegrity.scheduling.decisions.emptyInstance', { limit }) }}</p>
+    </div>
     <p v-else-if="visible.length === 0" class="ledger-empty">{{ t('admin.modelIntegrity.scheduling.decisions.noMatch') }}</p>
 
     <ol v-else class="ledger">
@@ -49,6 +53,9 @@
             </p>
             <p v-else-if="trace.ranking_basis === 'owner'" class="ledger-fallback" data-testid="dispatch-owner">
               {{ t('admin.modelIntegrity.scheduling.decisions.ownerOverride') }}
+            </p>
+            <p v-else-if="trace.ranking_basis === 'overview_prior'" class="ledger-fallback" data-testid="dispatch-overview-prior">
+              {{ t('admin.modelIntegrity.scheduling.decisions.overviewPrior') }}
             </p>
             <details v-if="trace.error" class="ledger-error">
               <summary class="cursor-pointer">{{ t('admin.modelIntegrity.scheduling.decisions.errorLabel') }}</summary>
@@ -91,23 +98,27 @@
                 <tr v-for="candidate in orderCandidates(trace.candidates)" :key="candidate.account_id" :class="candidateRowClass(candidate)" data-testid="candidate-row">
                   <td class="font-medium text-gray-900 dark:text-gray-100">{{ accountLabel(candidate.account_id) }}</td>
                   <td class="num">
-                    <span v-if="candidate.rank != null" data-testid="candidate-rank">{{ candidate.rank }}</span>
+                    <span v-if="candidate.overview_prior" data-testid="candidate-overview-rank" :title="t('admin.modelIntegrity.scheduling.decisions.overviewPriorHint')">{{ t('admin.modelIntegrity.scheduling.decisions.overviewRank', { rank: candidate.overview_prior.rank }) }}</span>
+                    <span v-else-if="candidate.rank != null" data-testid="candidate-rank">{{ candidate.rank }}</span>
                     <span v-else class="text-gray-400">—</span>
                   </td>
                   <td><span class="verdict" :class="`verdict-${verdictOf(candidate)}`">{{ t(`admin.modelIntegrity.scheduling.decisions.verdict.${verdictOf(candidate)}`) }}</span></td>
                   <td class="cand-why">{{ candidateWhy(candidate) }}</td>
-                  <td class="num">{{ candidate.rate_multiplier != null ? `${formatNumber(candidate.rate_multiplier)}x` : '—' }}</td>
-                  <td class="num">{{ candidate.eligible && candidate.error_rate != null ? formatPercent(candidate.error_rate) : '—' }}</td>
-                  <td class="num">{{ candidate.eligible && candidate.ttft_ms ? `${Math.round(candidate.ttft_ms)} ms` : '—' }}</td>
-                  <td class="num">{{ candidate.eligible && candidate.load_rate != null ? `${candidate.load_rate}%` : '—' }}</td>
+                  <td v-for="factor in DISPATCH_FACTORS" :key="factor" class="num" :data-testid="`candidate-${factor}`">
+                    <span v-if="factorCell(candidate, factor).unknown" class="text-gray-500 dark:text-gray-400" :title="factorCell(candidate, factor).hint">{{ factorCell(candidate, factor).text }}</span>
+                    <span v-else :class="{ 'text-gray-400': factorCell(candidate, factor).text === '—' }">{{ factorCell(candidate, factor).text }}</span>
+                  </td>
                   <td v-if="hasQuality(trace)" class="num" data-testid="candidate-quality">
-                    <template v-if="hasRatio(candidate)">
-                      <span class="block">{{ formatPercent(candidate.quality_ratio) }}</span>
-                      <span class="block text-[11px] text-gray-500 dark:text-gray-400">{{ t('admin.modelIntegrity.scheduling.decisions.qualityCounts', { passed: (candidate.pass_count ?? 0) + (candidate.suspected_pass_count ?? 0), evaluated: candidate.evaluated_count }) }}</span>
-                      <span v-if="candidate.suspected_pass_count" class="block text-[11px] text-gray-500 dark:text-gray-400">{{ t('admin.modelIntegrity.scheduling.decisions.qualitySplit', { pass: candidate.pass_count ?? 0, suspected: candidate.suspected_pass_count }) }}</span>
+                    <template v-if="qualityOf(candidate).kind === 'assessed'">
+                      <span class="block">{{ formatPercent(assessed(candidate).ratio) }}</span>
+                      <span class="block text-[11px] text-gray-500 dark:text-gray-400">{{ t('admin.modelIntegrity.scheduling.decisions.qualityCounts', { passed: assessed(candidate).pass + assessed(candidate).suspected, evaluated: assessed(candidate).evaluated }) }}</span>
+                      <span v-if="assessed(candidate).suspected" class="block text-[11px] text-gray-500 dark:text-gray-400">{{ t('admin.modelIntegrity.scheduling.decisions.qualitySplit', { pass: assessed(candidate).pass, suspected: assessed(candidate).suspected }) }}</span>
                       <span v-if="candidate.quality_contribution" class="block text-[11px] text-gray-500 dark:text-gray-400" data-testid="candidate-quality-contribution">{{ t('admin.modelIntegrity.scheduling.decisions.qualityContribution', { value: formatSigned(candidate.quality_contribution) }) }}</span>
                     </template>
-                    <span v-else-if="candidate.eligible" class="text-gray-500 dark:text-gray-400" data-testid="candidate-quality-unknown">{{ t('admin.modelIntegrity.scheduling.decisions.qualityUnknown') }}</span>
+                    <template v-else-if="qualityOf(candidate).kind === 'unknown'">
+                      <span class="block text-gray-500 dark:text-gray-400" data-testid="candidate-quality-unknown" :title="qualityHint(candidate)">{{ t('admin.modelIntegrity.scheduling.decisions.qualityUnknown') }}</span>
+                      <span v-if="neutralContribution(candidate) !== null" class="block text-[11px] text-gray-500 dark:text-gray-400" data-testid="candidate-quality-neutral">{{ t('admin.modelIntegrity.scheduling.rank.table.qualityNeutral', { value: formatNumber(neutralContribution(candidate) as number) }) }}</span>
+                    </template>
                     <span v-else class="text-gray-400">—</span>
                   </td>
                   <td>
@@ -141,9 +152,12 @@ import { computed, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/icons/Icon.vue'
 import type { SchedulerDecisionCandidate, SchedulerDecisionTrace } from '@/api/admin/accounts'
-import { candidateReasonKey, decisionKey, exclusionKey, fallbackReasonKey, orderCandidates, policyKey, RANKING_FACTORS } from '@/views/admin/modelIntegrity/modelIntegrity'
+import { candidateReasonKey, decisionKey, dispatchFactorReading, dispatchQuality, exclusionKey, fallbackReasonKey, neutralQualityContribution, orderCandidates, policyKey, RANKING_FACTORS, unknownReasonKey, type DispatchFactor, type DispatchQuality } from '@/views/admin/modelIntegrity/modelIntegrity'
 
-const KNOWN_BASES = new Set(['snapshot', 'live_fallback', 'legacy', 'owner'])
+/** Column order of the measured factors. */
+const DISPATCH_FACTORS: DispatchFactor[] = ['price', 'error_rate', 'ttft', 'load']
+
+const KNOWN_BASES = new Set(['snapshot', 'live_fallback', 'legacy', 'owner', 'overview_prior'])
 
 /** Which order the request actually used, so an offline recommendation is never implied. */
 function basisKey(trace: SchedulerDecisionTrace) {
@@ -166,10 +180,12 @@ function contributionTitle(candidate: SchedulerDecisionCandidate) {
     .join(t('admin.modelIntegrity.scheduling.rules.weightsSeparator'))
 }
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   traces: SchedulerDecisionTrace[]
   accountName: (id: number) => string
-}>()
+  /** How many records this instance keeps. */
+  limit?: number
+}>(), { limit: 50 })
 
 const { t } = useI18n()
 const modelFilter = ref('')
@@ -192,19 +208,51 @@ function isProblem(trace: SchedulerDecisionTrace) {
   return !trace.selected_account_id || Boolean(trace.error) || trace.reason_code === 'no_selection' || trace.reason_code === 'selection_error'
 }
 
-function hasRatio(candidate: SchedulerDecisionCandidate): candidate is SchedulerDecisionCandidate & { quality_ratio: number } {
-  // Counts are selected test types; an 'unassessed' state means unknown even if a stale ratio is present.
-  return candidate.quality_state !== 'unassessed' && candidate.quality_ratio != null && Number(candidate.evaluated_count) > 0
+/**
+ * One measured factor as the request saw it. Ranked dispatch records the
+ * published factor; an older trace only has the flat reading. Missing
+ * evidence is "unknown", never a zero.
+ */
+function factorCell(candidate: SchedulerDecisionCandidate, factor: DispatchFactor): { text: string; unknown: boolean; hint: string } {
+  const reading = dispatchFactorReading(candidate, factor)
+  if (reading.kind === 'value') return { text: formatFactor(factor, reading.value), unknown: false, hint: '' }
+  if (reading.kind === 'unknown') return { text: t('admin.modelIntegrity.scheduling.decisions.qualityUnknown'), unknown: true, hint: unknownHint(reading.reason) }
+  return { text: '—', unknown: false, hint: '' }
+}
+
+function formatFactor(factor: DispatchFactor, value: number) {
+  if (factor === 'price') return `${formatNumber(value)}x`
+  if (factor === 'error_rate') return formatPercent(value)
+  if (factor === 'ttft') return `${Math.round(value)} ms`
+  return `${formatNumber(value)}%`
+}
+
+function unknownHint(reason: string | null) {
+  return `${t('admin.modelIntegrity.scheduling.rank.table.unknownHint')} ${t(`admin.modelIntegrity.scheduling.rank.unknown.${unknownReasonKey(reason)}`)}`
+}
+
+const qualityOf = (candidate: SchedulerDecisionCandidate): DispatchQuality => dispatchQuality(candidate)
+const assessed = (candidate: SchedulerDecisionCandidate) => dispatchQuality(candidate) as Extract<DispatchQuality, { kind: 'assessed' }>
+
+function qualityHint(candidate: SchedulerDecisionCandidate) {
+  const quality = dispatchQuality(candidate)
+  return quality.kind === 'unknown' ? unknownHint(quality.reason) : ''
+}
+
+/** Points an unassessed pass rate contributed under custom balance; a scoring rule, not a pass rate. */
+function neutralContribution(candidate: SchedulerDecisionCandidate) {
+  return neutralQualityContribution(candidate.contributions, dispatchQuality(candidate).kind === 'assessed')
 }
 
 /**
  * The pass-rate column appears when the decision used a policy that reads it
- * (so a missing rate is shown as unknown, never as 100 %), or when the server
- * reported a rate for any candidate.
+ * (so a missing rate is shown as unknown, never as 100 %), or when any
+ * candidate carries a pass rate or a pass-rate contribution.
  */
 function hasQuality(trace: SchedulerDecisionTrace) {
   if (trace.scheduling_policy === 'avoid_degradation') return true
-  return (trace.candidates ?? []).some(candidate => hasRatio(candidate) || Boolean(candidate.quality_contribution))
+  return (trace.candidates ?? []).some(candidate =>
+    dispatchQuality(candidate).kind === 'assessed' || Boolean(candidate.quality_contribution) || (candidate.contributions?.quality ?? 0) > 0)
 }
 
 const formatSigned = (value: number) => `${value > 0 ? '+' : ''}${formatNumber(value)}`
@@ -287,6 +335,7 @@ const formatAbsolute = (value: string) => {
 .ledger-basis-live_fallback { @apply bg-violet-100 text-violet-800 dark:bg-violet-900/50 dark:text-violet-200; }
 .ledger-basis-legacy { @apply bg-gray-100 text-gray-700 dark:bg-dark-700 dark:text-gray-300; }
 .ledger-basis-owner { @apply bg-amber-100 text-amber-900 dark:bg-amber-900/40 dark:text-amber-200; }
+.ledger-basis-overview_prior { @apply bg-sky-100 text-sky-900 dark:bg-sky-900/40 dark:text-sky-200; }
 .ledger-fallback { @apply mt-1 max-w-[72ch] text-xs leading-snug text-gray-500 dark:text-gray-400; }
 .contrib { @apply inline-flex gap-1 text-[11px] tabular-nums; }
 .contrib-part { @apply rounded bg-gray-100 px-1 py-0.5 text-gray-700 dark:bg-dark-700 dark:text-gray-300; }

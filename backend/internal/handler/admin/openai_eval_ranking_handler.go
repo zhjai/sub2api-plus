@@ -44,6 +44,14 @@ func (h *AccountHandler) EvaluateOpenAIScheduling(c *gin.Context) {
 }
 
 func (h *AccountHandler) GetOpenAISchedulingRankings(c *gin.Context) {
+	h.getOpenAISchedulingRanking(c, false)
+}
+
+func (h *AccountHandler) GetOpenAISchedulingAccountOverview(c *gin.Context) {
+	h.getOpenAISchedulingRanking(c, true)
+}
+
+func (h *AccountHandler) getOpenAISchedulingRanking(c *gin.Context, overview bool) {
 	if h.openAIEvalService == nil {
 		openAIEvalRankingHTTPError(c, service.ErrOpenAIEvalRankingUnavailable)
 		return
@@ -73,7 +81,13 @@ func (h *AccountHandler) GetOpenAISchedulingRankings(c *gin.Context) {
 		}
 		filter.Limit = limit
 	}
-	result, err := h.openAIEvalService.SchedulingRankings(filter)
+	var result any
+	var err error
+	if overview {
+		result, err = h.openAIEvalService.SchedulingAccountOverview(filter)
+	} else {
+		result, err = h.openAIEvalService.SchedulingRankings(filter)
+	}
 	if err != nil {
 		if errors.Is(err, service.ErrOpenAIEvalRankingUnavailable) || errors.Is(err, service.ErrOpenAIEvalRankingSnapshotChanged) {
 			openAIEvalRankingHTTPError(c, err)

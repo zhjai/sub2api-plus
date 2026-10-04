@@ -465,9 +465,29 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_DefaultDisabledUsesLega
 	require.NoError(t, err)
 	require.NotNil(t, selection)
 	require.NotNil(t, selection.Account)
+	require.Equal(t, int64(36001), selection.Account.ID)
+	require.Equal(t, openAIAccountScheduleLayerPreviousResponse, decision.Layer)
+	require.True(t, decision.StickyPreviousHit)
+	selection.ReleaseFunc()
+
+	selection, decision, err = svc.SelectAccountWithSchedulerForCapability(
+		ctx, &groupID, "resp_disabled_001", "", "gpt-5.1", map[int64]struct{}{36001: {}},
+		OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityResponses, false, true, true,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.NotNil(t, selection.Account)
 	require.Equal(t, int64(36002), selection.Account.ID)
 	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
 	require.False(t, decision.StickyPreviousHit)
+	selection.ReleaseFunc()
+
+	selection, decision, err = svc.SelectAccountWithScheduler(ctx, &groupID, "", "", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.Equal(t, int64(36002), selection.Account.ID)
+	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
+	selection.ReleaseFunc()
 }
 
 // Regression: the legacy load-batch path had two bare ErrNoAvailableAccounts
@@ -1531,6 +1551,12 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_PreviousResponseCompact
 		nil,
 		OpenAIUpstreamTransportAny,
 		true,
+	)
+	require.Error(t, err, "an unavailable required owner cannot be replaced without portable input")
+	require.Nil(t, selection)
+	selection, decision, err = svc.SelectAccountWithSchedulerForCapability(
+		ctx, &groupID, "resp_compact_unsupported", "", "gpt-5.1", nil,
+		OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityResponses, true, true, true,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, selection)

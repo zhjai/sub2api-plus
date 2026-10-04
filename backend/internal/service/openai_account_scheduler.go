@@ -139,6 +139,7 @@ type OpenAIAccountScheduleDecision struct {
 // IDs and scheduler metrics are useful to administrators, while session keys,
 // response IDs, prompts, and credentials must never enter the trace.
 type OpenAIAccountScheduleCandidate struct {
+	OverviewPrior       *OpenAIEvalOverviewPrior  `json:"overview_prior,omitempty"`
 	Rank                *int                      `json:"rank,omitempty"`
 	PriorityScore       *float64                  `json:"priority_score,omitempty"`
 	Factors             *OpenAIEvalRankingFactors `json:"factors,omitempty"`
@@ -387,11 +388,14 @@ func (m *openAIAccountSchedulerMetrics) recordSwitch() {
 }
 
 type openAIAccountRuntimeStats struct {
-	creationMu   sync.Mutex
-	accounts     sync.Map
-	accountCount atomic.Int64
-	routes       sync.Map
-	routeCount   atomic.Int64
+	rankingMu        sync.RWMutex
+	metricSeq        atomic.Uint64
+	rankingEvictions atomic.Uint64
+	creationMu       sync.Mutex
+	accounts         sync.Map
+	accountCount     atomic.Int64
+	routes           sync.Map
+	routeCount       atomic.Int64
 }
 
 type openAIAccountRuntimeRouteKey struct {
@@ -401,6 +405,7 @@ type openAIAccountRuntimeRouteKey struct {
 }
 
 type openAIAccountRuntimeStat struct {
+	metricVersion     atomic.Uint64
 	errorRateEWMABits atomic.Uint64
 	ttftEWMABits      atomic.Uint64
 	sampleCount       atomic.Int64
@@ -452,9 +457,9 @@ func normalizeOpenAIAccountRuntimeRoutePart(value string, maxBytes int) string {
 }
 
 func openAIAccountRuntimeRouteKeyFor(accountID int64, model, effort string) (openAIAccountRuntimeRouteKey, bool) {
-	model = normalizeOpenAIAccountRuntimeRoutePart(model, openAIModelTransientMaxModelBytes)
+	model = strings.TrimSpace(model)
 	effort = normalizeOpenAIAccountRuntimeRoutePart(effort, 64)
-	if accountID <= 0 || model == "" {
+	if accountID <= 0 || model == "" || len(model) > openAIModelTransientMaxModelBytes {
 		return openAIAccountRuntimeRouteKey{}, false
 	}
 	return openAIAccountRuntimeRouteKey{AccountID: accountID, Model: model, Effort: effort}, true
@@ -516,8 +521,11 @@ func (s *openAIAccountRuntimeStats) reportForRequest(accountID int64, model, eff
 	if s == nil || accountID <= 0 {
 		return
 	}
+	s.rankingMu.Lock()
+	defer s.rankingMu.Unlock()
 	if stat, ok := s.loadOrCreateRoute(accountID, model, effort); ok {
 		s.reportStat(stat, success, firstTokenMs)
+		stat.metricVersion.Store(s.metricSeq.Add(1))
 		return
 	}
 	s.report(accountID, success, firstTokenMs)
@@ -938,6 +946,13 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		}
 	}
 
+	// A required response owner is a hard boundary, not session affinity.
+	// Reject its failed selection before trying any unrelated sticky account.
+	if NormalizeOpenAICompatiblePlatform(req.Platform) == PlatformOpenAI && req.RequiredCapability != OpenAIEndpointCapabilityEmbeddings && previousResponseID != "" && !req.PreviousResponseCanMove {
+		decision.RankingBasis = "owner"
+		return nil, decision, noAvailableOpenAISelectionError(req.RequestedModel, false, "required_owner_unavailable")
+	}
+
 	// Quality preference participates in normal weighted selection, including
 	// movable session affinity. Required response/task owners stay pinned above.
 	if openAIRankedPolicyEnabled(req) && !req.DisableStickyEscape && (previousResponseID == "" || req.PreviousResponseCanMove) {
@@ -984,7 +999,7 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		}
 	}
 
-	if openAIRankedPolicyEnabled(req) && ((previousResponseID != "" && !req.PreviousResponseCanMove) || req.DisableStickyEscape) {
+	if openAIRankedPolicyEnabled(req) && ((req.RequiredCapability != OpenAIEndpointCapabilityEmbeddings && previousResponseID != "" && !req.PreviousResponseCanMove) || req.DisableStickyEscape) {
 		decision.RankingBasis = "owner"
 		return nil, decision, noAvailableOpenAISelectionError(req.RequestedModel, false, "required_owner_unavailable")
 	}
@@ -3213,7 +3228,9 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 		scheduler = nil
 	}
 	if scheduler == nil {
-		if _, migrating := OpenAIRouteMigrationFromContext(ctx); migrating || decision.SchedulingPolicy != "" {
+		_, migrating := OpenAIRouteMigrationFromContext(ctx)
+		requiresOwner := platform == PlatformOpenAI && requiredCapability != OpenAIEndpointCapabilityEmbeddings && strings.TrimSpace(previousResponseID) != "" && !previousResponseCanMove
+		if migrating || decision.SchedulingPolicy != "" || requiresOwner {
 			scheduler = s.persistentOpenAIAccountScheduler()
 		}
 	}

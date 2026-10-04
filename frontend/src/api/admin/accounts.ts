@@ -119,6 +119,10 @@ export interface SchedulerDecisionCandidate {
   quality_contribution?: number
   exclusion_reason?: string
   decision_reason?: string
+  /** Set only when a fully cold pool was ordered by the account overview. */
+  overview_prior?: { rank: number; priority_score: number; priority: OpenAIEvalAccountPriority } | null
+  /** 'unknown_current_model' when the request model itself has no quality evidence. */
+  quality_basis?: string
 }
 
 export interface OpenAIEvalSchedule {
@@ -395,11 +399,17 @@ export interface FactorMeta {
   known: boolean
   observed_at: string | null
   unknown_reason: string | null
+  /**
+   * True when a labelled default score (0.9) stood in for missing evidence.
+   * With known=true as well, only some of the account's cells were defaulted.
+   */
+  default_applied?: boolean
 }
 
 export interface OpenAIEvalRankingFactors {
   price: FactorMeta & { rate_multiplier: number | null; source: string | null }
-  error_rate: FactorMeta & { value: number | null; sample_count: number }
+  /** source 'v1_matched_probe' marks an identity-matched probe estimate, not real traffic. */
+  error_rate: FactorMeta & { value: number | null; sample_count: number; source?: string | null }
   ttft: FactorMeta & { ms: number | null; sample_count: number }
   load: FactorMeta & { load_rate: number | null; waiting: number | null; current_concurrency: number | null }
   quality: FactorMeta & {
@@ -415,6 +425,18 @@ export interface OpenAIEvalRankingFactors {
     ratio: number | null
     expires_at: string | null
   }
+  /**
+   * Matched channel probes, diagnostic only. latency_ms is a full round trip,
+   * never first-output latency.
+   */
+  monitoring?: Array<{
+    monitor_id: number
+    model: string
+    status: string
+    observed_at: string
+    latency_ms: number | null
+    ping_latency_ms: number | null
+  }>
 }
 
 /** Where a candidate route came from while the order was built. */
@@ -569,6 +591,86 @@ export interface OpenAIEvalRankingQuery {
   limit?: number
 }
 
+// ---------------------------------------------------------------------------
+// Account overview (rc4)
+//
+// One row per unique account across every group, ranked by the default policy
+// from real evidence only. A group filter hides rows; it never changes a score
+// or a rank. Every number is computed by the server.
+// ---------------------------------------------------------------------------
+
+export type OpenAIEvalRankingFactorKey = keyof OpenAIEvalRankingWeights
+
+/** How an account is placed by the default policy; the parts behind priority_score. */
+export interface OpenAIEvalAccountPriority {
+  quality_known: boolean
+  /** Exact macro pass rate across evidenced models; null when unknown. */
+  quality_ratio: number | null
+  /** Weighted operational score, 0-100. */
+  operational_score: number
+  quality_tier: number | null
+}
+
+/** One requested model (and effort) the account has real evidence for. */
+export interface OpenAIEvalOverviewModel {
+  requested_model: string
+  /** The raw requested effort; '' means unspecified. */
+  reasoning_effort: string
+  upstream_models: string[]
+  factors: OpenAIEvalRankingFactors
+  /** Evidence kinds behind this cell, e.g. request_ewma_account_model_effort, scheduled_quality, v1_matched_probe. */
+  sources: string[]
+  /** The policy requests for this model and effort use at runtime. */
+  policy?: OpenAIEvalSchedulingPolicy | string | null
+  weights?: OpenAIEvalRankingWeights
+}
+
+export interface OpenAIEvalOverviewAccount extends OpenAIEvalRankedAccount {
+  /** 0 is the ungrouped scope. */
+  group_ids: number[]
+  /** Models with real evidence; catalog- or mapping-only models are not counted. */
+  model_count: number
+  quality_model_count: number
+  unknown_quality_model_count: number
+  quality_cell_count?: number
+  unknown_quality_cell_count?: number
+  worst_quality_model: string | null
+  worst_quality_ratio: number | null
+  models: OpenAIEvalOverviewModel[]
+  /**
+   * The parts of the quality-first order. priority_score is the operational
+   * score alone, so quality-first order is shown from these values.
+   */
+  priority?: OpenAIEvalAccountPriority
+}
+
+export interface OpenAIEvalAccountOverview {
+  summary: OpenAIEvalRankingSummary | null
+  /** The completed evaluation before `summary`, kept for the records tab. */
+  previous_summary: OpenAIEvalRankingSummary | null
+  effective_status: OpenAIEvalEffectiveStatus
+  current_config_revision: number
+  evaluation_in_progress: boolean
+  ranking_error: RankingError | null
+  groups: OpenAIEvalRankingGroup[]
+  /** The default policy the overview is ranked with. */
+  policy: OpenAIEvalSchedulingPolicy
+  weights: OpenAIEvalRankingWeights
+  ordering: 'score_desc' | 'quality_then_score' | 'legacy' | string
+  accounts: OpenAIEvalOverviewAccount[]
+  next_cursor: string | null
+}
+
+export interface OpenAIEvalAccountOverviewQuery {
+  /** Omit for all groups. */
+  group_id?: number
+  /** Default 100, maximum 500. */
+  limit?: number
+  /** Bound to evaluation_id and group_id; an expired generation answers 409. */
+  cursor?: string
+  evaluation_id?: string
+}
+
 export async function getOpenAIEvalModels(): Promise<OpenAIEvalModelCatalog> {
   const { data } = await apiClient.get<OpenAIEvalModelCatalog>('/admin/accounts/evaluations/models')
   return data
@@ -678,6 +780,17 @@ export async function getOpenAIEvalRankingAccounts(
   query: OpenAIEvalRankingQuery & { group_id: number; requested_model: string; reasoning_effort: string }
 ): Promise<OpenAIEvalRankingSnapshot> {
   const { data } = await apiClient.get<OpenAIEvalRankingSnapshot>('/admin/accounts/evaluations/scheduling/rankings', {
+    params: query
+  })
+  return data
+}
+
+/**
+ * Reads one page of the unique-account leaderboard. A cursor continues only
+ * the generation and group filter it was issued for; never splice two.
+ */
+export async function getOpenAIEvalAccountOverview(query: OpenAIEvalAccountOverviewQuery = {}): Promise<OpenAIEvalAccountOverview> {
+  const { data } = await apiClient.get<OpenAIEvalAccountOverview>('/admin/accounts/evaluations/scheduling/account-overview', {
     params: query
   })
   return data
@@ -1876,6 +1989,7 @@ export const accountsAPI = {
   ,evaluateOpenAIEvalRanking
   ,getOpenAIEvalRankings
   ,getOpenAIEvalRankingAccounts
+  ,getOpenAIEvalAccountOverview
   ,listOpenAIEvalAudit
   ,resetOpenAIBPSState
 }

@@ -202,7 +202,7 @@ func TestOpenAIRankingEvaluateThenActualDispatchAdvancedOff(t *testing.T) {
 			require.NotNil(t, selection)
 			require.Equal(t, dim.Accounts[0].AccountID, selection.Account.ID)
 			selection.ReleaseFunc()
-			require.Equal(t, "snapshot", decision.RankingBasis)
+			require.Equal(t, "overview_prior", decision.RankingBasis)
 			require.Equal(t, summary.EvaluationID, *decision.EvaluationID)
 			require.Equal(t, 1, *decision.SelectedRank)
 			require.NotEmpty(t, gateway.RecentOpenAIAccountScheduleTraces(10))
@@ -221,7 +221,7 @@ func TestOpenAIRankingScorerFiveFactorsQualityAndTies(t *testing.T) {
 	f.ErrorRate = OpenAIEvalRankingErrorRate{OpenAIEvalFactorMeta: rankingKnown(.8, now), Value: rankingPtr(.2), SampleCount: 5}
 	f.Load = OpenAIEvalRankingLoad{OpenAIEvalFactorMeta: rankingKnown(.25, now)}
 	rows := scoreOpenAIEvalRanking(OpenAIEvalSchedulingPolicyCostFirst, OpenAIEvalRankingWeights{.6, .2, .1, .1, 0}, []openAIEvalRankingInput{{account: account, factors: f, compatible: true}}, now, nil)
-	require.InDelta(t, 30+16+5+2.5, *rows[0].PriorityScore, 1e-9)
+	require.InDelta(t, 30+16+9+2.5, *rows[0].PriorityScore, 1e-9)
 	require.True(t, rows[0].Factors.Price.Known)
 	require.Equal(t, .5, rows[0].Factors.Price.Score)
 	var inputs []openAIEvalRankingInput
@@ -240,7 +240,7 @@ func TestOpenAIRankingScorerFiveFactorsQualityAndTies(t *testing.T) {
 	rows = scoreOpenAIEvalRanking(OpenAIEvalSchedulingPolicyStabilityFirst, OpenAIEvalRankingWeights{.1, .5, .3, .1, 0}, inputs, now, nil)
 	for i, row := range rows {
 		require.Equal(t, int64(i+1), row.AccountID)
-		require.Equal(t, 50.0, *row.PriorityScore)
+		require.Equal(t, 86.0, *row.PriorityScore)
 	}
 	_, weights := openAIEvalRankingWeights(&OpenAIEvalConfig{SchedulingPolicy: OpenAIEvalSchedulingPolicyCustomBalance, CustomBalance: OpenAIEvalPolicyWeights{Stability: 1}}, "gpt-6.1-sol", "")
 	require.Equal(t, OpenAIEvalRankingWeights{ErrorRate: .6, TTFT: .4}, weights)
@@ -373,7 +373,7 @@ func TestOpenAIRankingSupersededAndSavedEvaluationFailure(t *testing.T) {
 	require.Nil(t, s.ranking.lastError)
 }
 
-func TestOpenAIRankingFallbackEntirePoolAndFrozenOrder(t *testing.T) {
+func TestOpenAIRankingFallbackEntirePoolAndMetricInvalidation(t *testing.T) {
 	s, _, accounts, gateway := rankingHarness(t)
 	_, err := s.EvaluateScheduling(context.Background(), 1)
 	require.NoError(t, err)
@@ -381,14 +381,16 @@ func TestOpenAIRankingFallbackEntirePoolAndFrozenOrder(t *testing.T) {
 	req := OpenAIAccountScheduleRequest{Platform: PlatformOpenAI, GroupID: rankingPtr(int64(7)), RequestedModel: "gpt-6.1-sol", ClientRequestedModel: "gpt-6.1-sol"}
 	rows, trace, err := scheduler.explicitRanking(context.Background(), req, accounts.items, nil)
 	require.NoError(t, err)
-	require.Equal(t, "snapshot", trace.RankingBasis)
+	require.Equal(t, "overview_prior", trace.RankingBasis)
 	before, _ := json.Marshal(rows)
 	ttft := 9999
 	gateway.openaiAccountStats.reportForRequest(1, req.RequestedModel, "", false, &ttft)
 	rows, trace, err = scheduler.explicitRanking(context.Background(), req, accounts.items, map[int64]*AccountLoadInfo{1: {LoadRate: 100}})
 	require.NoError(t, err)
 	after, _ := json.Marshal(rows)
-	require.Equal(t, string(before), string(after))
+	require.NotEqual(t, string(before), string(after))
+	require.Equal(t, "live_fallback", trace.RankingBasis)
+	require.Equal(t, "request_metrics_updated", *trace.RankingFallbackReason)
 	newAccount := accounts.items[0]
 	newAccount.ID = 3
 	newAccount.RateMultiplier = rankingPtr(.01)
@@ -397,7 +399,7 @@ func TestOpenAIRankingFallbackEntirePoolAndFrozenOrder(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "live_fallback", trace.RankingBasis)
 	require.Nil(t, trace.EvaluationID)
-	require.Equal(t, "unranked_candidate", *trace.RankingFallbackReason)
+	require.Equal(t, "request_metrics_updated", *trace.RankingFallbackReason)
 	require.Equal(t, int64(3), rows[0].AccountID)
 	req.RequestedModel = "uncatalogued-alias"
 	req.ClientRequestedModel = req.RequestedModel
@@ -450,11 +452,83 @@ func TestOpenAIRankingOwnerOverrideAndMovablePreferences(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(1), selected.Account.ID)
 	selected.ReleaseFunc()
-	require.Equal(t, "snapshot", decision.RankingBasis)
+	require.Equal(t, "overview_prior", decision.RankingBasis)
 	req.PreviousResponseCanMove = false
 	req.ExcludedIDs = map[int64]struct{}{2: {}}
 	selected, decision, err = scheduler.Select(ctx, req)
 	require.Error(t, err)
+	require.Nil(t, selected)
+}
+
+func TestOpenAIRankingUnavailableOwnerCannotFallThroughToSessionAffinity(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("ranking_enabled_%v", enabled), func(t *testing.T) {
+			s, repo, _, gateway := rankingHarness(t)
+			repo.config.EffectsEnabled = enabled
+			repo.config.Revision++
+			_, err := s.EvaluateScheduling(context.Background(), 1)
+			require.NoError(t, err)
+			require.Equal(t, enabled, OpenAIEvalEffectsEnabled())
+			group := int64(7)
+			ctx := context.Background()
+			require.NoError(t, gateway.getOpenAIWSStateStore().BindResponseAccount(ctx, group, "resp_unavailable_owner", 2, time.Hour))
+			require.NoError(t, gateway.cache.SetSessionAccountID(ctx, group, "conflicting-session", 1, time.Hour))
+			scheduler := gateway.persistentOpenAIAccountScheduler().(*defaultOpenAIAccountScheduler)
+			for _, guardian := range []int64{0, 1} {
+				req := OpenAIAccountScheduleRequest{
+					GroupID: &group, Platform: PlatformOpenAI, RequestedModel: "gpt-6.1-sol",
+					PreviousResponseID: "resp_unavailable_owner", PreviousResponseCanMove: false,
+					SessionHash: "conflicting-session", StickyAccountID: 1, GuardianParentAccountID: guardian,
+					ExcludedIDs: map[int64]struct{}{2: {}}, RequiredTransport: OpenAIUpstreamTransportAny,
+				}
+				selected, decision, err := scheduler.Select(ctx, req)
+				if selected != nil && selected.ReleaseFunc != nil {
+					selected.ReleaseFunc()
+				}
+				require.Error(t, err, "an excluded response owner is not a soft session preference")
+				require.Nil(t, selected)
+				require.Equal(t, "owner", decision.RankingBasis)
+			}
+			selected, _, err := gateway.SelectAccountWithSchedulerForCapability(ctx, &group, "resp_unavailable_owner", "conflicting-session", "gpt-6.1-sol",
+				map[int64]struct{}{2: {}}, OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityResponses, false, false, true)
+			if selected != nil && selected.ReleaseFunc != nil {
+				selected.ReleaseFunc()
+			}
+			require.Error(t, err, "the public selector preserves the hard owner with advanced scheduling disabled")
+			require.Nil(t, selected)
+		})
+	}
+}
+
+func TestOpenAIRankingEmbeddingsDoesNotRequireResponsesOwner(t *testing.T) {
+	s, _, accounts, gateway := rankingHarness(t)
+	accounts.items[0].Credentials = map[string]any{"openai_capabilities": []any{"chat_completions"}}
+	accounts.items[1].Credentials = map[string]any{"openai_capabilities": []any{"embeddings"}}
+	_, err := s.EvaluateScheduling(context.Background(), 1)
+	require.NoError(t, err)
+	require.True(t, OpenAIEvalEffectsEnabled())
+	ctx := context.Background()
+	group := int64(7)
+	require.NoError(t, gateway.getOpenAIWSStateStore().BindResponseAccount(ctx, group, "resp_embedding_incidental", 1, time.Hour))
+	scheduler := gateway.persistentOpenAIAccountScheduler().(*defaultOpenAIAccountScheduler)
+	req := OpenAIAccountScheduleRequest{
+		GroupID: &group, Platform: PlatformOpenAI, RequestedModel: "text-embedding-3-small",
+		PreviousResponseID: "resp_embedding_incidental", PreviousResponseCanMove: false,
+		RequiredTransport: OpenAIUpstreamTransportAny, RequiredCapability: OpenAIEndpointCapabilityEmbeddings,
+	}
+	selected, decision, err := scheduler.Select(ctx, req)
+	require.NoError(t, err)
+	require.NotNil(t, selected)
+	require.Equal(t, int64(2), selected.Account.ID)
+	require.False(t, decision.StickyPreviousHit)
+	selected.ReleaseFunc()
+
+	req.DisableStickyEscape = true
+	selected, _, err = scheduler.Select(ctx, req)
+	if selected != nil && selected.ReleaseFunc != nil {
+		selected.ReleaseFunc()
+	}
+	require.Error(t, err, "the independent no-escape constraint remains enforced")
 	require.Nil(t, selected)
 }
 

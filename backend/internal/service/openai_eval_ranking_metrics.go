@@ -23,6 +23,7 @@ func (s *openAIAccountRuntimeStats) trimRuntimeStats(values *sync.Map, count *at
 		at := stat.observedAt.Load()
 		if at < cutoff {
 			values.Delete(key)
+			s.rankingEvictions.Add(1)
 			count.Add(-1)
 		} else if at < oldest {
 			oldest, oldestKey = at, key
@@ -31,6 +32,7 @@ func (s *openAIAccountRuntimeStats) trimRuntimeStats(values *sync.Map, count *at
 	})
 	if count.Load() >= openAIRankingMetricLimit && oldestKey != nil {
 		values.Delete(oldestKey)
+		s.rankingEvictions.Add(1)
 		count.Add(-1)
 	}
 }
@@ -40,6 +42,8 @@ func (s *openAIAccountRuntimeStats) rankingFactors(accountID int64, model, effor
 	if s == nil {
 		return f
 	}
+	s.rankingMu.RLock()
+	defer s.rankingMu.RUnlock()
 	stat, ok := s.loadRoute(accountID, model, effort)
 	if !ok {
 		return f
@@ -55,4 +59,40 @@ func (s *openAIAccountRuntimeStats) rankingFactors(accountID int64, model, effor
 		f.TTFT = OpenAIEvalRankingTTFT{OpenAIEvalFactorMeta: rankingKnown(.5, at), MS: rankingPtr(ttft), SampleCount: count}
 	}
 	return f
+}
+
+func (s *openAIAccountRuntimeStats) rankingVersions() map[openAIAccountRuntimeRouteKey]uint64 {
+	versions := make(map[openAIAccountRuntimeRouteKey]uint64)
+	if s == nil {
+		return versions
+	}
+	s.rankingMu.RLock()
+	defer s.rankingMu.RUnlock()
+	s.routes.Range(func(key, value any) bool {
+		versions[key.(openAIAccountRuntimeRouteKey)] = value.(*openAIAccountRuntimeStat).metricVersion.Load()
+		return true
+	})
+	return versions
+}
+
+func (s *openAIAccountRuntimeStats) rankingMetricsChanged(gen *openAIRankingGeneration, rows []OpenAIEvalRankedAccount, model, effort string) bool {
+	if s == nil {
+		return false
+	}
+	s.rankingMu.RLock()
+	defer s.rankingMu.RUnlock()
+	for _, row := range rows {
+		key, ok := openAIAccountRuntimeRouteKeyFor(row.AccountID, model, effort)
+		if !ok {
+			return true
+		}
+		version := uint64(0)
+		if stat, exists := s.loadRoute(row.AccountID, model, effort); exists {
+			version = stat.metricVersion.Load()
+		}
+		if version != gen.metricVersions[key] {
+			return true
+		}
+	}
+	return false
 }

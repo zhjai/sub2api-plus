@@ -42,7 +42,10 @@ func TestOpenAIRankingV1AssociationModeAndEffortControls(t *testing.T) {
 	a := &Account{ID: 7, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Credentials: map[string]any{"base_url": "https://example.invalid/v1"}}
 	m := &ChannelMonitor{ID: 2, Enabled: true, AccountID: rankingPtr(int64(7)), Provider: PlatformOpenAI, Endpoint: "https://example.invalid/v1", CheckMode: MonitorCheckModeProbe}
 	require.True(t, rankingMonitorMatchesAccount(m, a))
-	for _, mutate := range []func(*ChannelMonitor){func(m *ChannelMonitor) { m.AccountID = nil }, func(m *ChannelMonitor) { m.AccountID = rankingPtr(int64(8)) }, func(m *ChannelMonitor) { m.Endpoint = "https://unrelated.invalid/v1" }, func(m *ChannelMonitor) { m.CheckMode = MonitorCheckModeQuota }, func(m *ChannelMonitor) { m.Provider = PlatformGrok }, func(m *ChannelMonitor) { m.Enabled = false }} {
+	independent := *m
+	independent.AccountID = nil
+	require.True(t, rankingMonitorMatchesAccount(&independent, a), "probe identity is verified separately, not inferred from quota association")
+	for _, mutate := range []func(*ChannelMonitor){func(m *ChannelMonitor) { m.AccountID = rankingPtr(int64(8)) }, func(m *ChannelMonitor) { m.Endpoint = "https://unrelated.invalid/v1" }, func(m *ChannelMonitor) { m.CheckMode = MonitorCheckModeQuota }, func(m *ChannelMonitor) { m.Provider = PlatformGrok }, func(m *ChannelMonitor) { m.Enabled = false }} {
 		copy := *m
 		mutate(&copy)
 		require.False(t, rankingMonitorMatchesAccount(&copy, a))

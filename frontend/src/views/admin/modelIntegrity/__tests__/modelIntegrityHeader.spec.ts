@@ -42,3 +42,23 @@ describe('model integrity header subtitles', () => {
     }
   })
 })
+
+// Each locale names the evaluate action in its own language, and every
+// English message that refers to it uses the same English name.
+describe('model integrity evaluate action copy', () => {
+  const collect = (value: unknown): string[] =>
+    typeof value === 'string' ? [value] : value && typeof value === 'object' ? Object.values(value).flatMap(collect) : []
+
+  it('is “Evaluate now” in English and 立即评估 in Chinese', () => {
+    expect(en.admin.modelIntegrity.scheduling.evaluation.run).toBe('Evaluate now')
+    expect(zh.admin.modelIntegrity.scheduling.evaluation.run).toBe('立即评估')
+    expect(en.admin.modelIntegrity.scheduling.quality.pending).toContain('“Evaluate now”')
+    expect(en.admin.modelIntegrity.scheduling.board.none).toContain('“Evaluate now”')
+    expect(en.admin.modelIntegrity.scheduling.records.empty).toContain('“Evaluate now”')
+  })
+
+  it('leaves no Chinese text in the English model integrity copy', () => {
+    const chinese = collect(en.admin.modelIntegrity).filter(text => /[一-鿿]/.test(text))
+    expect(chinese).toEqual([])
+  })
+})

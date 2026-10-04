@@ -3,13 +3,16 @@ import type { OpenAIEvalRankingFactors, OpenAIEvalPolicyWeights } from '@/api/ad
 import {
   PRESET_WEIGHTS,
   RANKING_FACTORS,
+  accountFactorSourceKind,
   assessedQualityRatio,
-  canAppendPage,
   coverageStatusKey,
   effectiveTone,
   exclusionScopeKey,
+  factorRawValue,
+  factorSourceKind,
   fallbackReasonKey,
   isInactiveStatus,
+  isQualityFirst,
   isQualityAssessed,
   isStaleEvaluation,
   mergeRankedAccounts,
@@ -18,6 +21,9 @@ import {
   qualityTestCounts,
   rankingSourceKey,
   rankingTriggerKey,
+  ruleExceptionsFor,
+  sameOverviewBinding,
+  sourceKind,
   unknownReasonKey,
   weightedFactorCount,
   weightsForPolicy
@@ -131,17 +137,89 @@ describe('generations and paging', () => {
     expect(isStaleEvaluation(4, null)).toBe(false)
   })
 
-  it('appends a page only within the same generation and filters', () => {
-    const dimension = { evaluation_id: 'i-1', group_id: 7, requested_model: 'gpt-5', reasoning_effort: 'high' }
-    expect(canAppendPage(dimension, { ...dimension })).toBe(true)
-    expect(canAppendPage(dimension, { ...dimension, evaluation_id: 'i-2' })).toBe(false)
-    expect(canAppendPage(dimension, { ...dimension, reasoning_effort: '' })).toBe(false)
-    expect(canAppendPage(null, dimension)).toBe(false)
+  it('continues a page only within the same generation and group filter', () => {
+    const bound = { evaluationId: 'i-1', groupId: 7 }
+    expect(sameOverviewBinding(bound, { ...bound })).toBe(true)
+    expect(sameOverviewBinding(bound, { ...bound, evaluationId: 'i-2' })).toBe(false)
+    expect(sameOverviewBinding(bound, { ...bound, groupId: null })).toBe(false)
+    expect(sameOverviewBinding(null, bound)).toBe(false)
   })
 
   it('deduplicates a boundary row instead of showing one account twice', () => {
     const row = (account_id: number, rank: number) => ({ account_id, rank } as never)
     const merged = mergeRankedAccounts([row(11, 1), row(12, 2)], [row(12, 2), row(13, 3)])
     expect(merged.map(item => item.account_id)).toEqual([11, 12, 13])
+  })
+})
+
+describe('account overview factors', () => {
+  it('labels each source honestly and never promotes an unlisted source to measured', () => {
+    expect(sourceKind('request_metrics')).toBe('measured')
+    expect(sourceKind('v1_matched_probe')).toBe('probe')
+    expect(sourceKind('default')).toBe('default')
+    expect(sourceKind('legacy_neutral')).toBe('neutral')
+    expect(sourceKind('brand_new_source')).toBe('other')
+    expect(sourceKind(null)).toBeNull()
+  })
+
+  it('labels a default only when the server applied one, and a partial default as mixed', () => {
+    const f = factors()
+    expect(factorSourceKind('ttft', f)).toBe('measured')
+    expect(factorSourceKind('ttft', { ...f, ttft: { ...f.ttft, known: false, ms: null, score: 0.9, default_applied: true } })).toBe('default')
+    expect(factorSourceKind('error_rate', { ...f, error_rate: { ...f.error_rate, default_applied: true } })).toBe('mixed')
+    expect(factorSourceKind('price', { ...f, price: { ...f.price, known: false, rate_multiplier: null, source: 'optimistic_default', default_applied: true } })).toBe('default')
+    const missing = { ...f, ttft: { ...f.ttft, known: false, ms: null } }
+    // Without the server saying "default", a missing reading is unknown, not a default.
+    expect(factorSourceKind('ttft', missing)).toBe('unknown')
+    const probed = { ...f, error_rate: { ...f.error_rate, source: 'v1_matched_probe' } }
+    expect(factorSourceKind('error_rate', probed)).toBe('probe')
+    expect(factorSourceKind('error_rate', { ...f, error_rate: { ...f.error_rate, source: 'macro_evidence' } })).toBe('measured')
+    expect(factorSourceKind('price', { ...f, price: { ...f.price, source: 'brand_new' } })).toBe('other')
+  })
+
+  it('refines the account error rate from the model cells it averages', () => {
+    const f = factors()
+    const account = { ...f, error_rate: { ...f.error_rate, source: 'macro_evidence' } }
+    const real = { factors: { ...f, error_rate: { ...f.error_rate, source: 'request_ewma_account_model_effort' } } }
+    const probe = { factors: { ...f, error_rate: { ...f.error_rate, source: 'v1_matched_probe' } } }
+    expect(accountFactorSourceKind('error_rate', account, [real, real])).toBe('measured')
+    expect(accountFactorSourceKind('error_rate', account, [probe])).toBe('probe')
+    expect(accountFactorSourceKind('error_rate', account, [real, probe])).toBe('mixed')
+    // Price is an account fact; model cells never change its source.
+    expect(accountFactorSourceKind('price', { ...f, price: { ...f.price, source: 'account_rate' } }, [probe])).toBe('measured')
+  })
+
+  it('treats an unassessed pass rate as neutral only when it still scored points', () => {
+    const unknown = factors({ state: 'unknown', ratio: null, known: false })
+    expect(factorSourceKind('quality', unknown, { quality: 5 })).toBe('neutral')
+    expect(factorSourceKind('quality', unknown, { quality: 0 })).toBe('unknown')
+    expect(factorSourceKind('quality', factors())).toBe('measured')
+  })
+
+  it('keeps a missing raw value null instead of 0', () => {
+    const f = factors()
+    const missing = { ...f, error_rate: { ...f.error_rate, known: false, value: null }, ttft: { ...f.ttft, ms: null } }
+    expect(factorRawValue('error_rate', missing)).toBeNull()
+    expect(factorRawValue('ttft', missing)).toBeNull()
+    expect(factorRawValue('price', f)).toBe(0.5)
+    expect(factorRawValue('quality', factors({ state: 'insufficient' }))).toBeNull()
+  })
+
+  it('puts the pass rate first only for quality-first ordering', () => {
+    expect(isQualityFirst('quality_then_score', 'avoid_degradation')).toBe(true)
+    expect(isQualityFirst('score_desc', 'custom_balance')).toBe(false)
+    expect(isQualityFirst(undefined, 'avoid_degradation')).toBe(true)
+    expect(isQualityFirst(undefined, 'stability_first')).toBe(false)
+  })
+
+  it('lists only model rules that differ from the default and match an evidenced model', () => {
+    const models = [{ requested_model: 'gpt-5.6', reasoning_effort: 'high' }, { requested_model: 'gpt-6', reasoning_effort: '' }]
+    const rules = [
+      { requested_model: 'GPT-5.6', reasoning_effort: '', policy: 'stability_first' as const },
+      { requested_model: 'gpt-6', reasoning_effort: 'low', policy: 'cost_first' as const },
+      { requested_model: 'gpt-6', reasoning_effort: '', policy: 'avoid_degradation' as const },
+      { requested_model: 'luna', reasoning_effort: '', policy: 'stability_first' as const }
+    ]
+    expect(ruleExceptionsFor(rules, models, 'avoid_degradation').map(rule => rule.requested_model)).toEqual(['GPT-5.6'])
   })
 })

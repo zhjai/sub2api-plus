@@ -3,10 +3,11 @@ package service
 import (
 	"context"
 	"errors"
+	"math/big"
 	"time"
 )
 
-const OpenAIEvalRankingAlgorithmVersion = "frozen-five-factor-v1"
+const OpenAIEvalRankingAlgorithmVersion = "evidence-account-macro-v2"
 
 var (
 	ErrOpenAIEvalRankingSuperseded      = errors.New("EVALUATION_SUPERSEDED")
@@ -23,10 +24,11 @@ type OpenAIEvalRankingWeights struct {
 }
 
 type OpenAIEvalFactorMeta struct {
-	Score         float64    `json:"score"`
-	Known         bool       `json:"known"`
-	ObservedAt    *time.Time `json:"observed_at"`
-	UnknownReason *string    `json:"unknown_reason"`
+	Score          float64    `json:"score"`
+	Known          bool       `json:"known"`
+	ObservedAt     *time.Time `json:"observed_at"`
+	UnknownReason  *string    `json:"unknown_reason"`
+	DefaultApplied bool       `json:"default_applied"`
 }
 
 type OpenAIEvalRankingPrice struct {
@@ -62,6 +64,7 @@ type OpenAIEvalRankingQuality struct {
 	Evaluated     int        `json:"evaluated"`
 	Ratio         *float64   `json:"ratio"`
 	ExpiresAt     *time.Time `json:"expires_at"`
+	macroRatio    *big.Rat
 }
 type OpenAIEvalRankingMonitor struct {
 	MonitorID     int64     `json:"monitor_id"`
@@ -72,12 +75,13 @@ type OpenAIEvalRankingMonitor struct {
 	PingLatencyMS *int      `json:"ping_latency_ms"`
 }
 type OpenAIEvalRankingFactors struct {
-	Price      OpenAIEvalRankingPrice     `json:"price"`
-	ErrorRate  OpenAIEvalRankingErrorRate `json:"error_rate"`
-	TTFT       OpenAIEvalRankingTTFT      `json:"ttft"`
-	Load       OpenAIEvalRankingLoad      `json:"load"`
-	Quality    OpenAIEvalRankingQuality   `json:"quality"`
-	Monitoring []OpenAIEvalRankingMonitor `json:"monitoring,omitempty"`
+	Price            OpenAIEvalRankingPrice     `json:"price"`
+	ErrorRate        OpenAIEvalRankingErrorRate `json:"error_rate"`
+	TTFT             OpenAIEvalRankingTTFT      `json:"ttft"`
+	Load             OpenAIEvalRankingLoad      `json:"load"`
+	Quality          OpenAIEvalRankingQuality   `json:"quality"`
+	Monitoring       []OpenAIEvalRankingMonitor `json:"monitoring,omitempty"`
+	monitorExpiresAt *time.Time
 }
 type OpenAIEvalRankingExclusion struct {
 	Code       string    `json:"code"`
@@ -85,6 +89,7 @@ type OpenAIEvalRankingExclusion struct {
 	ObservedAt time.Time `json:"observed_at"`
 }
 type OpenAIEvalRankedAccount struct {
+	OverviewPrior    *OpenAIEvalOverviewPrior     `json:"overview_prior,omitempty"`
 	AccountID        int64                        `json:"account_id"`
 	AccountName      string                       `json:"account_name"`
 	Rank             *int                         `json:"rank"`
@@ -168,6 +173,7 @@ type OpenAIEvalRankingError struct {
 }
 type OpenAIEvalRankingSnapshot struct {
 	Summary               *OpenAIEvalRankingSummary    `json:"summary"`
+	PreviousSummary       *OpenAIEvalRankingSummary    `json:"previous_summary"`
 	EffectiveStatus       string                       `json:"effective_status"`
 	CurrentConfigRevision int64                        `json:"current_config_revision"`
 	EvaluationInProgress  bool                         `json:"evaluation_in_progress"`
@@ -175,6 +181,59 @@ type OpenAIEvalRankingSnapshot struct {
 	Groups                []OpenAIEvalRankingGroup     `json:"groups"`
 	Dimensions            []OpenAIEvalRankingDimension `json:"dimensions"`
 	NextCursor            *string                      `json:"next_cursor"`
+}
+
+type OpenAIEvalAccountModel struct {
+	RequestedModel  string                   `json:"requested_model"`
+	ReasoningEffort string                   `json:"reasoning_effort"`
+	UpstreamModels  []string                 `json:"upstream_models"`
+	Factors         OpenAIEvalRankingFactors `json:"factors"`
+	Sources         []string                 `json:"sources"`
+	Policy          string                   `json:"policy"`
+	Weights         OpenAIEvalRankingWeights `json:"weights"`
+}
+
+// Quality tier bands preserve the lexicographic order without rounding ratios.
+type OpenAIEvalAccountPriority struct {
+	QualityKnown     bool     `json:"quality_known"`
+	QualityRatio     *float64 `json:"quality_ratio"`
+	OperationalScore float64  `json:"operational_score"`
+	QualityTier      *int     `json:"quality_tier"`
+}
+
+type OpenAIEvalOverviewPrior struct {
+	Rank          int                       `json:"rank"`
+	PriorityScore float64                   `json:"priority_score"`
+	Priority      OpenAIEvalAccountPriority `json:"priority"`
+}
+
+type OpenAIEvalAccountOverviewRow struct {
+	OpenAIEvalRankedAccount
+	GroupIDs                 []int64                   `json:"group_ids"`
+	ModelCount               int                       `json:"model_count"`
+	QualityModelCount        int                       `json:"quality_model_count"`
+	UnknownQualityModelCount int                       `json:"unknown_quality_model_count"`
+	QualityCellCount         int                       `json:"quality_cell_count"`
+	UnknownQualityCellCount  int                       `json:"unknown_quality_cell_count"`
+	WorstQualityModel        *string                   `json:"worst_quality_model"`
+	WorstQualityRatio        *float64                  `json:"worst_quality_ratio"`
+	Models                   []OpenAIEvalAccountModel  `json:"models"`
+	Priority                 OpenAIEvalAccountPriority `json:"priority"`
+}
+
+type OpenAIEvalAccountOverview struct {
+	Summary               *OpenAIEvalRankingSummary      `json:"summary"`
+	PreviousSummary       *OpenAIEvalRankingSummary      `json:"previous_summary"`
+	EffectiveStatus       string                         `json:"effective_status"`
+	CurrentConfigRevision int64                          `json:"current_config_revision"`
+	EvaluationInProgress  bool                           `json:"evaluation_in_progress"`
+	RankingError          *OpenAIEvalRankingError        `json:"ranking_error"`
+	Groups                []OpenAIEvalRankingGroup       `json:"groups"`
+	NextCursor            *string                        `json:"next_cursor"`
+	Policy                string                         `json:"policy"`
+	Weights               OpenAIEvalRankingWeights       `json:"weights"`
+	Ordering              string                         `json:"ordering"`
+	Accounts              []OpenAIEvalAccountOverviewRow `json:"accounts"`
 }
 type OpenAIEvalRankingFilter struct {
 	GroupID         *int64

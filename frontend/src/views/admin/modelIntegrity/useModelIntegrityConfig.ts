@@ -7,6 +7,7 @@ import {
   type OpenAIEvalQualityRefreshResult,
   type OpenAIEvalRankingSnapshot,
   type OpenAIEvalRankingSummary,
+  type OpenAIEvalSchedulingPolicyRule,
   type RankingError
 } from '@/api/admin/accounts'
 import type { AccountListItem } from '@/types'
@@ -60,6 +61,8 @@ export function useModelIntegrityConfig() {
   const foldedLegacyStability = ref(false)
   /** The interval the server is using now; edits only apply after saving. */
   const savedQualityRefreshInterval = ref(DEFAULT_QUALITY_REFRESH_SECONDS)
+  /** Model rules as the server stored them; they, not unsaved edits, apply to requests. */
+  const savedRules = ref<OpenAIEvalSchedulingPolicyRule[]>([])
   /**
    * What the gateway is applying now, straight from the server. This is never
    * derived from unsaved edits: the published order belongs to a revision, and
@@ -84,7 +87,7 @@ export function useModelIntegrityConfig() {
    * read. It touches only the evaluation projection, so unsaved edits on the
    * page survive an evaluation untouched.
    */
-  function applyRankingSnapshot(snapshot: Partial<OpenAIEvalRankingSnapshot>) {
+  function applyRankingSnapshot(snapshot: Partial<Pick<OpenAIEvalRankingSnapshot, 'summary' | 'ranking_error' | 'evaluation_in_progress' | 'effective_status' | 'current_config_revision'>>) {
     if (snapshot.summary !== undefined) ranking.summary = snapshot.summary
     if (snapshot.ranking_error !== undefined) ranking.error = snapshot.ranking_error
     if (snapshot.evaluation_in_progress !== undefined) ranking.inProgress = snapshot.evaluation_in_progress
@@ -120,6 +123,7 @@ export function useModelIntegrityConfig() {
     config.quality_refreshed_at = saved.quality_refreshed_at ?? null
     config.quality_next_refresh_at = saved.quality_next_refresh_at ?? null
     savedQualityRefreshInterval.value = config.quality_refresh_interval_seconds
+    savedRules.value = (saved.policies ?? []).map(rule => ({ ...rule, reasoning_effort: rule.reasoning_effort || '' }))
     config.accounts = (saved.accounts ?? []).map(route => normalizeRoute({ ...route }))
     applyRanking(saved)
     snapshot.value = serialized()
@@ -213,5 +217,5 @@ export function useModelIntegrityConfig() {
     else applyRankingSnapshot({ ranking_error: result.ranking_error ?? null })
   }
 
-  return { config, catalog, accounts, loading, loaded, saving, conflict, loadError, dirty, ranking, load, reloadConfig, save, accountName, accountLabel, savedQualityRefreshInterval, applyQualityRefresh, applyRankingSnapshot, applyRankingSummary, foldedLegacyStability }
+  return { config, catalog, accounts, loading, loaded, saving, conflict, loadError, dirty, ranking, load, reloadConfig, save, accountName, accountLabel, savedQualityRefreshInterval, savedRules, applyQualityRefresh, applyRankingSnapshot, applyRankingSummary, foldedLegacyStability }
 }
