@@ -19,7 +19,7 @@ func (overviewFailingMonitorRepo) List(context.Context, ChannelMonitorListParams
 
 type overviewFailingQualityRepo struct{ *rankingTestRepo }
 
-func (overviewFailingQualityRepo) LatestScheduledRuns(context.Context, []OpenAIEvalEvidenceKey) ([]OpenAIEvalRun, error) {
+func (overviewFailingQualityRepo) LatestCompletedRuns(context.Context, []OpenAIEvalEvidenceKey) ([]OpenAIEvalRun, error) {
 	return nil, errors.New("synthetic quality read failure")
 }
 
@@ -170,7 +170,7 @@ func TestOpenAIAccountOverviewCompositeEvidenceDoesNotPoolEndpointProbes(t *test
 	require.Equal(t, []string{"model-a", "model-b"}, public.UpstreamModels)
 	require.False(t, public.Factors.ErrorRate.Known)
 	require.Nil(t, public.Factors.ErrorRate.Value)
-	require.Equal(t, []string{"scheduled_quality"}, public.Sources)
+	require.Equal(t, []string{"quality_evidence"}, public.Sources)
 	require.Equal(t, 0., *row.Models[1].Factors.ErrorRate.Value)
 	require.Equal(t, 1., *row.Models[2].Factors.ErrorRate.Value)
 }

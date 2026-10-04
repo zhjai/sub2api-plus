@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const OpenAIEvalRankingAlgorithmVersion = "evidence-account-macro-v2"
+const OpenAIEvalRankingAlgorithmVersion = "evidence-account-macro-v3-latest-verdict"
 
 var (
 	ErrOpenAIEvalRankingSuperseded      = errors.New("EVALUATION_SUPERSEDED")
@@ -253,7 +253,7 @@ type OpenAIEvalEvidenceKey struct {
 
 // Latest terminal rows must be selected before validating status or version.
 type OpenAIEvalLatestEvidenceRepository interface {
-	LatestScheduledRuns(context.Context, []OpenAIEvalEvidenceKey) ([]OpenAIEvalRun, error)
+	LatestCompletedRuns(context.Context, []OpenAIEvalEvidenceKey) ([]OpenAIEvalRun, error)
 }
 
 type OpenAIEvalRankingTrace struct {

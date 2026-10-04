@@ -227,9 +227,10 @@ func qualityFromLatestRuns(config *OpenAIEvalConfig, accountID int64, model, eff
 			q.State = "stale"
 			continue
 		}
-		if run.DataVersion != OpenAIEvalQualityDataVersion || run.FinishedAt.After(now) || run.FinishedAt.IsZero() || run.TriggerSource != "scheduled" || run.ID <= 0 {
+		if run.DataVersion != OpenAIEvalQualityDataVersion || run.FinishedAt.After(now) || run.FinishedAt.IsZero() || !openAIEvalQualityRunSourceSupported(run.TriggerSource) || run.ID <= 0 {
 			continue
 		}
+		normalizeOpenAIEvalAttributionRun(&run)
 		counts := openAIEvalQualityCountsFromRun(&run)
 		if !counts.valid() || counts.EvaluatedCount > openAIEvalQualityMaxSamples(testType) {
 			continue

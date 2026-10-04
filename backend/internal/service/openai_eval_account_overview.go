@@ -102,7 +102,7 @@ func overviewSources(f OpenAIEvalRankingFactors) []string {
 		sources = append(sources, "request_ttft_account_model_effort")
 	}
 	if f.Quality.Evaluated > 0 {
-		sources = append(sources, "scheduled_quality")
+		sources = append(sources, "quality_evidence")
 	}
 	return sources
 }

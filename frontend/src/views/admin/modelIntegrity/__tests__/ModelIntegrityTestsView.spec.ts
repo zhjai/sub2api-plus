@@ -172,7 +172,7 @@ describe('ModelIntegrityTestsView', () => {
     await wrapper.get('[data-testid="history-row"]').trigger('click')
     await flushPromises()
     const note = document.body.querySelector('[data-testid="attribution-note"]')
-    expect(note?.textContent?.trim()).toBe('归因基于回答行为推断，不能证明实际路由。仅自动测试的结果会计入降智通过率，手动测试只用于诊断。')
+    expect(note?.textContent?.trim()).toBe('归因基于回答行为推断，不能证明实际路由。该测试开启自动运行时，最近一次已完成的归因结论会计入降智通过率，手动或自动运行均可。ModelTrace 只要有一条有效输出即可归因，失败的请求仍保留以供排查；行为指纹需全部计划采样均有效才会归因。')
     expect(document.body.querySelector('[data-testid="detail-status"]')?.textContent?.trim()).toBe('疑似 Luna')
     expect(document.body.textContent).toContain('gpt-5-luna')
     wrapper.unmount()

@@ -93,7 +93,7 @@ func TestOpenAIEvalQualityEqualDiagnosticOutcomesAndCompletionOrder(t *testing.T
 }
 
 func TestOpenAIEvalQualitySelectedTypesRequireFreshValidEvidence(t *testing.T) {
-	for _, invalid := range []string{"missing", "expired", "old_contract", "manual", "insufficient", "error", "contradictory_status", "partial_identity", "wrong_model", "wrong_effort"} {
+	for _, invalid := range []string{"missing", "expired", "old_contract", "unknown_source", "insufficient", "error", "contradictory_status", "partial_identity", "wrong_model", "wrong_effort"} {
 		t.Run(invalid, func(t *testing.T) {
 			s, repo, accounts := setupQualityRefreshTest(t)
 			repo.config.Accounts[0].ModelTraceSchedule = repo.config.Accounts[0].CandySchedule
@@ -106,8 +106,8 @@ func TestOpenAIEvalQualitySelectedTypesRequireFreshValidEvidence(t *testing.T) {
 				trace.ExpiresAt = time.Now().Add(-time.Second)
 			case "old_contract":
 				trace.DataVersion = "candy-29-v2"
-			case "manual":
-				trace.TriggerSource = "manual"
+			case "unknown_source":
+				trace.TriggerSource = "imported"
 			case "insufficient", "error":
 				trace.OutcomeStatus = invalid
 			case "contradictory_status":

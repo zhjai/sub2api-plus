@@ -86,14 +86,14 @@ func TestOpenAIEvalQualityReadIsolationFreshnessAndMalformed(t *testing.T) {
 	_, ok = ReadOpenAIEvalQualityFromAccount(account, "gpt-6.1-sol", "high", now.Add(OpenAIEvalQualityTTL))
 	require.False(t, ok)
 	for name, change := range map[string]func(*OpenAIEvalQualityAggregate){
-		"old_question":  func(q *OpenAIEvalQualityAggregate) { q.DataVersion = "candy-29-v2" },
-		"old_schema":    func(q *OpenAIEvalQualityAggregate) { q.Version = "attempts-v0" },
-		"wrong_account": func(q *OpenAIEvalQualityAggregate) { q.AccountID++ },
-		"wrong_model":   func(q *OpenAIEvalQualityAggregate) { q.RequestedModel = "gpt-6-sol" },
-		"wrong_effort":  func(q *OpenAIEvalQualityAggregate) { q.ReasoningEffort = "low" },
-		"manual":        func(q *OpenAIEvalQualityAggregate) { q.TriggerSource = "manual" },
-		"zero":          func(q *OpenAIEvalQualityAggregate) { q.EvaluatedCount = 0 },
-		"overflow":      func(q *OpenAIEvalQualityAggregate) { q.PassCount = 11 },
+		"old_question":   func(q *OpenAIEvalQualityAggregate) { q.DataVersion = "candy-29-v2" },
+		"old_schema":     func(q *OpenAIEvalQualityAggregate) { q.Version = "attempts-v0" },
+		"wrong_account":  func(q *OpenAIEvalQualityAggregate) { q.AccountID++ },
+		"wrong_model":    func(q *OpenAIEvalQualityAggregate) { q.RequestedModel = "gpt-6-sol" },
+		"wrong_effort":   func(q *OpenAIEvalQualityAggregate) { q.ReasoningEffort = "low" },
+		"unknown_source": func(q *OpenAIEvalQualityAggregate) { q.TriggerSource = "imported" },
+		"zero":           func(q *OpenAIEvalQualityAggregate) { q.EvaluatedCount = 0 },
+		"overflow":       func(q *OpenAIEvalQualityAggregate) { q.PassCount = 11 },
 		"future": func(q *OpenAIEvalQualityAggregate) {
 			q.EvaluatedAt = now.Add(time.Minute)
 			q.ExpiresAt = q.EvaluatedAt.Add(OpenAIEvalQualityTTL)
@@ -204,7 +204,7 @@ func TestOpenAIEvalQualityRecordLatestRunNotAttempts(t *testing.T) {
 	require.ErrorContains(t, s.recordOpenAIEvalQuality(context.Background(), 42, run, counts), "busy")
 }
 
-func TestOpenAIEvalQualityRecordRejectsOperationalManualAndOldEvidence(t *testing.T) {
+func TestOpenAIEvalQualityRecordRejectsOperationalAndOldEvidence(t *testing.T) {
 	enableQualityEffects(t)
 	accounts := &qualityAccountRepository{account: &Account{ID: 17, Extra: map[string]any{}}}
 	s := &OpenAIEvalService{accounts: accounts, repo: &qualityLeaseRepository{}}
@@ -216,9 +216,9 @@ func TestOpenAIEvalQualityRecordRejectsOperationalManualAndOldEvidence(t *testin
 		copy.Status = status
 		require.NoError(t, s.recordOpenAIEvalQuality(context.Background(), 1, &copy, counts))
 	}
-	manual := *run
-	manual.TriggerSource = "manual"
-	require.NoError(t, s.recordOpenAIEvalQuality(context.Background(), 1, &manual, counts))
+	unsupported := *run
+	unsupported.TriggerSource = "imported"
+	require.NoError(t, s.recordOpenAIEvalQuality(context.Background(), 1, &unsupported, counts))
 	old := *run
 	old.DataVersion = "candy-29-v2"
 	require.Error(t, s.recordOpenAIEvalQuality(context.Background(), 1, &old, counts))
@@ -247,7 +247,7 @@ func TestOpenAIEvalQualityRecordIdentityBankAndPartialErrors(t *testing.T) {
 	run.FinishedAt = now.Add(time.Millisecond)
 	run.Outcome.ModelTrace.Samples = []OpenAIEvalModelTraceSample{{Valid: true}, {Error: "response_incomplete"}}
 	require.NoError(t, s.recordOpenAIEvalQuality(context.Background(), 2, run, counts))
-	require.Equal(t, 1, accounts.writes, "partially operational runs cannot replace routing evidence")
+	require.Equal(t, 1, accounts.writes, "used output count must match valid outputs")
 	run.Outcome.ModelTrace.Samples = nil
 	run.Outcome.ModelTrace.BankRevision = "old-16-model-bank"
 	require.Error(t, s.recordOpenAIEvalQuality(context.Background(), 2, run, counts))

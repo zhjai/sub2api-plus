@@ -87,8 +87,8 @@ export default {
     },
     tests: {
       title: 'Integrity tests',
-      headerDescription: 'Check for degraded models. Automatic results can affect ranking.',
-      description: 'Periodically checks, with fixed questions and sampling, whether accounts serve the requested model and whether request routes stay stable. With evaluation effects on, the integrity pass rate from automatic tests ranks accounts under “Avoid degradation” and under “Custom balance” when it has a pass-rate weight. Manual tests are diagnostics only and never affect ranking. Test results do not change BPS state; automatic BPS switching is driven by each account’s independent probe under Scheduling policy.',
+      headerDescription: 'Check for degraded models. Manual or automatic results can affect ranking.',
+      description: 'Periodically checks, with fixed questions and sampling, whether accounts serve the requested model and whether request routes stay stable. With evaluation effects on, the integrity pass rate ranks accounts under “Avoid degradation” and under “Custom balance” when it has a pass-rate weight. Tests set to run automatically decide which tests count; each one uses its latest completed result, whether that run was manual or automatic. Test results do not change BPS state; automatic BPS switching is driven by each account’s independent probe under Scheduling policy.',
       budget: 'Automatic tests send about {requests} upstream requests per day ({plans} automatic plans).',
       budgetNone: 'Automatic tests are off. Only manual tests send requests.',
       budgetHint: 'Test requests are billed like normal requests.',
@@ -223,7 +223,7 @@ export default {
         modeltraceMetric: 'Attributed model {model}, probability {probability}.',
         fingerprintNearest: 'Closest reference model: {model}.',
         nearestModel: 'Closest reference model',
-        attributionNote: 'Attribution is inferred from response behavior and does not prove the actual route. Only automatic test results count toward the integrity pass rate; manual tests are diagnostics only.',
+        attributionNote: 'Attribution is inferred from response behavior and does not prove the actual route. When this test is set to run automatically, its latest completed attribution counts toward the integrity pass rate, manual or automatic. ModelTrace can attribute from one valid output, with failed requests kept for diagnosis; Fingerprint attributes only when every planned sample is valid.',
         stateProbeMetric: 'Status codes {mint} / {cont}, {ticket}',
         newTicket: 'route switched',
         sameTicket: 'route unchanged',
@@ -352,12 +352,12 @@ export default {
             error_rate: 'Share of real requests that failed. Not a sign of degradation.',
             ttft: 'Wait for the first output, not the time to a full answer.',
             load: 'Current concurrency and queue use.',
-            quality: 'Selected automatic tests whose verdict passed or likely passed ÷ tests selected. An unknown pass rate adds the neutral midpoint of this weight; that is a scoring rule, not a 50% pass rate.'
+            quality: 'Selected tests whose latest verdict passed or likely passed ÷ tests selected. A test is selected when it is set to run automatically; manual and automatic results both count. An unknown pass rate adds the neutral midpoint of this weight; that is a scoring rule, not a 50% pass rate.'
           },
           legacyFolded: 'The old “Stability” weight was merged as 60% error rate and 40% first-token latency; ranking is unchanged.',
           zeroTotal: 'Weights must add up to more than 0. Set at least one weight.'
         },
-        avoidNote: 'The integrity pass rate is counted per test: of the selected Candy, Fingerprint and ModelTrace tests, how many had a passed or likely passed verdict in their latest automatic run, divided by the number selected. Two selected with one passing is 50%; three selected with one passing is 33.3%. Each test counts once by its final verdict, whatever its sample count or retries. If any selected test has no valid verdict (insufficient evidence, request failure or expired), the rate is unknown and counts as neither passed nor degraded. “Avoid degradation” chooses from the best pass rate tier first and ranks within it by price and operational stability; if that tier has no available capacity, the next tier is tried. Accounts with an unknown pass rate are tried after every assessed account. Account disabling, model support, capacity and continued-response account binding are still checked live.',
+        avoidNote: 'The integrity pass rate is counted per test: of the selected Candy, Fingerprint and ModelTrace tests, how many had a passed or likely passed verdict in their latest completed run, divided by the number selected. A test is selected when it is set to run automatically; its latest result counts whether that run was manual or automatic, and a run still in progress does not replace it. Two selected with one passing is 50%; three selected with one passing is 33.3%. Each test counts once by its final verdict, whatever its sample count or retries. If the latest result of any selected test has no valid verdict (no valid output, a failed or cancelled run, or expired), the rate is unknown and counts as neither passed nor degraded; an older passing result is not used instead. “Avoid degradation” chooses from the best pass rate tier first and ranks within it by price and operational stability; if that tier has no available capacity, the next tier is tried. Accounts with an unknown pass rate are tried after every assessed account. Account disabling, model support, capacity and continued-response account binding are still checked live.',
         sharedNote: 'With any policy other than “System default” in force, the published order replaces account priority, the system scheduling weights and movable session affinity. Only a required binding, such as continuing a previous response, still keeps a request on its account. Load weight is adjustable only under “Custom balance”; the other policies use a fixed weight.'
       },
       quality: {
@@ -547,7 +547,7 @@ export default {
         qualitySplit: '{pass} passed, {suspected} likely passed',
         qualityContribution: 'Score contribution {value}',
         qualityUnknown: 'Unknown',
-        qualityHint: 'Selected automatic tests whose final verdict passed or likely passed ÷ tests selected; each test has equal weight. Unknown when any selected test has no valid verdict; it is not 100%.',
+        qualityHint: 'Selected tests whose latest completed verdict, manual or automatic, passed or likely passed ÷ tests selected; each test has equal weight. Unknown when the latest result of any selected test has no valid verdict; it is not 100%.',
         verdict: {
           selected: 'Selected',
           topK: 'Candidate',
@@ -704,7 +704,7 @@ export default {
         coverage: 'Evidence for {models} models, pass rate known for {known}',
         coverageNone: 'No model evidence yet',
         coverageDetail: 'Real evidence for {models} models: pass rate known for {known}, unknown for {unknown}. The account pass rate averages the known models equally; within a model, reasoning efforts are averaged first.',
-        coverageNoneDetail: 'This account has no real requests, valid scheduled tests or matched probes yet. Models that only appear in the catalog or a mapping do not count. Missing factors are scored at the labelled default.',
+        coverageNoneDetail: 'This account has no real requests, valid integrity test results or matched probes yet. Models that only appear in the catalog or a mapping do not count. Missing factors are scored at the labelled default.',
         cells: 'Model and effort cells: pass rate known for {known}, unknown for {unknown}.',
         worst: 'Lowest pass rate: {model}, {ratio}',
         contributions: 'Score breakdown',
@@ -744,7 +744,7 @@ export default {
           other: 'Other'
         },
         sourceHint: {
-          measured: 'From real requests, valid scheduled tests, or the account’s own price and load.',
+          measured: 'From real requests, valid integrity test results, or the account’s own price and load.',
           probe: 'From a probe matched to this account, model and reasoning effort. Used only to estimate the error rate.',
           default: 'No real data, so the labelled default score is used. This is not a measurement.',
           mixed: 'Some models have measured or probe data and the rest use the labelled default. Open the details to see each model.',
@@ -902,7 +902,7 @@ export default {
         evidence: {
           title: 'Evidence behind this factor',
           realRequests: 'Real requests',
-          evaluation: 'Scheduled tests',
+          evaluation: 'Integrity tests',
           probe: 'Channel probe (diagnostic only)',
           probeLatency: 'Probe round-trip {ms} ms',
           v1Note: 'Channel monitoring supplies diagnostic context only. Its latency is a full round-trip, not first-output latency, and its status reflects probe slowness, not model integrity. It never changes the pass rate or the ranking.',
@@ -951,7 +951,7 @@ export default {
           no_error_samples: 'No real request results in the window, so no error rate is known.',
           no_ttft_samples: 'No first-output latency sample is available.',
           no_load_reading: 'No concurrency reading was available when this evaluation ran.',
-          quality_unknown: 'No completed automatic test evidence for the selected tests.',
+          quality_unknown: 'No completed test result for the selected tests.',
           quality_insufficient: 'Some selected tests have no valid verdict, so the pass rate is unknown.',
           quality_stale: 'The integrity evidence expired before this evaluation was published.',
           quality_expired: 'The integrity evidence expired before this evaluation was published.',
@@ -964,7 +964,7 @@ export default {
           no_request_samples: 'No real request results in the window, so no error rate is known.',
           no_first_output_samples: 'No first-output latency sample is available.',
           load_unavailable: 'No concurrency reading was available when this evaluation ran.',
-          no_selected_tests: 'No automatic integrity test is selected for this route.',
+          no_selected_tests: 'No integrity test is set to run automatically for this route. Manual results count only for tests that are.',
           selected_test_evidence_unavailable: 'Some selected tests have no valid verdict, so the pass rate is unknown.'
         },
         ordering: {

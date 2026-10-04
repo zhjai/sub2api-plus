@@ -2,12 +2,19 @@ package service
 
 import "strings"
 
-// Persisted logical samples are scored once; request attempts are diagnostics,
-// not extra observations of model quality.
+func openAIEvalQualityRunSourceSupported(source string) bool {
+	return source == "manual" || source == "scheduled"
+}
+
+// Failed request attempts remain diagnostics. A final attribution based on
+// valid outputs is still a quality verdict, even if other requests failed.
 func openAIEvalQualityCountsFromRun(run *OpenAIEvalRun) OpenAIEvalQualityCounts {
-	if run == nil || run.Error != "" {
+	if run == nil {
 		return OpenAIEvalQualityCounts{}
 	}
+	copy := *run
+	normalizeOpenAIEvalAttributionRun(&copy)
+	run = &copy
 	switch run.Status {
 	case "pass", "warning", "suspected_normal", "suspected_warning":
 	default:
@@ -16,6 +23,9 @@ func openAIEvalQualityCountsFromRun(run *OpenAIEvalRun) OpenAIEvalQualityCounts 
 	var counts OpenAIEvalQualityCounts
 	switch run.TestType {
 	case OpenAIEvalTypeCandy:
+		if run.Error != "" {
+			return counts
+		}
 		for _, sample := range run.Samples {
 			if !sample.Valid || sample.ErrorMessage != "" || strings.TrimSpace(sample.Answer) == "" {
 				continue
@@ -43,10 +53,8 @@ func openAIEvalQualityCountsFromRun(run *OpenAIEvalRun) OpenAIEvalQualityCounts 
 		if result == nil || result.Prediction == "" || result.UsedOutputs <= 0 {
 			return counts
 		}
-		for _, sample := range result.Samples {
-			if sample.Error != "" || !sample.Valid {
-				return counts
-			}
+		if !openAIEvalModelTraceUsedOutputsValid(result) {
+			return counts
 		}
 		counts.EvaluatedCount = result.UsedOutputs
 		if OpenAIEvalIdentityQualityStatus(result.Prediction) == "suspected_normal" {
@@ -54,4 +62,20 @@ func openAIEvalQualityCountsFromRun(run *OpenAIEvalRun) OpenAIEvalQualityCounts 
 		}
 	}
 	return counts
+}
+
+func openAIEvalModelTraceUsedOutputsValid(result *OpenAIEvalModelTraceResult) bool {
+	if result == nil || result.UsedOutputs <= 0 || result.UsedOutputs > OpenAIEvalModelTraceRequests {
+		return false
+	}
+	if len(result.Samples) == 0 {
+		return true
+	}
+	valid := 0
+	for _, sample := range result.Samples {
+		if sample.Valid && sample.Error == "" {
+			valid++
+		}
+	}
+	return valid == result.UsedOutputs
 }

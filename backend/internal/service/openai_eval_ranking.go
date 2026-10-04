@@ -148,7 +148,7 @@ func (r *OpenAIEvalRankingService) evaluate(ctx context.Context, trigger string,
 			return nil, ctx.Err()
 		case <-build.done:
 		}
-		if build.revision == config.Revision {
+		if build.revision == config.Revision && !force {
 			return build.result, build.err
 		}
 		return r.evaluate(ctx, trigger, force)
@@ -458,7 +458,7 @@ func (r *OpenAIEvalRankingService) readLatest(ctx context.Context, config *OpenA
 		return nil, ErrOpenAIEvalRankingUnavailable
 	}
 	for start := 0; start < len(keys); start += 600 {
-		runs, err := repo.LatestScheduledRuns(ctx, keys[start:min(start+600, len(keys))])
+		runs, err := repo.LatestCompletedRuns(ctx, keys[start:min(start+600, len(keys))])
 		if err != nil {
 			return nil, err
 		}

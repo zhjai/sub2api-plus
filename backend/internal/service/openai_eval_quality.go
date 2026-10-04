@@ -18,7 +18,7 @@ const (
 	OpenAIEvalQualityBaselineVersion        = "cpa-codex-candy-eval-97623969-v2"
 	OpenAIEvalQualityModelTraceBankRevision = "sha256:a4e256c00444179b76f3855578660e66f30659df8c0122f1768dd05a8d705630"
 	OpenAIEvalQualityVersion                = "logical-samples-per-type-v2"
-	OpenAIEvalQualityAssessmentBasis        = "automatic_test_outcomes_v1"
+	OpenAIEvalQualityAssessmentBasis        = "latest_test_outcomes_v2"
 	OpenAIEvalQualityTTL                    = 2 * time.Hour
 	OpenAIEvalQualityMaxTTL                 = 2 * time.Duration(OpenAIEvalMaxIntervalSeconds) * time.Second
 )
@@ -97,7 +97,7 @@ func OpenAIEvalIdentityQualityStatus(prediction string) string {
 	return "suspected_normal"
 }
 
-// OpenAIEvalQualityAggregate stores a test type's latest scheduled outcome.
+// OpenAIEvalQualityAggregate stores a test type's latest completed outcome.
 // An unknown outcome has zero counts and cannot be used as scored evidence.
 type OpenAIEvalQualityAggregate struct {
 	OpenAIEvalQualityCounts
@@ -192,7 +192,7 @@ func openAIEvalQualityMaxSamples(testType string) int {
 func (q OpenAIEvalQualityAggregate) validFor(accountID int64, model, effort string, now time.Time) bool {
 	_, validOutcome := q.diagnosticStatus()
 	return validOutcome && q.Version == OpenAIEvalQualityVersion && q.DataVersion == OpenAIEvalQualityDataVersion &&
-		q.AccountID == accountID && accountID > 0 && q.RunID > 0 && q.TriggerSource == "scheduled" &&
+		q.AccountID == accountID && accountID > 0 && q.RunID > 0 && openAIEvalQualityRunSourceSupported(q.TriggerSource) &&
 		q.RequestedModel != "" && q.RequestedModel == openAIEvalQualityDimension(model) &&
 		q.ReasoningEffort == openAIEvalQualityDimension(effort) && q.OpenAIEvalQualityCounts.valid() &&
 		q.EvaluatedCount <= openAIEvalQualityMaxSamples(q.TestType) &&
@@ -233,14 +233,14 @@ func readOpenAIEvalQualityEvidence(account *Account, model, effort, testType str
 
 // Call only AFTER FinishRun succeeds, using its persisted run ID. The caller
 // supplies counts from final logical samples, never run.RequestCount.
-// Manual diagnostics remain alert-only even when routing effects are enabled.
+// Manual and automatic results share the selected route's quality contract.
 func (s *OpenAIEvalService) recordOpenAIEvalQuality(ctx context.Context, runID int64, run *OpenAIEvalRun, counts OpenAIEvalQualityCounts) error {
-	if s == nil || s.accounts == nil || s.repo == nil || !OpenAIEvalEffectsEnabled() || run == nil || run.TriggerSource != "scheduled" {
+	if s == nil || s.accounts == nil || s.repo == nil || !OpenAIEvalEffectsEnabled() || run == nil || !openAIEvalQualityRunSourceSupported(run.TriggerSource) {
 		return nil
 	}
-	if run.Error != "" {
-		return nil
-	}
+	copy := *run
+	normalizeOpenAIEvalAttributionRun(&copy)
+	run = &copy
 	switch run.Status {
 	case "pass", "warning", "suspected_normal", "suspected_warning":
 	default:
@@ -248,6 +248,9 @@ func (s *OpenAIEvalService) recordOpenAIEvalQuality(ctx context.Context, runID i
 	}
 	switch run.TestType {
 	case OpenAIEvalTypeCandy:
+		if run.Error != "" {
+			return nil
+		}
 		if counts.SuspectedPassCount != 0 {
 			return errors.New("Candy quality requires scored passes")
 		}
@@ -264,10 +267,8 @@ func (s *OpenAIEvalService) recordOpenAIEvalQuality(ctx context.Context, runID i
 		if result == nil || result.BankRevision != OpenAIEvalQualityModelTraceBankRevision || result.Prediction == "" || result.UsedOutputs != counts.EvaluatedCount {
 			return errors.New("ModelTrace quality evidence does not match the pinned bank or counts")
 		}
-		for _, sample := range result.Samples {
-			if sample.Error != "" {
-				return nil
-			}
+		if !openAIEvalModelTraceUsedOutputsValid(result) {
+			return nil
 		}
 		if !openAIEvalIdentityQualityCountsMatch(result.Prediction, counts) {
 			return errors.New("ModelTrace quality attribution and counts disagree")
@@ -303,11 +304,11 @@ func (s *OpenAIEvalService) recordOpenAIEvalQuality(ctx context.Context, runID i
 	return s.persistOpenAIEvalQuality(ctx, quality)
 }
 
-// A newer unsuccessful automatic run invalidates the preceding scored result.
+// A newer unsuccessful run invalidates the preceding scored result.
 // Persist an ordered marker instead of deleting the key: an older finishing
 // attempt must not restore a stale pass after the unknown outcome.
 func (s *OpenAIEvalService) recordOpenAIEvalQualityResult(ctx context.Context, runID int64, run *OpenAIEvalRun) error {
-	if s == nil || s.accounts == nil || s.repo == nil || !OpenAIEvalEffectsEnabled() || run == nil || run.TriggerSource != "scheduled" || run.TestType == OpenAIEvalTypeStateProbe {
+	if s == nil || s.accounts == nil || s.repo == nil || !OpenAIEvalEffectsEnabled() || run == nil || !openAIEvalQualityRunSourceSupported(run.TriggerSource) || run.TestType == OpenAIEvalTypeStateProbe {
 		return nil
 	}
 	counts := openAIEvalQualityCountsFromRun(run)
@@ -395,7 +396,7 @@ func readOpenAIEvalQualityRecord(account *Account, model, effort, testType strin
 		return OpenAIEvalQualityAggregate{}, false
 	}
 	var quality OpenAIEvalQualityAggregate
-	if json.Unmarshal(payload, &quality) != nil || quality.Version != OpenAIEvalQualityVersion || quality.DataVersion != OpenAIEvalQualityDataVersion || quality.AccountID != account.ID || quality.RequestedModel != openAIEvalQualityDimension(model) || quality.ReasoningEffort != openAIEvalQualityDimension(effort) || quality.TestType != testType || quality.TriggerSource != "scheduled" || quality.RunID <= 0 || quality.EvaluatedAt.IsZero() {
+	if json.Unmarshal(payload, &quality) != nil || quality.Version != OpenAIEvalQualityVersion || quality.DataVersion != OpenAIEvalQualityDataVersion || quality.AccountID != account.ID || quality.RequestedModel != openAIEvalQualityDimension(model) || quality.ReasoningEffort != openAIEvalQualityDimension(effort) || quality.TestType != testType || !openAIEvalQualityRunSourceSupported(quality.TriggerSource) || quality.RunID <= 0 || quality.EvaluatedAt.IsZero() {
 		return OpenAIEvalQualityAggregate{}, false
 	}
 	return quality, true

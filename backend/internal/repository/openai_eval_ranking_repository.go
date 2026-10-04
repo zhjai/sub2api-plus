@@ -9,7 +9,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
-func (r *openAIEvalRepository) LatestScheduledRuns(ctx context.Context, keys []service.OpenAIEvalEvidenceKey) ([]service.OpenAIEvalRun, error) {
+func (r *openAIEvalRepository) LatestCompletedRuns(ctx context.Context, keys []service.OpenAIEvalEvidenceKey) ([]service.OpenAIEvalRun, error) {
 	if len(keys) > 600 {
 		return nil, errors.New("latest evidence batch exceeds 600 routes")
 	}
@@ -29,11 +29,11 @@ func (r *openAIEvalRepository) LatestScheduledRuns(ctx context.Context, keys []s
 		  SELECT * FROM openai_eval_runs
 		  WHERE account_id=k.account_id AND requested_model=k.requested_model
 		    AND reasoning_effort=k.reasoning_effort AND test_type=k.test_type
-		    AND trigger_source='scheduled' AND finished_at IS NOT NULL AND status <> 'running'
+		    AND trigger_source IN ('manual', 'scheduled') AND finished_at IS NOT NULL AND status <> 'running'
 		  ORDER BY finished_at DESC, id DESC LIMIT 1
 		) r ON true`, payload)
 	if err != nil {
-		return nil, fmt.Errorf("load latest scheduled evidence: %w", err)
+		return nil, fmt.Errorf("load latest completed evidence: %w", err)
 	}
 	defer rows.Close()
 	result := make([]service.OpenAIEvalRun, 0, len(keys))

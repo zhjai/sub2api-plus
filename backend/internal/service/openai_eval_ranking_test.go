@@ -43,13 +43,13 @@ func (r *rankingTestRepo) RecordAuditEvent(_ context.Context, _ int64, action st
 	r.audits = append(r.audits, action)
 	return nil
 }
-func (r *rankingTestRepo) LatestScheduledRuns(_ context.Context, keys []OpenAIEvalEvidenceKey) ([]OpenAIEvalRun, error) {
+func (r *rankingTestRepo) LatestCompletedRuns(_ context.Context, keys []OpenAIEvalEvidenceKey) ([]OpenAIEvalRun, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var result []OpenAIEvalRun
 	for _, key := range keys {
 		for _, run := range r.runs {
-			if run.AccountID == key.AccountID && run.RequestedModel == key.RequestedModel && run.ReasoningEffort == key.ReasoningEffort && run.TestType == key.TestType && run.TriggerSource == "scheduled" && !run.FinishedAt.IsZero() {
+			if run.AccountID == key.AccountID && run.RequestedModel == key.RequestedModel && run.ReasoningEffort == key.ReasoningEffort && run.TestType == key.TestType && openAIEvalQualityRunSourceSupported(run.TriggerSource) && run.Status != "running" && !run.FinishedAt.IsZero() {
 				result = append(result, run)
 			}
 		}
