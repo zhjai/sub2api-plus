@@ -49,7 +49,7 @@ func (r *rankingTestRepo) LatestCompletedRuns(_ context.Context, keys []OpenAIEv
 	var result []OpenAIEvalRun
 	for _, key := range keys {
 		for _, run := range r.runs {
-			if run.AccountID == key.AccountID && run.RequestedModel == key.RequestedModel && run.ReasoningEffort == key.ReasoningEffort && run.TestType == key.TestType && openAIEvalQualityRunSourceSupported(run.TriggerSource) && run.Status != "running" && !run.FinishedAt.IsZero() {
+			if run.AccountID == key.AccountID && openAIEvalQualityDimension(run.RequestedModel) == openAIEvalQualityDimension(key.RequestedModel) && openAIEvalQualityDimension(run.ReasoningEffort) == openAIEvalQualityDimension(key.ReasoningEffort) && run.TestType == key.TestType && openAIEvalQualityRunSourceSupported(run.TriggerSource) && run.Status != "running" && !run.FinishedAt.IsZero() {
 				result = append(result, run)
 			}
 		}

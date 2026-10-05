@@ -444,7 +444,7 @@ func (r *OpenAIEvalRankingService) readLatest(ctx context.Context, config *OpenA
 			if _, selected := openAIEvalQualityTestInterval(config, route.AccountID, route.RequestedModel, route.ReasoningEffort, testType); !selected {
 				continue
 			}
-			key := OpenAIEvalEvidenceKey{route.AccountID, route.RequestedModel, route.ReasoningEffort, testType}
+			key := OpenAIEvalEvidenceKey{route.AccountID, openAIEvalQualityDimension(route.RequestedModel), openAIEvalQualityDimension(route.ReasoningEffort), testType}
 			if !seen[key] {
 				seen[key] = true
 				keys = append(keys, key)
@@ -464,7 +464,7 @@ func (r *OpenAIEvalRankingService) readLatest(ctx context.Context, config *OpenA
 			return nil, err
 		}
 		for _, run := range runs {
-			key := OpenAIEvalEvidenceKey{run.AccountID, run.RequestedModel, run.ReasoningEffort, run.TestType}
+			key := OpenAIEvalEvidenceKey{run.AccountID, openAIEvalQualityDimension(run.RequestedModel), openAIEvalQualityDimension(run.ReasoningEffort), run.TestType}
 			if !seen[key] || run.Status == "running" {
 				continue
 			}

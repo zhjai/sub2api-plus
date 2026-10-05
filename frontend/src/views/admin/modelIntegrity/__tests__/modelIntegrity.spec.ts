@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import type { OpenAIEvalConfig, OpenAIEvalModelCatalog, OpenAIEvalRouteConfig, OpenAIEvalRun } from '@/api/admin/accounts'
-import { runExplanation, runStatusLabel } from '../runText'
+import { reinterpretationText, runExplanation, runStatusLabel } from '../runText'
 import { zhT } from './zhT'
+import en from '@/i18n/locales/en'
 import zhLocale from '@/i18n/locales/zh'
 import {
   activeScheduleCount,
+  attributionReinterpretation,
   candyExtractedAnswer,
   candyFullReply,
   customBalanceShares,
@@ -54,6 +56,13 @@ const catalog = {
 
 function oauthRoute(overrides: Partial<OpenAIEvalRouteConfig> = {}): OpenAIEvalRouteConfig {
   return { ...newRoute(1, 'gpt-5', ''), direct_oauth_eligible: true, ...overrides }
+}
+
+function enT(key: string, params: Record<string, unknown> = {}): string {
+  let current: unknown = en
+  for (const segment of key.split('.')) current = current && typeof current === 'object' ? (current as Record<string, unknown>)[segment] : undefined
+  if (typeof current !== 'string') return key
+  return current.replace(/\{(\w+)\}/g, (_, name: string) => (name in params ? String(params[name]) : `{${name}}`))
 }
 
 describe('request budget', () => {
@@ -212,11 +221,69 @@ describe('attribution status labels', () => {
   })
 
   it('labels a non-Luna ModelTrace prediction as likely normal and says it is inferred', () => {
-    const item = run('modeltrace', 'suspected_normal', 'non_luna_behavioral_attribution', { modeltrace: { bank_revision: 'x', prediction: 'gpt-5', probability: 0.71, used_outputs: 3, requests: 3 } })
+    const item = run('modeltrace', 'suspected_normal', 'non_luna_behavioral_attribution', { modeltrace: { bank_revision: 'x', prediction: 'gpt-4.1', probability: 0.71, used_outputs: 3, requests: 3 } })
     expect(runStatusKey(item)).toBe('suspected_normal')
     expect(runStatusLabel(zhT, item)).toBe('疑似正常')
-    expect(runExplanation(zhT, item)).toBe('归因模型 gpt-5，概率 0.71。行为归因结果为非 Luna 模型，判定为疑似正常。该结果为行为推断，不代表实际路由已核实。')
+    expect(runExplanation(zhT, item)).toBe('归因模型 gpt-4.1，概率 0.71。行为归因结果为非 Luna 模型，判定为疑似正常。该结果为行为推断，不代表实际路由已核实。')
     expect(isAttributionRun(item)).toBe(true)
+  })
+
+  it('labels a ModelTrace attribution matching the tested model as normal, still marked as inferred', () => {
+    const item = run('modeltrace', 'pass', 'modeltrace_target_match', { modeltrace: { bank_revision: 'x', prediction: 'gpt-5', probability: 0.82, used_outputs: 2, requests: 3 } })
+    expect(runStatusKey(item)).toBe('pass')
+    expect(runStatusLabel(zhT, item)).toBe('正常')
+    expect(runStatusLabel(zhT, item)).not.toBe('疑似正常')
+    expect(resultTone(item.status)).toBe('ok')
+    expect(runExplanation(zhT, item)).toBe('归因模型 gpt-5，概率 0.82。行为归因结果与被测模型 gpt-5 一致，判定为正常。该结果为行为推断，不代表实际路由已核实。')
+    expect(isAttributionRun(item)).toBe(true)
+  })
+
+  it('labels a ModelTrace Luna-family attribution as abnormal, not "possible Luna"', () => {
+    const item = run('modeltrace', 'warning', 'modeltrace_luna_attribution', { modeltrace: { bank_revision: 'x', prediction: 'gpt-5.6-luna', probability: 0.64, used_outputs: 3, requests: 3 } })
+    expect(runStatusKey(item)).toBe('warning')
+    expect(runStatusLabel(zhT, item)).toBe('异常')
+    expect(resultTone(item.status)).toBe('attention')
+    const text = runExplanation(zhT, item)
+    expect(text).toContain('归因模型 gpt-5.6-luna，概率 0.64。行为归因结果为 Luna 系列模型，判定为异常。')
+    expect(text).toContain('不能证明实际路由')
+    expect(isAttributionRun(item)).toBe(true)
+  })
+
+  it('keeps the fingerprint Luna label unchanged by the ModelTrace rule', () => {
+    const item = run('fingerprint', 'warning', 'suspected_luna_attribution', { fingerprint: { status: 'warning', nearest_model: 'gpt-5-luna', mean_jsd: 0.12, p_value: 0.3, valid_samples: 60, required_samples: 60, cell_count: 6, evaluated_at: '' } })
+    expect(runStatusKey(item)).toBe('suspected_luna')
+    expect(runStatusLabel(zhT, item)).toBe('疑似 Luna')
+  })
+
+  it('keeps a valid partial ModelTrace attribution normal and names its failed requests as failures, not degradation', () => {
+    const samples = [
+      { accepted: true, answer: '1 2 3', attempts: 1 },
+      { accepted: true, answer: '4 5 6', attempts: 1 },
+      { accepted: false, error: 'http_502', http_status: 502, attempts: 3, error_message: 'bad gateway' }
+    ]
+    const item = run('modeltrace', 'pass', 'modeltrace_target_match', { sample_count: 2, modeltrace: { bank_revision: 'x', prediction: 'gpt-5', probability: 0.82, used_outputs: 2, requests: 3, samples } })
+    expect(runStatusLabel(zhT, item)).toBe('正常')
+    expect(resultTone(item.status)).toBe('ok')
+    expect(runExplanation(zhT, item)).toBe('归因模型 gpt-5，概率 0.82。行为归因结果与被测模型 gpt-5 一致，判定为正常。该结果为行为推断，不代表实际路由已核实。1 个样本请求失败：HTTP 502，bad gateway（尝试 3 次）。')
+    expect(runExplanation(enT, item)).toBe('Attributed model gpt-5, probability 0.82. Behavioral attribution matches the tested model gpt-5, so the result is normal. This is an inference, not a verified route. 1 samples failed: HTTP 502, bad gateway (3 attempts).')
+    expect(runExplanation(zhT, item)).not.toMatch(/降智|异常/)
+  })
+
+  it('appends a recorded ModelTrace run error when no sample failed', () => {
+    const item = { ...run('modeltrace', 'suspected_normal', 'non_luna_behavioral_attribution', { modeltrace: { bank_revision: 'x', prediction: 'gpt-4.1', probability: 0.6, used_outputs: 3, requests: 3 } }), error: 'stream closed Bearer abc.def-123' }
+    expect(runStatusLabel(zhT, item)).toBe('疑似正常')
+    expect(runExplanation(zhT, item)).toBe('归因模型 gpt-4.1，概率 0.60。行为归因结果为非 Luna 模型，判定为疑似正常。该结果为行为推断，不代表实际路由已核实。记录的错误：stream closed Bearer [redacted]。')
+  })
+
+  it('adds nothing to a ModelTrace summary without failures', () => {
+    const item = run('modeltrace', 'pass', 'modeltrace_target_match', { modeltrace: { bank_revision: 'x', prediction: 'gpt-5', probability: 0.82, used_outputs: 3, requests: 3, samples: [{ accepted: true, answer: '1', attempts: 1 }] } })
+    expect(runExplanation(zhT, item)).toBe('归因模型 gpt-5，概率 0.82。行为归因结果与被测模型 gpt-5 一致，判定为正常。该结果为行为推断，不代表实际路由已核实。')
+  })
+
+  it('trusts the server verdict and never re-derives it from the prediction', () => {
+    // Prediction equals the target, but the server said suspected_normal: the label follows the server.
+    const item = run('modeltrace', 'suspected_normal', 'non_luna_behavioral_attribution', { modeltrace: { bank_revision: 'x', prediction: 'GPT-5', probability: 0.5, used_outputs: 1, requests: 3 } })
+    expect(runStatusLabel(zhT, item)).toBe('疑似正常')
   })
 
   it('labels a Luna attribution as possible Luna without claiming confirmed degradation', () => {
@@ -252,6 +319,36 @@ describe('attribution status labels', () => {
     expect(runStatusLabel(zhT, legacy)).toBe('已归因')
     expect(runExplanation(zhT, legacy)).toContain('不能作为实际模型的证明')
     expect(runStatusLabel(zhT, run('fingerprint', 'different', 'behavior_distribution_differs_from_reference'))).toBe('与参考不同')
+  })
+})
+
+describe('attribution reinterpretation', () => {
+  const base = { id: 1, account_id: 1, requested_model: 'gpt-5', reasoning_effort: '', request_count: 3, input_tokens: 0, output_tokens: 0, duration_ms: 0, started_at: '2026-10-01T00:00:00Z', trigger_source: 'manual' }
+  const trace = { bank_revision: 'x', prediction: 'gpt-5', probability: 0.8, used_outputs: 3, requests: 3 }
+  const run = (status: string, reason: string, attribution?: OpenAIEvalRun['outcome']['attribution']): OpenAIEvalRun => ({
+    ...base, test_type: 'modeltrace', status, outcome: { status, reason, sample_count: 3, expected_count: 3, confidence: 'low', scheduling: 'alert_only', modeltrace: trace, attribution }
+  })
+
+  it('reports the stored verdict and both rule versions when the current rule reads it differently', () => {
+    const item = run('pass', 'modeltrace_target_match', { rule_version: 'public-target-match-luna-v2', original_rule_version: 'non-luna-attribution-v1', original_status: 'suspected_normal', original_reason: 'non_luna_behavioral_attribution' })
+    expect(attributionReinterpretation(item)).toEqual({ status: 'suspected_normal', reason: 'non_luna_behavioral_attribution', rule: 'non-luna-attribution-v1', currentRule: 'public-target-match-luna-v2' })
+    expect(reinterpretationText(zhT, item)).toBe('该记录原判定为疑似正常（规则 non-luna-attribution-v1）。上方结果按当前规则 public-target-match-luna-v2 对同一批已记录输出重新解读，测试并未重新运行。')
+  })
+
+  it('names a legacy Luna verdict as it was originally shown', () => {
+    const item = run('warning', 'modeltrace_luna_attribution', { rule_version: 'public-target-match-luna-v2', original_rule_version: 'non-luna-attribution-v1', original_status: 'warning', original_reason: 'suspected_luna_attribution' })
+    expect(reinterpretationText(zhT, item)).toContain('原判定为疑似 Luna')
+  })
+
+  it('stays silent for runs recorded under the current rule or without metadata', () => {
+    expect(attributionReinterpretation(run('pass', 'modeltrace_target_match', { rule_version: 'public-target-match-luna-v2', original_rule_version: 'public-target-match-luna-v2', original_status: 'pass', original_reason: 'modeltrace_target_match' }))).toBeNull()
+    expect(attributionReinterpretation(run('suspected_normal', 'non_luna_behavioral_attribution'))).toBeNull()
+    expect(reinterpretationText(zhT, run('suspected_normal', 'non_luna_behavioral_attribution'))).toBe('')
+  })
+
+  it('still notes an older rule version even when the verdict did not change', () => {
+    const item = run('suspected_normal', 'non_luna_behavioral_attribution', { rule_version: 'public-target-match-luna-v2', original_rule_version: 'non-luna-attribution-v1', original_status: 'suspected_normal', original_reason: 'non_luna_behavioral_attribution' })
+    expect(reinterpretationText(zhT, item)).toContain('原判定为疑似正常（规则 non-luna-attribution-v1）')
   })
 })
 

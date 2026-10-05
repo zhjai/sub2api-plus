@@ -60,6 +60,8 @@ export default {
       non_luna_behavioral_attribution: 'Behavioral attribution points to a non-Luna model, so the result is likely normal. This is an inference, not a verified route.',
       suspected_luna_attribution: 'Behavioral attribution is closest to Luna. This is an inference: it does not prove the route or confirm a downgrade. Retest to verify.',
       unresolved_behavioral_attribution: 'No closest reference model could be determined; no verdict this run.',
+      modeltrace_target_match: 'Behavioral attribution matches the tested model {target}, so the result is normal. This is an inference, not a verified route.',
+      modeltrace_luna_attribution: 'Behavioral attribution points to a Luna-family model, so the result is abnormal. This is an inference: it does not prove the route. Retest to confirm.',
       timeout: 'Upstream timed out; test incomplete. Try again later.',
       context_deadline_exceeded: 'The test exceeded its time limit and did not complete.',
       rate_limit: 'Upstream rate limit; test incomplete. Try again later.',
@@ -122,7 +124,7 @@ export default {
         },
         modeltrace: {
           name: 'ModelTrace attribution',
-          what: 'Sends {count} requests and infers the closest of {candidates} reference models from response behavior. A non-Luna attribution is marked likely normal; a Luna attribution is marked possibly degraded.'
+          what: 'Sends {count} requests and infers the closest of {candidates} reference models from response behavior. An attribution matching the tested model is marked normal, another non-Luna model likely normal, and a Luna-family model abnormal.'
         },
         state_probe: {
           name: 'State probe',
@@ -223,6 +225,12 @@ export default {
         modeltraceMetric: 'Attributed model {model}, probability {probability}.',
         fingerprintNearest: 'Closest reference model: {model}.',
         nearestModel: 'Closest reference model',
+        testedModel: 'Tested model',
+        attributedModel: 'Attributed model',
+        validOutputs: 'Valid outputs / requests',
+        bankRevision: 'Reference bank revision',
+        attributionRule: 'Attribution rule',
+        reinterpreted: 'Originally recorded as {status} under rule {rule}. The result above applies the current rule {current} to the same recorded outputs; the test was not run again.',
         attributionNote: 'Attribution is inferred from response behavior and does not prove the actual route. When this test is set to run automatically, its latest completed attribution counts toward the integrity pass rate, manual or automatic. ModelTrace can attribute from one valid output, with failed requests kept for diagnosis; Fingerprint attributes only when every planned sample is valid.',
         stateProbeMetric: 'Status codes {mint} / {cont}, {ticket}',
         newTicket: 'route switched',
@@ -261,6 +269,7 @@ export default {
         none: 'This record has no per-sample results.',
         failureSummary: '{count} samples failed: {error} ({attempts} attempts).',
         separator: ', ',
+        runError: 'Recorded error: {error}.',
         showAll: 'Show all {count} samples',
         stateProbe: {
           mint: 'First request',

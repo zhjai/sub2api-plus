@@ -260,7 +260,7 @@ func qualityFromLatestRuns(config *OpenAIEvalConfig, accountID int64, model, eff
 			continue
 		}
 		q.Selected++
-		run, found := latest[OpenAIEvalEvidenceKey{accountID, model, effort, testType}]
+		run, found := latest[OpenAIEvalEvidenceKey{accountID, openAIEvalQualityDimension(model), openAIEvalQualityDimension(effort), testType}]
 		if !found {
 			continue
 		}
@@ -288,9 +288,9 @@ func qualityFromLatestRuns(config *OpenAIEvalConfig, accountID int64, model, eff
 			status = OpenAIEvalIdentityQualityStatus(run.Outcome.Fingerprint.NearestModel)
 		}
 		if testType == OpenAIEvalTypeModelTrace {
-			status = OpenAIEvalIdentityQualityStatus(run.Outcome.ModelTrace.Prediction)
+			status, _ = openAIEvalModelTraceVerdict(run.RequestedModel, run.Outcome.ModelTrace.Prediction)
 		}
-		aggregate := OpenAIEvalQualityAggregate{OpenAIEvalQualityCounts: counts, TestType: testType, OutcomeStatus: status}
+		aggregate := OpenAIEvalQualityAggregate{OpenAIEvalQualityCounts: counts, TestType: testType, OutcomeStatus: status, AttributionRuleVersion: openAIEvalQualityAttributionRuleVersion(testType)}
 		if _, ok := aggregate.diagnosticStatus(); !ok {
 			continue
 		}

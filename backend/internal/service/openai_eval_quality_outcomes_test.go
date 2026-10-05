@@ -22,6 +22,7 @@ func addQualityEvidence(t *testing.T, account *Account, evidence OpenAIEvalQuali
 func qualityOutcomeEvidence(now time.Time, accountID int64, testType string, samples int, passed bool) OpenAIEvalQualityAggregate {
 	evidence := qualityTestAggregate(now, accountID, samples, 0, 0)
 	evidence.TestType = testType
+	evidence.AttributionRuleVersion = openAIEvalQualityAttributionRuleVersion(testType)
 	if passed {
 		if testType == OpenAIEvalTypeCandy {
 			evidence.PassCount = samples

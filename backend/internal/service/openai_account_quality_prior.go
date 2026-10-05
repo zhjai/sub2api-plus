@@ -56,7 +56,7 @@ func accountQualityPriors(gen *openAIRankingGeneration, cfg *OpenAIEvalConfig, g
 		}
 		hasExact := false
 		for _, testType := range openAIEvalQualityTestTypes {
-			if _, found := latest[OpenAIEvalEvidenceKey{account.ID, model, effort, testType}]; found {
+			if _, found := latest[OpenAIEvalEvidenceKey{account.ID, openAIEvalQualityDimension(model), openAIEvalQualityDimension(effort), testType}]; found {
 				hasExact = true
 				break
 			}

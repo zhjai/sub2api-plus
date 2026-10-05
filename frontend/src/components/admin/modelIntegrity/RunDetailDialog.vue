@@ -9,6 +9,7 @@
         <span class="tone" :class="`tone-${resultTone(run.status)}`" data-testid="detail-status">{{ runStatusLabel(t, run) }}</span>
         <p class="text-gray-700 dark:text-gray-300">{{ runExplanation(t, run, catalog) }}</p>
       </div>
+      <p v-if="reinterpreted" class="attribution-note" data-testid="detail-reinterpreted">{{ reinterpreted }}</p>
       <p v-if="isAttributionRun(run)" class="attribution-note" data-testid="attribution-note">{{ t('admin.modelIntegrity.tests.detail.attributionNote') }}</p>
 
       <dl class="facts">
@@ -21,6 +22,13 @@
         <div v-if="run.upstream_model"><dt>{{ t('admin.modelIntegrity.tests.detail.upstreamModel') }}</dt><dd>{{ run.upstream_model }}</dd></div>
         <div v-if="run.outcome.fingerprint?.nearest_model"><dt>{{ t('admin.modelIntegrity.tests.detail.nearestModel') }}</dt><dd class="break-all">{{ run.outcome.fingerprint.nearest_model }}</dd></div>
         <div v-if="run.baseline_version"><dt>{{ t('admin.modelIntegrity.tests.detail.baseline') }}</dt><dd class="break-all">{{ run.baseline_version }}</dd></div>
+        <template v-if="run.outcome.modeltrace">
+          <div><dt>{{ t('admin.modelIntegrity.tests.detail.testedModel') }}</dt><dd class="break-all" data-testid="detail-target">{{ run.requested_model }}</dd></div>
+          <div v-if="run.outcome.modeltrace.prediction"><dt>{{ t('admin.modelIntegrity.tests.detail.attributedModel') }}</dt><dd class="break-all" data-testid="detail-prediction">{{ run.outcome.modeltrace.prediction }}</dd></div>
+          <div><dt>{{ t('admin.modelIntegrity.tests.detail.validOutputs') }}</dt><dd data-testid="detail-outputs">{{ run.outcome.modeltrace.used_outputs }}/{{ run.outcome.modeltrace.requests }}</dd></div>
+          <div v-if="run.outcome.modeltrace.bank_revision"><dt>{{ t('admin.modelIntegrity.tests.detail.bankRevision') }}</dt><dd class="break-all" data-testid="detail-bank">{{ run.outcome.modeltrace.bank_revision }}</dd></div>
+        </template>
+        <div v-if="run.outcome.attribution?.rule_version"><dt>{{ t('admin.modelIntegrity.tests.detail.attributionRule') }}</dt><dd class="break-all" data-testid="detail-rule">{{ run.outcome.attribution.rule_version }}</dd></div>
       </dl>
 
       <p v-if="run.outcome.fingerprint && run.outcome.fingerprint.mean_jsd != null" class="text-xs text-gray-600 dark:text-gray-300">
@@ -101,9 +109,9 @@
         </button>
       </section>
 
-      <details v-if="run.error || run.outcome.reason" class="text-xs text-gray-500 dark:text-gray-400">
+      <details v-if="technical" class="text-xs text-gray-500 dark:text-gray-400">
         <summary class="cursor-pointer">{{ t('admin.modelIntegrity.tests.detail.technical') }}</summary>
-        <code class="mt-2 block whitespace-pre-wrap break-all font-mono">{{ [run.outcome.reason, run.error].filter(Boolean).join('\n') }}</code>
+        <code class="mt-2 block whitespace-pre-wrap break-all font-mono" data-testid="detail-technical">{{ technical }}</code>
       </details>
     </div>
     <template #footer>
@@ -120,7 +128,7 @@ import { useI18n } from 'vue-i18n'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import type { OpenAIEvalModelCatalog, OpenAIEvalRun } from '@/api/admin/accounts'
 import { candyExpectedAnswer, candyExtractedAnswer, candyFullReply, isAttributionRun, isHistoricalDataVersion, redactSecrets, resultTone, sampleAnswer, sampleLacksDetail, sampleState, type EvalTestType } from '@/views/admin/modelIntegrity/modelIntegrity'
-import { diagnosticSamples, runExplanation, runStatusLabel, sampleErrorHeadline, stateProbeRequestName } from '@/views/admin/modelIntegrity/runText'
+import { diagnosticSamples, reinterpretationText, runExplanation, runStatusLabel, sampleErrorHeadline, stateProbeRequestName } from '@/views/admin/modelIntegrity/runText'
 
 const props = defineProps<{
   run: OpenAIEvalRun | null
@@ -137,6 +145,18 @@ watch(() => props.run?.id, () => { showAll.value = false })
 
 const expectedAnswer = computed(() => (props.run ? candyExpectedAnswer(props.run, props.catalog) : null))
 const historical = computed(() => Boolean(props.run) && isHistoricalDataVersion(props.run!, props.catalog))
+const reinterpreted = computed(() => (props.run ? reinterpretationText(t, props.run) : ''))
+/** Raw codes: the current reason and error, plus the stored verdict when a newer rule reads it differently. */
+const technical = computed(() => {
+  const run = props.run
+  if (!run) return ''
+  const lines = [run.outcome.reason, run.error]
+  if (reinterpreted.value && run.outcome.attribution) {
+    const meta = run.outcome.attribution
+    lines.push(`original: ${[meta.original_status, meta.original_reason, meta.original_rule_version].filter(Boolean).join(' / ')}`)
+  }
+  return lines.filter(Boolean).join('\n')
+})
 const isProbe = computed(() => props.run?.test_type === 'state_probe')
 const isCandy = computed(() => props.run?.test_type === 'candy')
 /** Only a probe that reached a verdict may say whether the route changed; a failed one says nothing. */

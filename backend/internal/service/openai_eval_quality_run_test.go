@@ -86,7 +86,9 @@ func TestOpenAIEvalQualityManualPartialVerdictPersistsWithoutHidingErrors(t *tes
 	quality, known := ReadOpenAIEvalQualityFromAccount(accounts.account, run.RequestedModel, run.ReasoningEffort, now, OpenAIEvalTypeModelTrace)
 	require.True(t, known)
 	require.Equal(t, "manual", quality.TriggerSource)
-	require.Equal(t, "suspected_normal", quality.OutcomeStatus)
+	require.Equal(t, "pass", quality.OutcomeStatus)
+	require.Equal(t, 1, quality.PassCount)
+	require.Zero(t, quality.SuspectedPassCount)
 	require.Equal(t, 1., quality.Ratio())
 	require.Equal(t, "upstream_error", run.Error)
 	// A newer no-output result invalidates the old verdict across both sources.

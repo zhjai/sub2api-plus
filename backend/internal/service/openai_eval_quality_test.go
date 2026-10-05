@@ -241,7 +241,7 @@ func TestOpenAIEvalQualityRecordIdentityBankAndPartialErrors(t *testing.T) {
 	run := &OpenAIEvalRun{AccountID: 17, TestType: OpenAIEvalTypeModelTrace, RequestedModel: "gpt-6.1-sol", ReasoningEffort: "high",
 		DataVersion: OpenAIEvalQualityDataVersion, TriggerSource: "scheduled", Status: "suspected_normal", FinishedAt: now,
 		Outcome: OpenAIEvalOutcome{ModelTrace: &OpenAIEvalModelTraceResult{BankRevision: OpenAIEvalQualityModelTraceBankRevision, Prediction: "gpt-6.1-sol", UsedOutputs: 2}}}
-	counts := OpenAIEvalQualityCounts{2, 0, 2}
+	counts := OpenAIEvalQualityCounts{2, 2, 0}
 	require.NoError(t, s.recordOpenAIEvalQuality(context.Background(), 1, run, counts))
 	require.Equal(t, 1, accounts.writes)
 	run.FinishedAt = now.Add(time.Millisecond)

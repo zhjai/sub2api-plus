@@ -1,5 +1,5 @@
 import type { OpenAIEvalModelCatalog, OpenAIEvalRun, OpenAIEvalSampleRecord } from '@/api/admin/accounts'
-import { candyExpectedAnswer, failedSampleCount, firstSampleFailure, redactSecrets, runSamples, runStatusKey, sampleFailed } from './modelIntegrity'
+import { attributionReinterpretation, candyExpectedAnswer, failedSampleCount, firstSampleFailure, redactSecrets, runSamples, runStatusKey, sampleFailed } from './modelIntegrity'
 
 type Translate = (key: string, params?: Record<string, unknown>) => string
 
@@ -32,7 +32,10 @@ export function runExplanation(t: Translate, run: OpenAIEvalRun, catalog?: OpenA
     const trace = run.outcome.modeltrace
     // Older runs (status "attributed") carry no attribution verdict reason.
     const reason = run.outcome.reason && run.outcome.reason !== 'modeltrace_insufficient_outputs' ? run.outcome.reason : 'modeltrace_behavioral_attribution'
-    return joinSentences(t('admin.modelIntegrity.tests.detail.modeltraceMetric', { model: trace.prediction, probability: (trace.probability ?? 0).toFixed(2) }), reasonText(t, reason, run, catalog))
+    const verdict = joinSentences(t('admin.modelIntegrity.tests.detail.modeltraceMetric', { model: trace.prediction, probability: (trace.probability ?? 0).toFixed(2) }), reasonText(t, reason, run, catalog))
+    // A partial attribution keeps its verdict; failed requests are named as request failures, not degradation.
+    const failure = runFailureDetail(t, run) || (run.error ? t('admin.modelIntegrity.tests.samples.runError', { error: redactSecrets(run.error) }) : '')
+    return failure ? joinSentences(verdict, failure) : verdict
   }
   const nearest = run.test_type === 'fingerprint' ? run.outcome.fingerprint?.nearest_model : ''
   if (nearest && (run.status === 'suspected_normal' || run.status === 'warning')) {
@@ -42,6 +45,21 @@ export function runExplanation(t: Translate, run: OpenAIEvalRun, catalog?: OpenA
   // Insufficient evidence and errors keep the upstream cause next to the verdict.
   const failure = run.status === 'insufficient' || run.status === 'uncertain' || run.status === 'error' ? runFailureDetail(t, run) : ''
   return failure ? joinSentences(base, failure) : base
+}
+
+/**
+ * "Originally recorded as … under rule …" for a run the server now reads under
+ * a newer attribution rule. Empty when the verdict is unchanged; never implies
+ * the test ran again.
+ */
+export function reinterpretationText(t: Translate, run: OpenAIEvalRun): string {
+  const original = attributionReinterpretation(run)
+  if (!original) return ''
+  return t('admin.modelIntegrity.tests.detail.reinterpreted', {
+    status: statusLabel(t, runStatusKey({ status: original.status, outcome: { ...run.outcome, reason: original.reason } })),
+    rule: original.rule || '—',
+    current: original.currentRule || '—'
+  })
 }
 
 /** Chinese sentences end in full-width punctuation and are joined without a space. */
@@ -62,7 +80,8 @@ export function reasonText(t: Translate, reason: string | undefined, run: OpenAI
     valid: run.outcome.sample_count ?? '-',
     required: run.outcome.expected_count ?? '-',
     count: run.outcome.expected_count ?? run.outcome.sample_count ?? '-',
-    answer: expected ?? '-'
+    answer: expected ?? '-',
+    target: run.requested_model || '-'
   })
   return text === key ? t('admin.modelIntegrity.reason.unknown', { code: reason }) : text
 }

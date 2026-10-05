@@ -101,17 +101,18 @@ func OpenAIEvalIdentityQualityStatus(prediction string) string {
 // An unknown outcome has zero counts and cannot be used as scored evidence.
 type OpenAIEvalQualityAggregate struct {
 	OpenAIEvalQualityCounts
-	Version         string    `json:"version"`
-	DataVersion     string    `json:"data_version"`
-	AccountID       int64     `json:"account_id"`
-	RequestedModel  string    `json:"requested_model"`
-	ReasoningEffort string    `json:"reasoning_effort"`
-	RunID           int64     `json:"run_id"`
-	TestType        string    `json:"test_type"`
-	TriggerSource   string    `json:"trigger_source"`
-	OutcomeStatus   string    `json:"outcome_status,omitempty"`
-	EvaluatedAt     time.Time `json:"evaluated_at"`
-	ExpiresAt       time.Time `json:"expires_at"`
+	Version                string    `json:"version"`
+	DataVersion            string    `json:"data_version"`
+	AccountID              int64     `json:"account_id"`
+	RequestedModel         string    `json:"requested_model"`
+	ReasoningEffort        string    `json:"reasoning_effort"`
+	RunID                  int64     `json:"run_id"`
+	TestType               string    `json:"test_type"`
+	TriggerSource          string    `json:"trigger_source"`
+	OutcomeStatus          string    `json:"outcome_status,omitempty"`
+	AttributionRuleVersion string    `json:"attribution_rule_version,omitempty"`
+	EvaluatedAt            time.Time `json:"evaluated_at"`
+	ExpiresAt              time.Time `json:"expires_at"`
 }
 
 // Scheduler counts use one final outcome per selected automatic diagnostic,
@@ -144,7 +145,17 @@ func (q OpenAIEvalQualityAggregate) diagnosticStatus() (string, bool) {
 		if q.PassCount == q.EvaluatedCount {
 			status = "pass"
 		}
-	case OpenAIEvalTypeFingerprint, OpenAIEvalTypeModelTrace:
+	case OpenAIEvalTypeModelTrace:
+		if q.AttributionRuleVersion != OpenAIEvalModelTraceRuleVersion || (q.PassCount != 0 && q.PassCount != q.EvaluatedCount) || (q.SuspectedPassCount != 0 && q.SuspectedPassCount != q.EvaluatedCount) {
+			return "", false
+		}
+		status = "warning"
+		if q.PassCount == q.EvaluatedCount {
+			status = "pass"
+		} else if q.SuspectedPassCount == q.EvaluatedCount {
+			status = "suspected_normal"
+		}
+	case OpenAIEvalTypeFingerprint:
 		if q.PassCount != 0 || (q.SuspectedPassCount != 0 && q.SuspectedPassCount != q.EvaluatedCount) {
 			return "", false
 		}
@@ -270,7 +281,7 @@ func (s *OpenAIEvalService) recordOpenAIEvalQuality(ctx context.Context, runID i
 		if !openAIEvalModelTraceUsedOutputsValid(result) {
 			return nil
 		}
-		if !openAIEvalIdentityQualityCountsMatch(result.Prediction, counts) {
+		if counts != openAIEvalQualityCountsFromRun(run) {
 			return errors.New("ModelTrace quality attribution and counts disagree")
 		}
 	default:
@@ -296,7 +307,8 @@ func (s *OpenAIEvalService) recordOpenAIEvalQuality(ctx context.Context, runID i
 	if run.TestType == OpenAIEvalTypeFingerprint {
 		quality.OutcomeStatus = OpenAIEvalIdentityQualityStatus(run.Outcome.Fingerprint.NearestModel)
 	} else if run.TestType == OpenAIEvalTypeModelTrace {
-		quality.OutcomeStatus = OpenAIEvalIdentityQualityStatus(run.Outcome.ModelTrace.Prediction)
+		quality.OutcomeStatus, _ = openAIEvalModelTraceVerdict(run.RequestedModel, run.Outcome.ModelTrace.Prediction)
+		quality.AttributionRuleVersion = OpenAIEvalModelTraceRuleVersion
 	}
 	if !quality.validFor(run.AccountID, run.RequestedModel, run.ReasoningEffort, now) {
 		return errors.New("invalid or outdated evaluation quality evidence")
@@ -334,7 +346,8 @@ func (s *OpenAIEvalService) recordOpenAIEvalQualityResult(ctx context.Context, r
 		AccountID: run.AccountID, RequestedModel: openAIEvalQualityDimension(run.RequestedModel),
 		ReasoningEffort: openAIEvalQualityDimension(run.ReasoningEffort), RunID: runID,
 		TestType: run.TestType, TriggerSource: run.TriggerSource, OutcomeStatus: "unknown",
-		EvaluatedAt: run.FinishedAt, ExpiresAt: run.FinishedAt.Add(openAIEvalQualityFreshness(interval, openAIEvalQualityRefreshSeconds(config))),
+		AttributionRuleVersion: openAIEvalQualityAttributionRuleVersion(run.TestType),
+		EvaluatedAt:            run.FinishedAt, ExpiresAt: run.FinishedAt.Add(openAIEvalQualityFreshness(interval, openAIEvalQualityRefreshSeconds(config))),
 	})
 }
 
@@ -370,9 +383,10 @@ func (s *OpenAIEvalService) persistOpenAIEvalQuality(ctx context.Context, qualit
 	if account == nil || account.ID != run.AccountID {
 		return errors.New("evaluation quality account mismatch")
 	}
-	if previous, ok := readOpenAIEvalQualityRecord(account, run.RequestedModel, run.ReasoningEffort, run.TestType); ok &&
-		(previous.EvaluatedAt.After(quality.EvaluatedAt) || (previous.EvaluatedAt.Equal(quality.EvaluatedAt) && previous.RunID >= runID)) {
-		return nil
+	if previous, ok := readOpenAIEvalQualityRecord(account, run.RequestedModel, run.ReasoningEffort, run.TestType); ok {
+		if previous.EvaluatedAt.After(quality.EvaluatedAt) || (previous.EvaluatedAt.Equal(quality.EvaluatedAt) && (previous.RunID > runID || (previous.RunID == runID && previous.AttributionRuleVersion == quality.AttributionRuleVersion))) {
+			return nil
+		}
 	}
 	if !OpenAIEvalEffectsEnabled() {
 		return nil
@@ -382,6 +396,13 @@ func (s *OpenAIEvalService) persistOpenAIEvalQuality(ctx context.Context, qualit
 		return err
 	}
 	return s.accounts.UpdateExtra(writeCtx, run.AccountID, map[string]any{key: json.RawMessage(payload)})
+}
+
+func openAIEvalQualityAttributionRuleVersion(testType string) string {
+	if testType == OpenAIEvalTypeModelTrace {
+		return OpenAIEvalModelTraceRuleVersion
+	}
+	return ""
 }
 
 // Read ordering metadata even for unknown/expired records; otherwise a delayed

@@ -1,6 +1,30 @@
 package service
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
+
+func openAIEvalQualityAggregateFromRun(run OpenAIEvalRun, interval, refresh int, now time.Time) (OpenAIEvalQualityAggregate, bool) {
+	normalizeOpenAIEvalAttributionRun(&run)
+	q := OpenAIEvalQualityAggregate{
+		OpenAIEvalQualityCounts: openAIEvalQualityCountsFromRun(&run), Version: OpenAIEvalQualityVersion, DataVersion: run.DataVersion,
+		AccountID: run.AccountID, RequestedModel: openAIEvalQualityDimension(run.RequestedModel), ReasoningEffort: openAIEvalQualityDimension(run.ReasoningEffort),
+		RunID: run.ID, TestType: run.TestType, TriggerSource: run.TriggerSource, OutcomeStatus: run.Status,
+		AttributionRuleVersion: openAIEvalQualityAttributionRuleVersion(run.TestType),
+		EvaluatedAt:            run.FinishedAt, ExpiresAt: run.FinishedAt.Add(openAIEvalQualityFreshness(interval, refresh)),
+	}
+	if run.TestType == OpenAIEvalTypeModelTrace && (run.Outcome.ModelTrace == nil || run.Outcome.ModelTrace.BankRevision != OpenAIEvalQualityModelTraceBankRevision) {
+		return q, false
+	}
+	if run.TestType == OpenAIEvalTypeFingerprint {
+		if run.Outcome.Fingerprint == nil || run.BaselineVersion != OpenAIEvalQualityBaselineVersion {
+			return q, false
+		}
+		q.OutcomeStatus = OpenAIEvalIdentityQualityStatus(run.Outcome.Fingerprint.NearestModel)
+	}
+	return q, q.validFor(run.AccountID, run.RequestedModel, run.ReasoningEffort, now)
+}
 
 func openAIEvalQualityRunSourceSupported(source string) bool {
 	return source == "manual" || source == "scheduled"
@@ -57,7 +81,10 @@ func openAIEvalQualityCountsFromRun(run *OpenAIEvalRun) OpenAIEvalQualityCounts 
 			return counts
 		}
 		counts.EvaluatedCount = result.UsedOutputs
-		if OpenAIEvalIdentityQualityStatus(result.Prediction) == "suspected_normal" {
+		status, _ := openAIEvalModelTraceVerdict(run.RequestedModel, result.Prediction)
+		if status == "pass" {
+			counts.PassCount = counts.EvaluatedCount
+		} else if status == "suspected_normal" {
 			counts.SuspectedPassCount = counts.EvaluatedCount
 		}
 	}

@@ -678,7 +678,7 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 				trace.Samples[i].Text = ""
 			}
 			run.CompletedSamples = len(run.Samples)
-			run.Outcome = modelTraceSchedulingOutcome(trace, traceErr)
+			run.Outcome = modelTraceSchedulingOutcome(run.RequestedModel, trace, traceErr)
 			run.Status = run.Outcome.Status
 		}
 		if traceErr != nil && (trace == nil || trace.UsedOutputs == 0) {
@@ -829,6 +829,10 @@ func normalizeOpenAIEvalAttributionRun(run *OpenAIEvalRun) {
 		return
 	}
 	switch run.Status {
+	case "pass":
+		if run.TestType != OpenAIEvalTypeModelTrace {
+			return
+		}
 	case "attributed", "consistent", "different", "uncertain", "suspected_normal", "warning":
 	default:
 		return
@@ -836,7 +840,7 @@ func normalizeOpenAIEvalAttributionRun(run *OpenAIEvalRun) {
 	model := ""
 	switch run.TestType {
 	case OpenAIEvalTypeModelTrace:
-		if trace := run.Outcome.ModelTrace; trace != nil && trace.UsedOutputs > 0 {
+		if trace := run.Outcome.ModelTrace; openAIEvalModelTraceUsedOutputsValid(trace) {
 			model = trace.Prediction
 		}
 	case OpenAIEvalTypeFingerprint:
@@ -849,7 +853,17 @@ func normalizeOpenAIEvalAttributionRun(run *OpenAIEvalRun) {
 	if strings.TrimSpace(model) == "" {
 		return
 	}
-	run.Status, run.Outcome.Reason = openAIEvalAttributionVerdict(model)
+	if run.TestType == OpenAIEvalTypeModelTrace {
+		metadata := OpenAIEvalAttributionPolicy{OriginalStatus: run.Status, OriginalReason: run.Outcome.Reason, OriginalRuleVersion: "legacy-unversioned"}
+		if run.Outcome.Attribution != nil {
+			metadata = *run.Outcome.Attribution
+		}
+		metadata.RuleVersion = OpenAIEvalModelTraceRuleVersion
+		run.Outcome.Attribution = &metadata
+		run.Status, run.Outcome.Reason = openAIEvalModelTraceVerdict(run.RequestedModel, model)
+	} else {
+		run.Status, run.Outcome.Reason = openAIEvalAttributionVerdict(model)
+	}
 	run.Outcome.Status = run.Status
 	run.Outcome.Confidence = "low"
 	run.Outcome.Scheduling = "alert_only"

@@ -176,12 +176,13 @@ func (cache *openAIEvalQualitySnapshotStore) configure(config *OpenAIEvalConfig)
 	}
 	policy := newOpenAIEvalSchedulingPolicySnapshot(config)
 	payload, _ := json.Marshal(struct {
-		Revision int64
-		Enabled  bool
-		Interval int
-		Routes   []openAIEvalQualityRoute
-		Policy   *openAIEvalSchedulingPolicySnapshot
-	}{revision, enabled, interval, routes, policy})
+		AttributionRule string
+		Revision        int64
+		Enabled         bool
+		Interval        int
+		Routes          []openAIEvalQualityRoute
+		Policy          *openAIEvalSchedulingPolicySnapshot
+	}{OpenAIEvalModelTraceRuleVersion, revision, enabled, interval, routes, policy})
 	signature := sha256.Sum256(payload)
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
@@ -312,6 +313,10 @@ func (s *OpenAIEvalService) refreshOpenAIEvalQuality(ctx context.Context, force 
 	cache.mu.Unlock()
 	entries := make(map[string]OpenAIEvalQualityAssessment)
 	if enabled {
+		latest, err := s.latestQualityRefreshRuns(ctx, routes)
+		if err != nil {
+			return nil, err
+		}
 		ids := make([]int64, 0, len(routes))
 		seen := make(map[int64]bool)
 		for _, route := range routes {
@@ -342,6 +347,9 @@ func (s *OpenAIEvalService) refreshOpenAIEvalQuality(ctx context.Context, force 
 					continue
 				}
 				quality, ok := readOpenAIEvalQualityEvidence(accounts[route.AccountID], route.Model, route.Effort, testType, now)
+				if run, found := latest[OpenAIEvalEvidenceKey{route.AccountID, route.Model, route.Effort, testType}]; found {
+					quality, ok = openAIEvalQualityAggregateFromRun(run, route.Intervals[i], int(interval/time.Second), now)
+				}
 				if !ok {
 					continue
 				}
@@ -381,4 +389,42 @@ func (s *OpenAIEvalService) refreshOpenAIEvalQuality(ctx context.Context, force 
 	cache.result = OpenAIEvalQualityRefreshResult{RefreshedAt: now, NextRefreshAt: now.Add(interval), RouteCount: len(entries)}
 	result := cache.result
 	return &result, nil
+}
+
+// Rebuild derived verdicts from immutable raw runs when that repository
+// capability exists. A newer unknown outcome must not restore an older pass.
+func (s *OpenAIEvalService) latestQualityRefreshRuns(ctx context.Context, routes []openAIEvalQualityRoute) (map[OpenAIEvalEvidenceKey]OpenAIEvalRun, error) {
+	latest := make(map[OpenAIEvalEvidenceKey]OpenAIEvalRun)
+	repo, ok := s.repo.(OpenAIEvalLatestEvidenceRepository)
+	if !ok {
+		return latest, nil
+	}
+	var keys []OpenAIEvalEvidenceKey
+	selected := make(map[OpenAIEvalEvidenceKey]bool)
+	for _, route := range routes {
+		for i, testType := range openAIEvalQualityTestTypes {
+			if route.Intervals[i] != 0 {
+				key := OpenAIEvalEvidenceKey{route.AccountID, route.Model, route.Effort, testType}
+				selected[key] = true
+				keys = append(keys, key)
+			}
+		}
+	}
+	for start := 0; start < len(keys); start += 600 {
+		runs, err := repo.LatestCompletedRuns(ctx, keys[start:min(start+600, len(keys))])
+		if err != nil {
+			return nil, err
+		}
+		for _, run := range runs {
+			key := OpenAIEvalEvidenceKey{run.AccountID, openAIEvalQualityDimension(run.RequestedModel), openAIEvalQualityDimension(run.ReasoningEffort), run.TestType}
+			if !selected[key] || run.Status == "running" || !openAIEvalQualityRunSourceSupported(run.TriggerSource) {
+				continue
+			}
+			old, found := latest[key]
+			if !found || run.FinishedAt.After(old.FinishedAt) || (run.FinishedAt.Equal(old.FinishedAt) && run.ID > old.ID) {
+				latest[key] = run
+			}
+		}
+	}
+	return latest, nil
 }

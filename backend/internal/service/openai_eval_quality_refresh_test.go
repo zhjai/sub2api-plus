@@ -103,6 +103,7 @@ func TestOpenAIEvalQualityRefreshCadenceManualAndMultiType(t *testing.T) {
 	fingerprint.TestType = OpenAIEvalTypeFingerprint
 	trace := qualityTestAggregate(now, 17, 3, 0, 0)
 	trace.TestType = OpenAIEvalTypeModelTrace
+	trace.AttributionRuleVersion = OpenAIEvalModelTraceRuleVersion
 	for _, q := range []OpenAIEvalQualityAggregate{fingerprint, trace} {
 		for k, v := range qualityTestAccount(t, q).Extra {
 			accounts.accounts[17].Extra[k] = v

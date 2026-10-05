@@ -59,6 +59,8 @@ export default {
       modeltrace_insufficient_outputs: '有效输出不足，无法完成归因，本次不作判定。',
       non_luna_behavioral_attribution: '行为归因结果为非 Luna 模型，判定为疑似正常。该结果为行为推断，不代表实际路由已核实。',
       suspected_luna_attribution: '行为归因结果最接近 Luna。该结果为行为推断，不能证明实际路由，也不代表已确认降智，建议复测。',
+      modeltrace_target_match: '行为归因结果与被测模型 {target} 一致，判定为正常。该结果为行为推断，不代表实际路由已核实。',
+      modeltrace_luna_attribution: '行为归因结果为 Luna 系列模型，判定为异常。该结果为行为推断，不能证明实际路由，建议复测确认。',
       unresolved_behavioral_attribution: '未能确定最接近的参考模型，本次不作判定。',
       timeout: '上游超时，测试未完成，请稍后重试。',
       context_deadline_exceeded: '测试超出时间限制，未完成。',
@@ -122,7 +124,7 @@ export default {
         },
         modeltrace: {
           name: 'ModelTrace 归因',
-          what: '发送 {count} 次请求，根据回答行为在 {candidates} 个参考模型中推断最接近的模型。归因为非 Luna 模型时判定为疑似正常，归因为 Luna 时判定为疑似异常。'
+          what: '发送 {count} 次请求，根据回答行为在 {candidates} 个参考模型中推断最接近的模型。归因与被测模型一致时判定为正常，归因为其他非 Luna 模型时判定为疑似正常，归因为 Luna 系列模型时判定为异常。'
         },
         state_probe: {
           name: '状态探针',
@@ -223,6 +225,12 @@ export default {
         modeltraceMetric: '归因模型 {model}，概率 {probability}。',
         fingerprintNearest: '最接近的参考模型为 {model}。',
         nearestModel: '最接近的参考模型',
+        testedModel: '被测模型',
+        attributedModel: '归因模型',
+        validOutputs: '有效输出 / 请求数',
+        bankRevision: '参考库版本',
+        attributionRule: '归因规则',
+        reinterpreted: '该记录原判定为{status}（规则 {rule}）。上方结果按当前规则 {current} 对同一批已记录输出重新解读，测试并未重新运行。',
         attributionNote: '归因基于回答行为推断，不能证明实际路由。该测试开启自动运行时，最近一次已完成的归因结论会计入降智通过率，手动或自动运行均可。ModelTrace 只要有一条有效输出即可归因，失败的请求仍保留以供排查；行为指纹需全部计划采样均有效才会归因。',
         stateProbeMetric: '两次请求状态码 {mint} / {cont}，{ticket}',
         newTicket: '线路已切换',
@@ -261,6 +269,7 @@ export default {
         none: '该记录未保存逐个样本的结果。',
         failureSummary: '{count} 个样本请求失败：{error}（尝试 {attempts} 次）。',
         separator: '，',
+        runError: '记录的错误：{error}。',
         showAll: '显示全部 {count} 个样本',
         stateProbe: {
           mint: '首次请求',

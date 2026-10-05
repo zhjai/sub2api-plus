@@ -105,9 +105,18 @@ type OpenAIEvalOutcome struct {
 	ExpectedCount int                          `json:"expected_count"`
 	Confidence    string                       `json:"confidence"`
 	Scheduling    string                       `json:"scheduling"`
+	Attribution   *OpenAIEvalAttributionPolicy `json:"attribution,omitempty"`
 	Fingerprint   *OpenAIEvalFingerprintResult `json:"fingerprint,omitempty"`
 	ModelTrace    *OpenAIEvalModelTraceResult  `json:"modeltrace,omitempty"`
 	StateProbe    *OpenAIStateProbeResult      `json:"state_probe,omitempty"`
+}
+
+// Raw verdict metadata survives reinterpretation of historical evidence.
+type OpenAIEvalAttributionPolicy struct {
+	RuleVersion         string `json:"rule_version"`
+	OriginalRuleVersion string `json:"original_rule_version"`
+	OriginalStatus      string `json:"original_status"`
+	OriginalReason      string `json:"original_reason,omitempty"`
 }
 
 // OpenAIEvalRouteHealth is scoped to account + public requested model +

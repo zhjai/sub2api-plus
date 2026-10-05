@@ -144,14 +144,14 @@ func TestR6ModelTraceAttributionOnlyLunaIsSuspect(t *testing.T) {
 		{"GPT-6-LUNA", "warning"}, {"vendor/gpt-6-luna", "warning"}, {"", "insufficient"},
 	} {
 		t.Run(tc.model, func(t *testing.T) {
-			outcome := modelTraceSchedulingOutcome(&OpenAIEvalModelTraceResult{UsedOutputs: 3, Prediction: tc.model}, nil)
+			outcome := modelTraceSchedulingOutcome("public-model", &OpenAIEvalModelTraceResult{UsedOutputs: 3, Prediction: tc.model}, nil)
 			require.Equal(t, tc.status, outcome.Status)
 			require.Equal(t, "alert_only", outcome.Scheduling)
 			require.Zero(t, OpenAIEvalRoutePenalty(OpenAIEvalTypeModelTrace, outcome, true))
 		})
 	}
 	for _, err := range []error{nil, errors.New("request failed")} {
-		outcome := modelTraceSchedulingOutcome(&OpenAIEvalModelTraceResult{Prediction: "gpt-6-astra"}, err)
+		outcome := modelTraceSchedulingOutcome("public-model", &OpenAIEvalModelTraceResult{Prediction: "gpt-6-astra"}, err)
 		require.Equal(t, "insufficient", outcome.Status)
 	}
 }

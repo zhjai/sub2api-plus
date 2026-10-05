@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const OpenAIEvalRankingAlgorithmVersion = "evidence-account-macro-v3-latest-verdict"
+const OpenAIEvalRankingAlgorithmVersion = "evidence-account-macro-v4-modeltrace-target"
 
 var (
 	ErrOpenAIEvalRankingSuperseded      = errors.New("EVALUATION_SUPERSEDED")

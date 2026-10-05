@@ -350,6 +350,8 @@ export interface OpenAIEvalRun {
     fingerprint?: OpenAIEvalFingerprintResult
     modeltrace?: OpenAIEvalModelTraceResult
     state_probe?: OpenAIStateProbeResult
+    /** Present when the server reads an attribution under its current rule; older servers omit it. */
+    attribution?: OpenAIEvalAttributionMeta
   }
   request_count: number
   sample_count?: number
@@ -365,6 +367,23 @@ export interface OpenAIEvalRun {
   trigger_source: string
   error?: string
   samples?: OpenAIEvalSampleRecord[]
+}
+
+/**
+ * Attribution rule metadata. `status`/`reason` on the outcome are the current
+ * interpretation; the original_* fields are what the run was stored with.
+ * Raw evidence (prediction, candidates, samples) is never rewritten.
+ */
+export interface OpenAIEvalAttributionMeta {
+  /** e.g. 'public-target-match-luna-v2' */
+  rule_version: string
+  /**
+   * Rule the stored verdict was written under, e.g. 'non-luna-attribution-v1';
+   * 'legacy-unversioned' when the record carried no metadata, so its rule is unknown.
+   */
+  original_rule_version: string
+  original_status: string
+  original_reason?: string
 }
 
 export interface OpenAIStateProbeResult {

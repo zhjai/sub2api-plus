@@ -27,8 +27,8 @@ func (r *openAIEvalRepository) LatestCompletedRuns(ctx context.Context, keys []s
 		FROM jsonb_to_recordset($1::jsonb) AS k(account_id bigint, requested_model text, reasoning_effort text, test_type text)
 		JOIN LATERAL (
 		  SELECT * FROM openai_eval_runs
-		  WHERE account_id=k.account_id AND requested_model=k.requested_model
-		    AND reasoning_effort=k.reasoning_effort AND test_type=k.test_type
+		  WHERE account_id=k.account_id AND lower(btrim(requested_model))=lower(btrim(k.requested_model))
+		    AND lower(btrim(reasoning_effort))=lower(btrim(k.reasoning_effort)) AND test_type=k.test_type
 		    AND trigger_source IN ('manual', 'scheduled') AND finished_at IS NOT NULL AND status <> 'running'
 		  ORDER BY finished_at DESC, id DESC LIMIT 1
 		) r ON true`, payload)

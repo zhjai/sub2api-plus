@@ -139,7 +139,7 @@ describe('ModelIntegrityTestsView', () => {
     })
     api.listOpenAIEvalRuns.mockResolvedValue({
       items: [
-        run(3, 'modeltrace', 'suspected_normal', 'non_luna_behavioral_attribution', { modeltrace: { bank_revision: 'x', prediction: 'gpt-5', probability: 0.8, used_outputs: 3, requests: 3 } }),
+        run(3, 'modeltrace', 'suspected_normal', 'non_luna_behavioral_attribution', { modeltrace: { bank_revision: 'x', prediction: 'gpt-4.1', probability: 0.8, used_outputs: 3, requests: 3 } }),
         run(2, 'fingerprint', 'warning', 'suspected_luna_attribution', { fingerprint: { status: 'warning', nearest_model: 'gpt-5-luna', mean_jsd: 0.1, p_value: 0.4, valid_samples: 60, required_samples: 60, cell_count: 6, evaluated_at: '' } }),
         run(1, 'fingerprint', 'insufficient', 'unresolved_behavioral_attribution', {})
       ]
@@ -175,6 +175,75 @@ describe('ModelIntegrityTestsView', () => {
     expect(note?.textContent?.trim()).toBe('归因基于回答行为推断，不能证明实际路由。该测试开启自动运行时，最近一次已完成的归因结论会计入降智通过率，手动或自动运行均可。ModelTrace 只要有一条有效输出即可归因，失败的请求仍保留以供排查；行为指纹需全部计划采样均有效才会归因。')
     expect(document.body.querySelector('[data-testid="detail-status"]')?.textContent?.trim()).toBe('疑似 Luna')
     expect(document.body.textContent).toContain('gpt-5-luna')
+    wrapper.unmount()
+  })
+
+  it('shows a target-matching ModelTrace attribution as normal and a Luna one as abnormal, with the original verdict kept apart', async () => {
+    const run = (id: number, status: string, reason: string, prediction: string, attribution?: Record<string, string>) => ({
+      id, account_id: 12, test_type: 'modeltrace', requested_model: 'gpt-5', reasoning_effort: 'high', status,
+      outcome: { status, reason, sample_count: 2, expected_count: 3, confidence: 'low', scheduling: 'alert_only', attribution,
+        modeltrace: { bank_revision: 'mt-bank-7', prediction, probability: 0.82, used_outputs: 2, requests: 3, candidates: [{ model: prediction, display_name: prediction, family: 'f', family_name: 'F', probability: 0.82, profile_similarity: 0.9, score: 1 }] } },
+      request_count: 3, input_tokens: 1, output_tokens: 1, duration_ms: 1000,
+      started_at: `2026-10-01T0${id}:00:00Z`, finished_at: `2026-10-01T0${id}:00:05Z`, trigger_source: 'scheduled'
+    })
+    api.listOpenAIEvalRuns.mockResolvedValue({
+      items: [
+        run(2, 'pass', 'modeltrace_target_match', 'gpt-5', { rule_version: 'public-target-match-luna-v2', original_rule_version: 'non-luna-attribution-v1', original_status: 'suspected_normal', original_reason: 'non_luna_behavioral_attribution' }),
+        run(1, 'warning', 'modeltrace_luna_attribution', 'gpt-5.6-luna', { rule_version: 'public-target-match-luna-v2', original_rule_version: 'public-target-match-luna-v2', original_status: 'warning', original_reason: 'modeltrace_luna_attribution' })
+      ]
+    })
+    const wrapper = mountView()
+    await flushPromises()
+
+    const trace = wrapper.get('[data-testid="test-modeltrace"]')
+    expect(trace.get('[data-testid="latest-status"]').text()).toBe('正常')
+    expect(trace.find('.tt-result-ok').exists()).toBe(true)
+    expect(wrapper.findAll('[data-testid="history-status"]').map(item => item.text())).toEqual(['正常', '异常'])
+
+    const rows = wrapper.findAll('[data-testid="history-row"]')
+    await rows[0].trigger('click')
+    await flushPromises()
+    const text = (id: string) => document.body.querySelector(`[data-testid="${id}"]`)?.textContent?.trim()
+    expect(text('detail-status')).toBe('正常')
+    expect(text('detail-target')).toBe('gpt-5')
+    expect(text('detail-prediction')).toBe('gpt-5')
+    expect(text('detail-outputs')).toBe('2/3')
+    expect(text('detail-bank')).toBe('mt-bank-7')
+    expect(text('detail-rule')).toBe('public-target-match-luna-v2')
+    expect(text('detail-reinterpreted')).toBe('该记录原判定为疑似正常（规则 non-luna-attribution-v1）。上方结果按当前规则 public-target-match-luna-v2 对同一批已记录输出重新解读，测试并未重新运行。')
+    expect(text('attribution-note')).toContain('归因基于回答行为推断，不能证明实际路由。')
+    expect(text('detail-technical')).toContain('original: suspected_normal / non_luna_behavioral_attribution / non-luna-attribution-v1')
+    expect(document.body.textContent).toContain('候选模型')
+
+    await rows[1].trigger('click')
+    await flushPromises()
+    expect(text('detail-status')).toBe('异常')
+    expect(text('detail-prediction')).toBe('gpt-5.6-luna')
+    expect(document.body.querySelector('[data-testid="detail-reinterpreted"]')).toBeNull()
+    expect(text('attribution-note')).toContain('不能证明实际路由')
+    wrapper.unmount()
+  })
+
+  it('keeps a valid partial ModelTrace match normal in history and names the failed request', async () => {
+    api.listOpenAIEvalRuns.mockResolvedValue({
+      items: [{
+        id: 5, account_id: 12, test_type: 'modeltrace', requested_model: 'gpt-5', reasoning_effort: 'high', status: 'pass',
+        outcome: { status: 'pass', reason: 'modeltrace_target_match', sample_count: 2, expected_count: 3, confidence: 'low', scheduling: 'alert_only',
+          modeltrace: { bank_revision: 'mt-bank-7', prediction: 'gpt-5', probability: 0.82, used_outputs: 2, requests: 3,
+            samples: [{ accepted: true, answer: '1 2', attempts: 1 }, { accepted: true, answer: '3 4', attempts: 1 }, { accepted: false, error: 'http_502', http_status: 502, attempts: 3, error_message: 'bad gateway' }] } },
+        request_count: 5, input_tokens: 1, output_tokens: 1, duration_ms: 1000,
+        started_at: '2026-10-01T05:00:00Z', finished_at: '2026-10-01T05:00:05Z', trigger_source: 'scheduled'
+      }]
+    })
+    const wrapper = mountView()
+    await flushPromises()
+
+    const row = wrapper.get('[data-testid="history-row"]')
+    expect(row.get('[data-testid="history-status"]').text()).toBe('正常')
+    expect(row.text()).toContain('判定为正常。该结果为行为推断，不代表实际路由已核实。1 个样本请求失败：HTTP 502，bad gateway（尝试 3 次）。')
+    const latest = wrapper.get('[data-testid="test-modeltrace"]')
+    expect(latest.get('[data-testid="latest-status"]').text()).toBe('正常')
+    expect(latest.get('[data-testid="latest-explanation"]').text()).toContain('1 个样本请求失败')
     wrapper.unmount()
   })
 

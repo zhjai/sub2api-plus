@@ -537,11 +537,18 @@ export function isHistoricalDataVersion(run: Pick<OpenAIEvalRun, 'data_version'>
 /** Backend reasons for ModelTrace / fingerprint attributions (openAIEvalAttributionVerdict). */
 export const LUNA_ATTRIBUTION_REASON = 'suspected_luna_attribution'
 export const NON_LUNA_ATTRIBUTION_REASON = 'non_luna_behavioral_attribution'
+/** ModelTrace only: a non-Luna attribution equal to the public tested model (trim/case-insensitive; Luna is checked first). */
+export const MODELTRACE_TARGET_MATCH_REASON = 'modeltrace_target_match'
+/** ModelTrace only: a Luna-family attribution, stored as 'warning' and shown as abnormal. */
+export const MODELTRACE_LUNA_REASON = 'modeltrace_luna_attribution'
+
+const ATTRIBUTION_REASONS = new Set([LUNA_ATTRIBUTION_REASON, NON_LUNA_ATTRIBUTION_REASON, MODELTRACE_TARGET_MATCH_REASON, MODELTRACE_LUNA_REASON])
 
 /**
- * Status key used for the visible label. A Luna attribution is stored as a
- * generic 'warning'; label it "possible Luna" rather than the Candy-style
- * "abnormal" so it never reads as confirmed degradation.
+ * Status key used for the visible label. A Fingerprint (or legacy ModelTrace)
+ * Luna attribution is stored as a generic 'warning'; label it "possible Luna"
+ * rather than "abnormal". A ModelTrace 'modeltrace_luna_attribution' keeps the
+ * plain status, so it reads "abnormal".
  */
 export function runStatusKey(run: Pick<OpenAIEvalRun, 'status' | 'outcome'>): string {
   if (run.status === 'warning' && run.outcome?.reason === LUNA_ATTRIBUTION_REASON) return 'suspected_luna'
@@ -551,7 +558,20 @@ export function runStatusKey(run: Pick<OpenAIEvalRun, 'status' | 'outcome'>): st
 /** True when the run's verdict is a behavioural attribution, so the UI must say it is inferred. */
 export function isAttributionRun(run: Pick<OpenAIEvalRun, 'status' | 'outcome' | 'test_type'>): boolean {
   if (run.test_type !== 'modeltrace' && run.test_type !== 'fingerprint') return false
-  return run.status === 'suspected_normal' || run.outcome?.reason === LUNA_ATTRIBUTION_REASON || run.outcome?.reason === NON_LUNA_ATTRIBUTION_REASON
+  return run.status === 'suspected_normal' || ATTRIBUTION_REASONS.has(run.outcome?.reason ?? '')
+}
+
+/**
+ * The verdict a run was stored with, when the server now reads it under a
+ * different attribution rule. Null when nothing changed or the record carries
+ * no metadata, so an unchanged run never shows a "reinterpreted" note.
+ */
+export function attributionReinterpretation(run: Pick<OpenAIEvalRun, 'status' | 'outcome'>): { status: string; reason?: string; rule: string; currentRule: string } | null {
+  const meta = run.outcome?.attribution
+  if (!meta?.original_status) return null
+  const sameVerdict = meta.original_status === run.status && (meta.original_reason ?? '') === (run.outcome.reason ?? '')
+  if (sameVerdict && meta.original_rule_version === meta.rule_version) return null
+  return { status: meta.original_status, reason: meta.original_reason, rule: meta.original_rule_version, currentRule: meta.rule_version }
 }
 
 export function latestRunFor(runs: OpenAIEvalRun[], route: OpenAIEvalRouteConfig, type: EvalTestType): OpenAIEvalRun | undefined {
