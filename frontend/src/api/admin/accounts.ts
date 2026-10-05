@@ -121,9 +121,42 @@ export interface SchedulerDecisionCandidate {
   decision_reason?: string
   /** Set only when a fully cold pool was ordered by the account overview. */
   overview_prior?: { rank: number; priority_score: number; priority: OpenAIEvalAccountPriority } | null
-  /** 'unknown_current_model' when the request model itself has no quality evidence. */
-  quality_basis?: string
+  /**
+   * Where the quality tier came from: 'exact' is this model and effort,
+   * 'account_prior' is a separate account-wide reference because the requested
+   * model and effort have no configured test evidence, 'none' is neither.
+   */
+  quality_basis?: OpenAIEvalQualityBasis | string
+  /**
+   * The account-wide reference behind an 'account_prior' tier. It is not a
+   * measured pass rate for the requested model and effort, so it is never
+   * merged into quality_ratio.
+   */
+  account_quality_prior?: OpenAIEvalAccountQualityPrior | null
 }
+
+/**
+ * An account-wide quality reference for a dispatch or an evaluated row. The
+ * ratio comes from the account's other models or efforts, so it must always be
+ * shown with its sources and its expiry, never as the requested model and
+ * effort's pass rate.
+ */
+export interface OpenAIEvalAccountQualityPrior {
+  ratio: number
+  evaluation_id: string
+  evaluated_at: string
+  /**
+   * When the reference stops being usable. The server caps this at the earlier
+   * of the evidence's own expiry and the evaluation generation's deadline, so
+   * the value is shown exactly as supplied and never recomputed here.
+   */
+  expires_at: string
+  /** Model/effort pairs the reference was computed from, formatted "model/effort". */
+  source_models: string[]
+}
+
+/** 'exact' is a measured pass rate; the rest explain why there is none. */
+export type OpenAIEvalQualityBasis = 'exact' | 'account_prior' | 'none' | 'unknown_current_model'
 
 export interface OpenAIEvalSchedule {
   enabled: boolean
@@ -465,6 +498,10 @@ export interface OpenAIEvalRankedAccount {
   upstream_models: string[]
   factors: OpenAIEvalRankingFactors
   contributions: OpenAIEvalRankingWeights
+  /** 'account_prior' marks a tier ordered by a separate account-wide reference. */
+  quality_basis?: OpenAIEvalQualityBasis | string
+  /** Present with quality_basis 'account_prior'; see OpenAIEvalAccountQualityPrior. */
+  account_quality_prior?: OpenAIEvalAccountQualityPrior | null
 }
 
 /** One concrete endpoint/model pair a dimension can be served by. */

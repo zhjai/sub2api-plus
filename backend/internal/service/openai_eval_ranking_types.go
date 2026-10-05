@@ -89,18 +89,20 @@ type OpenAIEvalRankingExclusion struct {
 	ObservedAt time.Time `json:"observed_at"`
 }
 type OpenAIEvalRankedAccount struct {
-	OverviewPrior    *OpenAIEvalOverviewPrior     `json:"overview_prior,omitempty"`
-	AccountID        int64                        `json:"account_id"`
-	AccountName      string                       `json:"account_name"`
-	Rank             *int                         `json:"rank"`
-	PriorityScore    *float64                     `json:"priority_score"`
-	QualityTier      *int                         `json:"quality_tier"`
-	Eligible         bool                         `json:"eligible"`
-	ExclusionReason  *string                      `json:"exclusion_reason"`
-	ExclusionReasons []OpenAIEvalRankingExclusion `json:"exclusion_reasons"`
-	UpstreamModels   []string                     `json:"upstream_models"`
-	Factors          OpenAIEvalRankingFactors     `json:"factors"`
-	Contributions    OpenAIEvalRankingWeights     `json:"contributions"`
+	QualityBasis        string                         `json:"quality_basis,omitempty"`
+	AccountQualityPrior *OpenAIEvalAccountQualityPrior `json:"account_quality_prior,omitempty"`
+	OverviewPrior       *OpenAIEvalOverviewPrior       `json:"overview_prior,omitempty"`
+	AccountID           int64                          `json:"account_id"`
+	AccountName         string                         `json:"account_name"`
+	Rank                *int                           `json:"rank"`
+	PriorityScore       *float64                       `json:"priority_score"`
+	QualityTier         *int                           `json:"quality_tier"`
+	Eligible            bool                           `json:"eligible"`
+	ExclusionReason     *string                        `json:"exclusion_reason"`
+	ExclusionReasons    []OpenAIEvalRankingExclusion   `json:"exclusion_reasons"`
+	UpstreamModels      []string                       `json:"upstream_models"`
+	Factors             OpenAIEvalRankingFactors       `json:"factors"`
+	Contributions       OpenAIEvalRankingWeights       `json:"contributions"`
 }
 type OpenAIEvalSelectionModelVariant struct {
 	Endpoint       string `json:"endpoint"`
@@ -205,6 +207,16 @@ type OpenAIEvalOverviewPrior struct {
 	Rank          int                       `json:"rank"`
 	PriorityScore float64                   `json:"priority_score"`
 	Priority      OpenAIEvalAccountPriority `json:"priority"`
+}
+
+// An account-wide preference is not evidence about the requested model/effort.
+type OpenAIEvalAccountQualityPrior struct {
+	Ratio        float64   `json:"ratio"`
+	EvaluationID string    `json:"evaluation_id"`
+	EvaluatedAt  time.Time `json:"evaluated_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	SourceModels []string  `json:"source_models"`
+	fraction     *big.Rat
 }
 
 type OpenAIEvalAccountOverviewRow struct {

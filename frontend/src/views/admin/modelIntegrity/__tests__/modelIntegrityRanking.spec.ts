@@ -4,8 +4,11 @@ import {
   PRESET_WEIGHTS,
   RANKING_FACTORS,
   accountFactorSourceKind,
+  accountQualityReference,
   assessedQualityRatio,
+  candidateReasonKey,
   coverageStatusKey,
+  dispatchQuality,
   effectiveTone,
   exclusionScopeKey,
   factorRawValue,
@@ -221,5 +224,52 @@ describe('account overview factors', () => {
       { requested_model: 'luna', reasoning_effort: '', policy: 'stability_first' as const }
     ]
     expect(ruleExceptionsFor(rules, models, 'avoid_degradation').map(rule => rule.requested_model)).toEqual(['GPT-5.6'])
+  })
+})
+
+describe('account-wide quality reference', () => {
+  const prior = { ratio: 0.625, evaluation_id: 'eval-1', evaluated_at: '2026-10-01T07:00:00Z', expires_at: '2026-10-01T09:00:00Z', source_models: ['gpt-5-mini/high'] }
+
+  it('reads the reference only from the server object behind the account_prior basis', () => {
+    expect(accountQualityReference({ quality_basis: 'account_prior', account_quality_prior: prior }))
+      .toEqual({ ratio: 0.625, evaluationId: 'eval-1', evaluatedAt: '2026-10-01T07:00:00Z', expiresAt: '2026-10-01T09:00:00Z', sourceModels: ['gpt-5-mini/high'] })
+  })
+
+  it('keeps a 0 % reference, which is a real value and not a missing one', () => {
+    expect(accountQualityReference({ quality_basis: 'account_prior', account_quality_prior: { ...prior, ratio: 0, source_models: [] } })?.ratio).toBe(0)
+  })
+
+  it('keeps a full 100 % reference, which is still not this model\'s pass rate', () => {
+    const full = { quality_basis: 'account_prior', account_quality_prior: { ...prior, ratio: 1 } }
+    expect(accountQualityReference(full)?.ratio).toBe(1)
+    expect(dispatchQuality({ ...full, eligible: true, selected: false, in_top_k: true })).toEqual({ kind: 'unknown', reason: 'quality_unknown' })
+  })
+
+  it('returns nothing when the basis is exact, missing or unrecognised', () => {
+    expect(accountQualityReference({ quality_basis: 'exact', account_quality_prior: prior })).toBeNull()
+    expect(accountQualityReference({ account_quality_prior: prior })).toBeNull()
+    expect(accountQualityReference({ quality_basis: 'unknown_current_model' })).toBeNull()
+    // A basis without its object cannot invent one.
+    expect(accountQualityReference({ quality_basis: 'account_prior' })).toBeNull()
+    expect(accountQualityReference({ quality_basis: 'account_prior', account_quality_prior: { ...prior, ratio: Number.NaN } })).toBeNull()
+  })
+
+  it('reports an account_prior tier as unknown even when exact counters are present', () => {
+    const base = { eligible: true, selected: false, in_top_k: true, quality_state: 'assessed', evaluated_count: 3, pass_count: 3, suspected_pass_count: 0, quality_ratio: 1 }
+    expect(dispatchQuality({ ...base, quality_basis: 'exact' })).toEqual({ kind: 'assessed', ratio: 1, pass: 3, suspected: 0, evaluated: 3 })
+    // The same counters under an account-wide reference describe another model.
+    expect(dispatchQuality({ ...base, quality_basis: 'account_prior' })).toEqual({ kind: 'unknown', reason: 'quality_unknown' })
+  })
+
+  it('reports an account_prior tier from factors as unknown pass-rate evidence too', () => {
+    const candidate = { eligible: true, selected: false, in_top_k: true, quality_basis: 'account_prior', factors: factors() }
+    expect(dispatchQuality(candidate)).toEqual({ kind: 'unknown', reason: 'quality_unknown' })
+    // Without the basis the same measured factor is a real pass rate.
+    expect(dispatchQuality({ ...candidate, quality_basis: 'exact' }).kind).toBe('assessed')
+  })
+
+  it('maps the account_prior decision reason to its own explanation', () => {
+    expect(candidateReasonKey('account_prior_tier')).toBe('account_prior_tier')
+    expect(candidateReasonKey('something_new')).toBeNull()
   })
 })

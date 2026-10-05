@@ -492,11 +492,11 @@ describe('actual dispatch separation', () => {
     await flushPromises()
     await openRequests(wrapper)
     const row = wrapper.get('[data-testid="decision-row"]')
-    expect(row.get('[data-testid="dispatch-basis"]').text()).toContain('总榜先验')
+    expect(row.get('[data-testid="dispatch-basis"]').text()).toContain('账号总排行名次')
     expect(row.get('[data-testid="dispatch-overview-prior"]').text()).toContain('通过率仍为未知')
     await row.get('.ledger-toggle').trigger('click')
     expect(wrapper.get('[data-testid="candidate-overview-rank"]').text()).toBe('总榜第 3')
-    expect(wrapper.get('[data-testid="candidate-row"]').text()).toContain('按账号排行排位')
+    expect(wrapper.get('[data-testid="candidate-row"]').text()).toContain('按账号总排行排位')
     // The overview's pass rate is never presented as this model's pass rate.
     expect(wrapper.get('[data-testid="candidate-quality"]').text()).toContain('未知')
   })

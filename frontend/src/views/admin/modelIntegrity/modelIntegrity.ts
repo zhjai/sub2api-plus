@@ -650,7 +650,10 @@ const KNOWN_CANDIDATE_REASONS = new Set([
   'quality_tier_top_k_candidate', 'quality_lower_tier_fallback',
   'explicit_policy_rank', 'live_admission_skipped', 'required_owner_override', 'quality_unassessed_fallback',
   // A fully cold pool ordered by the account overview (rc4).
-  'overview_prior'
+  'overview_prior',
+  // The requested model and effort have no configured test evidence, so the
+  // tier was ordered by the separate account-wide quality reference (rc6).
+  'account_prior_tier'
 ])
 
 export function candidateReasonKey(code: string | undefined): string | null {
@@ -1079,15 +1082,24 @@ export type DispatchQuality =
  * The pass rate a dispatch candidate was ranked with. Only an assessed state
  * with a published ratio is a pass rate; anything else is unknown. A neutral
  * scoring contribution is never turned into a ratio.
+ *
+ * `quality_basis` decides what the counters mean, so an 'account_prior' tier
+ * is unknown here even if a payload also carried counters: that tier came from
+ * another model's or effort's evidence, and showing it as this model and
+ * effort's pass rate would report a reference as a measurement.
  */
 export function dispatchQuality(candidate: SchedulerDecisionCandidate): DispatchQuality {
   const quality = candidate.factors?.quality
   if (quality) {
+    // The reference is the reason there is no measurement, so it is reported as
+    // unknown pass-rate evidence rather than as this model's assessed state.
+    if (candidate.quality_basis === 'account_prior') return { kind: 'unknown', reason: 'quality_unknown' }
     if (isQualityAssessed(quality.state) && quality.ratio != null) {
       return { kind: 'assessed', ratio: quality.ratio, pass: quality.pass ?? 0, suspected: quality.suspected_pass ?? 0, evaluated: quality.selected || quality.evaluated || 0 }
     }
     return { kind: 'unknown', reason: quality.unknown_reason ?? (quality.state ? `quality_${quality.state}` : null) }
   }
+  if (candidate.quality_basis === 'account_prior') return candidate.eligible ? { kind: 'unknown', reason: 'quality_unknown' } : { kind: 'none' }
   if (candidate.quality_state !== 'unassessed' && candidate.quality_ratio != null && Number(candidate.evaluated_count) > 0) {
     return { kind: 'assessed', ratio: candidate.quality_ratio, pass: candidate.pass_count ?? 0, suspected: candidate.suspected_pass_count ?? 0, evaluated: Number(candidate.evaluated_count) }
   }
@@ -1103,4 +1115,41 @@ export function neutralQualityContribution(contributions: Pick<OpenAIEvalRanking
   if (assessed) return null
   const value = contributions?.quality
   return value != null && value > 0 ? value : null
+}
+
+export interface AccountQualityReference {
+  ratio: number
+  evaluationId: string
+  evaluatedAt: string
+  /**
+   * Supplied by the server, already capped at the earlier of the evidence
+   * expiry and the evaluation deadline. Displayed as given, never recomputed.
+   */
+  expiresAt: string
+  /** Model/effort pairs the reference was averaged from, formatted "model/effort". */
+  sourceModels: string[]
+}
+
+/**
+ * The separate account-wide quality reference a tier was ordered by, or null.
+ *
+ * Only the server's own `account_prior` basis produces this. It is deliberately
+ * not read from `quality_ratio` or `quality_state`: under an account-wide
+ * reference those stay unknown for the requested model and effort, and a
+ * browser that filled them in would turn an account-wide figure into a measured
+ * pass rate. The reference itself can come from the same model at a different
+ * effort, or from a different model, so its sources are always shown with it.
+ * Zero is a real reference and is kept; a missing ratio is not.
+ */
+export function accountQualityReference(candidate: Pick<SchedulerDecisionCandidate, 'quality_basis' | 'account_quality_prior'>): AccountQualityReference | null {
+  if (candidate.quality_basis !== 'account_prior') return null
+  const prior = candidate.account_quality_prior
+  if (!prior || typeof prior.ratio !== 'number' || !Number.isFinite(prior.ratio)) return null
+  return {
+    ratio: prior.ratio,
+    evaluationId: prior.evaluation_id,
+    evaluatedAt: prior.evaluated_at,
+    expiresAt: prior.expires_at,
+    sourceModels: Array.isArray(prior.source_models) ? prior.source_models : []
+  }
 }

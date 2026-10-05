@@ -510,15 +510,15 @@ export default {
         selectedRank: '在已发布顺序中排第 {rank} 位',
         snapshotAt: '顺序生成于 {time}',
         ownerOverride: '该请求因归属、会话或续写响应规则绑定了指定账号，未按评估顺序选择。',
-        overviewPrior: '候选账号都没有该模型的证据，因此按账号排行排序（总榜先验）。它们在该模型上的通过率仍为未知。',
-        overviewPriorHint: '账号排行中的名次，不是该模型的结果。',
+        overviewPrior: '候选账号都没有该模型的证据，因此按账号总排行（名次参考）排序。它们在该模型上的通过率仍为未知。',
+        overviewPriorHint: '账号总排行中的名次参考，不是该模型的结果。',
         overviewRank: '总榜第 {rank}',
         basis: {
           snapshot: '顺序：已发布的评估',
           live_fallback: '顺序：请求时按同一策略计算',
           legacy: '顺序：系统调度权重',
           owner: '顺序：账号绑定，非评估顺序',
-          overview_prior: '顺序：总榜先验（该模型暂无证据）'
+          overview_prior: '顺序：账号总排行名次（该模型暂无证据）'
         },
         chosen: '选中 {account}',
         noneChosen: '未选中账号',
@@ -528,6 +528,8 @@ export default {
         affinityOnly: '本次沿用会话绑定的账号，未对其他账号评分。',
         truncated: '账号数量较多，仅显示其中 64 个。',
         scoreHint: '分数仅在可用账号之间比较，分数越高越优先。',
+        scoreHintTier: '先用降智通过率分档，同一档内再比较分数，分数越高越优先。',
+        scoreHintWeighted: '分数按已保存的自定义权重计算，其中包含降智通过率；分数越高越优先。',
         migration: '从 {from}x 倍率账号切换至 {to}x',
         errorLabel: '技术细节',
         columns: {
@@ -547,7 +549,12 @@ export default {
         qualitySplit: '通过 {pass} 项，疑似通过 {suspected} 项',
         qualityContribution: '分数贡献 {value}',
         qualityUnknown: '未知',
-        qualityHint: '已勾选测试项中，最近一次已完成结论（手动或自动）为通过或疑似通过的项数 ÷ 勾选项数，每项权重相同。任一勾选项的最新结果缺少有效结论时显示未知，不等于 100%。',
+        qualityHint: '已勾选测试项中，最近一次已完成结论（手动或自动）为通过或疑似通过的项数 ÷ 勾选项数，每项权重相同。任一勾选项的最新结果缺少有效结论时显示未知，不等于 100%。该模型与推理强度没有配置测试项时，本模型通过率仍显示未知，档位由下方的「账号参考」决定：它来自该账号在其他模型或推理强度上的通过率，不是本模型与推理强度的实测通过率。',
+        accountReference: '账号参考 {ratio}',
+        accountReferenceHint: '该账号其他模型或推理强度的通过率参考：{sources}；评估于 {evaluated}，可用至 {expires}（取诊断有效期与本次评估有效期两者中较早者）。不是本次模型与推理强度的实测通过率。',
+        accountReferenceNoSources: '无记录',
+        accountReferenceTrace: '本次排序的档位使用了账号参考：该模型与推理强度没有配置测试项，因此按账号在其他模型或推理强度上的通过率参考分档。本模型与推理强度自身的通过率仍为未知。',
+        qualityUnknownAccountReference: '该模型与推理强度没有配置测试项，本模型的通过率没有证据，因此为未知；档位参考见下方账号参考。',
         verdict: {
           selected: '选中',
           topK: '候选',
@@ -1026,7 +1033,8 @@ export default {
         live_admission_skipped: '请求时被跳过，改试顺序中的下一个账号。',
         required_owner_override: '该请求必须留在的账号。',
         quality_unassessed_fallback: '通过率未知，在所有已评估账号之后尝试。',
-        overview_prior: '按账号排行排位；该模型暂无证据。'
+        overview_prior: '按账号总排行排位；该模型暂无证据。',
+        account_prior_tier: '按账号参考分档：该模型与推理强度没有配置测试项，因此使用该账号在其他模型或推理强度上的通过率参考。'
       }
     }
   }

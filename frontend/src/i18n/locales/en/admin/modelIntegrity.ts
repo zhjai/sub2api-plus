@@ -528,6 +528,8 @@ export default {
         affinityOnly: 'The session-bound account was reused; other accounts were not scored.',
         truncated: 'Too many accounts; showing 64 of them.',
         scoreHint: 'Scores compare available accounts only; higher scores rank first.',
+        scoreHintTier: 'Integrity pass-rate tiers rank first; within a tier, higher scores rank first.',
+        scoreHintWeighted: 'Scores use the saved custom weights, which include the integrity pass rate; higher scores rank first.',
         migration: 'Switched from a {from}x account to {to}x',
         errorLabel: 'Technical details',
         columns: {
@@ -547,7 +549,12 @@ export default {
         qualitySplit: '{pass} passed, {suspected} likely passed',
         qualityContribution: 'Score contribution {value}',
         qualityUnknown: 'Unknown',
-        qualityHint: 'Selected tests whose latest completed verdict, manual or automatic, passed or likely passed ÷ tests selected; each test has equal weight. Unknown when the latest result of any selected test has no valid verdict; it is not 100%.',
+        qualityHint: 'Selected tests whose latest completed verdict, manual or automatic, passed or likely passed ÷ tests selected; each test has equal weight. Unknown when the latest result of any selected test has no valid verdict; it is not 100%. When this model and effort have no configured tests, the measured cell stays unknown and the tier comes from the account reference below, which reads the account\'s other models or efforts and is not a measured pass rate for this model and effort.',
+        accountReference: 'Account reference {ratio}',
+        accountReferenceHint: 'Pass rate across this account\'s other models or efforts: {sources}. Evaluated {evaluated}, usable until {expires} (the earlier of the diagnostic expiry and this evaluation\'s expiry). It is not a measured pass rate for this model and effort.',
+        accountReferenceNoSources: 'none recorded',
+        accountReferenceTrace: 'This order used an account reference for its quality tiers: this model and effort have no configured tests, so the account\'s pass rate on other models or efforts set the tiers. The pass rate for this model and effort itself is still unknown.',
+        qualityUnknownAccountReference: 'This model and effort have no configured tests, so there is no evidence of this model\'s pass rate and it stays unknown. The tier used the account reference shown below.',
         verdict: {
           selected: 'Selected',
           topK: 'Candidate',
@@ -1026,7 +1033,8 @@ export default {
         live_admission_skipped: 'Skipped at request time; the next account in the order was tried.',
         required_owner_override: 'The account the request had to stay on.',
         quality_unassessed_fallback: 'Pass rate unknown, so tried after every assessed account.',
-        overview_prior: 'Placed by the account ranking; no evidence for this model yet.'
+        overview_prior: 'Placed by the account ranking; no evidence for this model yet.',
+        account_prior_tier: 'Tiered by an account reference: this model and effort have no configured tests, so the account\'s pass rate on other models or efforts was used.'
       }
     }
   }

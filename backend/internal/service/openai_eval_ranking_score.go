@@ -2,6 +2,7 @@ package service
 
 import (
 	"math"
+	"math/big"
 	"sort"
 	"time"
 )
@@ -72,7 +73,7 @@ func emptyOpenAIEvalRankingFactors() OpenAIEvalRankingFactors {
 }
 
 // Both evaluation and request fallback use this pure scorer over one input pool.
-func scoreOpenAIEvalRanking(policy string, weights OpenAIEvalRankingWeights, inputs []openAIEvalRankingInput, now time.Time, oauthRate *float64) []OpenAIEvalRankedAccount {
+func scoreOpenAIEvalRanking(policy string, weights OpenAIEvalRankingWeights, inputs []openAIEvalRankingInput, now time.Time, oauthRate *float64, priorSets ...map[int64]*OpenAIEvalAccountQualityPrior) []OpenAIEvalRankedAccount {
 	pool := make([]*Account, 0, len(inputs))
 	minTTFT, maxTTFT := math.Inf(1), math.Inf(-1)
 	for _, input := range inputs {
@@ -90,6 +91,15 @@ func scoreOpenAIEvalRanking(policy string, weights OpenAIEvalRankingWeights, inp
 	for _, input := range inputs {
 		row := OpenAIEvalRankedAccount{AccountID: input.account.ID, AccountName: input.account.Name,
 			Eligible: input.compatible && len(input.exclusions) == 0, ExclusionReasons: input.exclusions, UpstreamModels: input.upstream, Factors: input.factors}
+		row.QualityBasis = "none"
+		if rankingQualityFraction(row.Factors.Quality) != nil {
+			row.QualityBasis = "exact"
+		} else if policy == OpenAIEvalSchedulingPolicyAvoidDegradation && row.Factors.Quality.Selected == 0 && len(priorSets) > 0 {
+			if prior := priorSets[0][row.AccountID]; prior != nil && now.Before(prior.ExpiresAt) {
+				row.AccountQualityPrior = cloneAccountQualityPrior(prior)
+				row.QualityBasis = "account_prior"
+			}
+		}
 		if row.ExclusionReasons == nil {
 			row.ExclusionReasons = []OpenAIEvalRankingExclusion{}
 		}
@@ -132,7 +142,7 @@ func scoreOpenAIEvalRanking(policy string, weights OpenAIEvalRankingWeights, inp
 			return a.PriorityScore != nil
 		}
 		if a.PriorityScore != nil && policy == OpenAIEvalSchedulingPolicyAvoidDegradation {
-			if compared := compareRankingQuality(a.Factors.Quality, b.Factors.Quality); compared != 0 {
+			if compared := compareRankingEffectiveQuality(a, b); compared != 0 {
 				return compared > 0
 			}
 		}
@@ -148,13 +158,45 @@ func scoreOpenAIEvalRanking(policy string, weights OpenAIEvalRankingWeights, inp
 		}
 		rows[i].Rank = rankingPtr(i + 1)
 		if policy == OpenAIEvalSchedulingPolicyAvoidDegradation {
-			if i == 0 || compareRankingQuality(rows[i-1].Factors.Quality, rows[i].Factors.Quality) != 0 {
+			if i == 0 || compareRankingEffectiveQuality(rows[i-1], rows[i]) != 0 {
 				tier++
 			}
 			rows[i].QualityTier = rankingPtr(tier)
 		}
 	}
 	return rows
+}
+
+func compareRankingEffectiveQuality(a, b OpenAIEvalRankedAccount) int {
+	fraction := func(row OpenAIEvalRankedAccount) *big.Rat {
+		if exact := rankingQualityFraction(row.Factors.Quality); exact != nil {
+			return exact
+		}
+		if row.AccountQualityPrior != nil {
+			return row.AccountQualityPrior.fraction
+		}
+		return nil
+	}
+	left, right := fraction(a), fraction(b)
+	if left == nil && right == nil {
+		return 0
+	}
+	if left == nil {
+		return -1
+	}
+	if right == nil {
+		return 1
+	}
+	if cmp := left.Cmp(right); cmp != 0 {
+		return cmp
+	}
+	if a.QualityBasis == "exact" && b.QualityBasis != "exact" {
+		return 1
+	}
+	if b.QualityBasis == "exact" && a.QualityBasis != "exact" {
+		return -1
+	}
+	return 0
 }
 
 func compareRankingQuality(a, b OpenAIEvalRankingQuality) int {

@@ -449,7 +449,12 @@ func (r *OpenAIEvalRankingService) build(ctx context.Context, cfg *OpenAIEvalCon
 						exclusions = append(exclusions, r.offlineRuntimeExclusions(account, variants, now)...)
 						inputs = append(inputs, openAIEvalRankingInput{account, f, exclusions, compatible, upstream})
 					}
-					dim.Accounts = scoreOpenAIEvalRanking(policy, weights, inputs, now, oauthRate)
+					priorAccounts := make([]Account, 0, len(scope.accounts))
+					for _, account := range scope.accounts {
+						priorAccounts = append(priorAccounts, *account)
+					}
+					priors := accountQualityPriors(gen, cfg, scope.group.ID, model, effort, priorAccounts, latest, now)
+					dim.Accounts = scoreOpenAIEvalRanking(policy, weights, inputs, now, oauthRate, priors)
 					eligible := 0
 					for _, a := range dim.Accounts {
 						if a.Eligible {
@@ -475,6 +480,9 @@ func (r *OpenAIEvalRankingService) build(ctx context.Context, cfg *OpenAIEvalCon
 						gen.summary.DimensionCount++
 						gen.summary.AccountRowCount += len(dim.Accounts)
 						for _, a := range dim.Accounts {
+							if prior := a.AccountQualityPrior; prior != nil && prior.ExpiresAt.Before(*dim.ValidUntil) {
+								dim.ValidUntil = rankingPtr(prior.ExpiresAt)
+							}
 							q := a.Factors.Quality
 							if q.Known {
 								qualityRoutes[(openAIEvalQualityRoute{AccountID: a.AccountID, Model: model, Effort: effort}).key()] = true
@@ -505,6 +513,15 @@ func (r *OpenAIEvalRankingService) build(ctx context.Context, cfg *OpenAIEvalCon
 				}
 				gen.byKey[dim.DimensionID] = len(gen.dimensions)
 				gen.dimensions = append(gen.dimensions, dim)
+			}
+		}
+	}
+	// A later dimension can shorten the shared generation lifetime.
+	for i := range gen.dimensions {
+		for j := range gen.dimensions[i].Accounts {
+			prior := gen.dimensions[i].Accounts[j].AccountQualityPrior
+			if prior != nil && gen.deadline.Before(prior.ExpiresAt) {
+				prior.ExpiresAt = gen.deadline
 			}
 		}
 	}

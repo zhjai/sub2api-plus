@@ -488,6 +488,223 @@ describe('ModelIntegritySchedulingView', () => {
     expect(cells.map(cell => cell.text())).toEqual(['未知', '—'])
   })
 
+  it('keeps the model pass rate unknown and shows the account reference beside it', async () => {
+    const decisions = await api.listSchedulerDecisions()
+    const trace = { ...decisions.items[0], scheduling_policy: 'avoid_degradation', ranking_basis: 'snapshot' }
+    trace.candidates = [
+      {
+        ...trace.candidates[0],
+        quality_basis: 'account_prior',
+        decision_reason: 'account_prior_tier',
+        // The account-wide figure never fills the candidate's own pass rate.
+        account_quality_prior: {
+          ratio: 0.625,
+          evaluation_id: 'eval-1',
+          evaluated_at: '2026-10-01T07:00:00Z',
+          expires_at: '2026-10-01T09:00:00Z',
+          source_models: ['gpt-5-mini/high', 'gpt-5-nano/']
+        }
+      },
+      { account_id: 13, eligible: true, selected: false, in_top_k: true, score: 0.4, quality_state: 'assessed', evaluated_count: 3, pass_count: 3, suspected_pass_count: 0, quality_ratio: 1, quality_basis: 'exact' }
+    ]
+    api.listSchedulerDecisions.mockResolvedValue({ limit: 50, items: [trace] })
+    const wrapper = await mountOnRequests()
+    const row = wrapper.get('[data-testid="decision-row"]')
+    expect(row.get('[data-testid="dispatch-basis"]').text()).toContain('顺序：已发布的评估')
+    expect(row.get('[data-testid="dispatch-account-reference"]').text()).toContain('账号参考')
+    await row.get('.ledger-toggle').trigger('click')
+    const cells = wrapper.findAll('[data-testid="candidate-quality"]')
+    // The measured cell stays unknown; the reference is a separate badge.
+    expect(cells[0].get('[data-testid="candidate-quality-unknown"]').text()).toBe('未知')
+    const badge = cells[0].get('[data-testid="candidate-account-reference"]')
+    expect(badge.text()).toContain('账号参考 62.5%')
+    expect(badge.attributes('title')).toContain('gpt-5-mini/high')
+    expect(badge.attributes('title')).toContain('不是本次模型与推理强度的实测通过率')
+    // The unknown tooltip names the account reference, not the generic neutral-value hint.
+    expect(cells[0].get('[data-testid="candidate-quality-unknown"]').attributes('title')).toContain('账号参考')
+    expect(cells[0].text()).not.toContain('3/3')
+    // An assessed candidate keeps its measured rate and gets no reference badge.
+    expect(cells[1].text()).toContain('100.0%')
+    expect(cells[1].find('[data-testid="candidate-account-reference"]').exists()).toBe(false)
+    expect(cells[1].find('[data-testid="candidate-quality-unknown"]').exists()).toBe(false)
+  })
+
+  it('says the reference may come from another effort, not only another model', async () => {
+    const decisions = await api.listSchedulerDecisions()
+    // The same model at a different effort is the live case: only the effort differs.
+    const trace = { ...decisions.items[0], scheduling_policy: 'avoid_degradation' }
+    trace.candidates = [
+      {
+        ...trace.candidates[0],
+        quality_basis: 'account_prior',
+        decision_reason: 'account_prior_tier',
+        account_quality_prior: {
+          ratio: 0.5,
+          evaluation_id: 'eval-1',
+          evaluated_at: '2026-10-01T07:00:00Z',
+          expires_at: '2026-10-01T09:00:00Z',
+          source_models: ['gpt-5/low']
+        }
+      }
+    ]
+    api.listSchedulerDecisions.mockResolvedValue({ limit: 50, items: [trace] })
+    const wrapper = await mountOnRequests()
+    const row = wrapper.get('[data-testid="decision-row"]')
+    await row.get('.ledger-toggle').trigger('click')
+    const cell = wrapper.get('[data-testid="candidate-quality"]')
+    const hint = cell.get('[data-testid="candidate-account-reference"]').attributes('title')!
+    // The wording covers models or efforts, and names the exact source pair.
+    expect(hint).toContain('其他模型或推理强度')
+    expect(hint).toContain('gpt-5/low')
+    // The expiry is described as the earlier of the two limits, not as a diagnostic expiry alone.
+    expect(hint).toContain('两者中较早者')
+    expect(row.get('[data-testid="dispatch-account-reference"]').text()).toContain('其他模型或推理强度')
+    expect(row.get('[data-testid="candidate-row"]').text()).toContain('其他模型或推理强度')
+  })
+
+  it('exposes the reference sources and expiry to assistive technology, not only as a title', async () => {
+    const decisions = await api.listSchedulerDecisions()
+    const trace = { ...decisions.items[0], scheduling_policy: 'avoid_degradation' }
+    trace.candidates = [
+      {
+        ...trace.candidates[0],
+        quality_basis: 'account_prior',
+        account_quality_prior: { ratio: 0.5, evaluation_id: 'eval-1', evaluated_at: '2026-10-01T07:00:00Z', expires_at: '2026-10-01T09:00:00Z', source_models: ['gpt-5/low'] }
+      }
+    ]
+    api.listSchedulerDecisions.mockResolvedValue({ limit: 50, items: [trace] })
+    const wrapper = await mountOnRequests()
+    await wrapper.get('[data-testid="decision-row"] .ledger-toggle').trigger('click')
+    const detail = wrapper.get('[data-testid="candidate-account-reference-detail"]')
+    expect(detail.text()).toContain('gpt-5/low')
+    expect(detail.text()).toContain('评估于')
+    expect(detail.text()).toContain('可用至')
+  })
+
+  it('keeps the hidden reference detail inside a positioned table scroll container', async () => {
+    const decisions = await api.listSchedulerDecisions()
+    const trace = { ...decisions.items[0], scheduling_policy: 'avoid_degradation' }
+    trace.candidates = [
+      {
+        ...trace.candidates[0],
+        quality_basis: 'account_prior',
+        account_quality_prior: { ratio: 1, evaluation_id: 'eval-1', evaluated_at: '2026-10-01T07:00:00Z', expires_at: '2026-10-01T09:00:00Z', source_models: ['gpt-5/low'] }
+      }
+    ]
+    api.listSchedulerDecisions.mockResolvedValue({ limit: 50, items: [trace] })
+    const wrapper = await mountOnRequests()
+    await wrapper.get('[data-testid="decision-row"] .ledger-toggle').trigger('click')
+
+    // The detail is visually hidden, but Tailwind's sr-only is `position:
+    // absolute`, so it needs the table's scroll container to be a positioned
+    // containing block. Without one it resolves against the page wrapper at its
+    // offset inside the wide table, which grows document.scrollWidth and scrolls
+    // the whole page sideways on a narrow screen.
+    const scroller = wrapper.get('[data-testid="candidate-account-reference-detail"]').element.closest('.overflow-x-auto')
+    expect(scroller).not.toBeNull()
+    expect(scroller!.classList.contains('relative')).toBe(true)
+    // The table shares that container, so the hidden text scrolls with the table.
+    expect(scroller!.querySelector('table.cand-table')).not.toBeNull()
+  })
+
+  it('does not narrate an account reference on an owner-bound request', async () => {
+    const decisions = await api.listSchedulerDecisions()
+    const trace = {
+      ...decisions.items[0],
+      ranking_basis: 'owner',
+      layer: 'previous_response_id',
+      reason_code: 'required_owner_override',
+      scheduling_policy: 'avoid_degradation'
+    }
+    // The account is pinned by a binding rule; the evaluated row is attached
+    // only to describe it, so the request was never ordered by the reference.
+    trace.candidates = [
+      {
+        ...trace.candidates[0],
+        selected: true,
+        decision_reason: 'required_owner_override',
+        quality_basis: 'account_prior',
+        account_quality_prior: { ratio: 0.25, evaluation_id: 'eval-1', evaluated_at: '2026-10-01T07:00:00Z', expires_at: '2026-10-01T09:00:00Z', source_models: ['gpt-5/low'] }
+      }
+    ]
+    api.listSchedulerDecisions.mockResolvedValue({ limit: 50, items: [trace] })
+    const wrapper = await mountOnRequests()
+    const row = wrapper.get('[data-testid="decision-row"]')
+    // The owner override stays authoritative and no order claim is made.
+    expect(row.get('[data-testid="dispatch-owner"]').text()).toContain('绑定了指定账号')
+    expect(row.find('[data-testid="dispatch-account-reference"]').exists()).toBe(false)
+    // The badge itself still reports what the pinned account's tier rested on.
+    await row.get('.ledger-toggle').trigger('click')
+    expect(wrapper.get('[data-testid="candidate-account-reference"]').text()).toContain('账号参考 25.0%')
+  })
+
+  it('states the tier-then-score order for avoid degradation instead of a flat score order', async () => {
+    const decisions = await api.listSchedulerDecisions()
+    const tiered = { ...decisions.items[0], scheduling_policy: 'avoid_degradation' }
+    const plain = { ...decisions.items[0], scheduling_policy: 'cost_first' }
+    const custom = { ...decisions.items[0], scheduling_policy: 'custom_balance' }
+    api.listSchedulerDecisions.mockResolvedValue({ limit: 50, items: [tiered, plain, custom] })
+    const wrapper = await mountOnRequests()
+
+    // The note lives in the expanded detail, so each row is opened in turn.
+    const rows = wrapper.findAll('[data-testid="decision-row"]')
+    const hints: string[] = []
+    for (const row of rows) {
+      await row.get('.ledger-toggle').trigger('click')
+      hints.push(row.findAll('.ledger-note').map(note => note.text()).join(' | '))
+    }
+    const flat = '分数仅在可用账号之间比较，分数越高越优先。'
+    // Avoid degradation describes tiers then score, and never the flat score-only order.
+    expect(hints[0]).toContain('先用降智通过率分档，同一档内再比较分数')
+    expect(hints[0]).not.toContain(flat)
+    // A policy without a quality term keeps the original line.
+    expect(hints[1]).toContain(flat)
+    // Custom balance has an explicit quality weight the flat line does not describe.
+    expect(hints[2]).toContain('自定义权重')
+    expect(hints[2]).not.toContain(flat)
+  })
+
+  it('never turns an account reference into a rate on its own, even at 0%', async () => {
+    const decisions = await api.listSchedulerDecisions()
+    const trace = { ...decisions.items[0], scheduling_policy: 'avoid_degradation' }
+    trace.candidates = [{
+      ...trace.candidates[0],
+      quality_basis: 'account_prior',
+      // Only the separate object drives the badge; a 0 % reference is a real value.
+      account_quality_prior: { ratio: 0, evaluation_id: 'eval-1', evaluated_at: '2026-10-01T07:00:00Z', expires_at: '2026-10-01T09:00:00Z', source_models: [] },
+      quality_ratio: 1,
+      quality_state: 'assessed',
+      evaluated_count: 3
+    }]
+    api.listSchedulerDecisions.mockResolvedValue({ limit: 50, items: [trace] })
+    const wrapper = await mountOnRequests()
+    await wrapper.get('[data-testid="decision-row"] .ledger-toggle').trigger('click')
+    const cell = wrapper.get('[data-testid="candidate-quality"]')
+    expect(cell.get('[data-testid="candidate-account-reference"]').text()).toBe('账号参考 0.0%')
+    expect(cell.get('[data-testid="candidate-quality-unknown"]').text()).toBe('未知')
+    expect(cell.text()).not.toContain('100')
+  })
+
+  it('shows a full 100 % account reference as a reference, never as this model\'s rate', async () => {
+    const decisions = await api.listSchedulerDecisions()
+    const trace = { ...decisions.items[0], scheduling_policy: 'avoid_degradation' }
+    trace.candidates = [{
+      ...trace.candidates[0],
+      quality_basis: 'account_prior',
+      account_quality_prior: { ratio: 1, evaluation_id: 'eval-1', evaluated_at: '2026-10-01T07:00:00Z', expires_at: '2026-10-01T09:00:00Z', source_models: ['gpt-5/low'] }
+    }]
+    api.listSchedulerDecisions.mockResolvedValue({ limit: 50, items: [trace] })
+    const wrapper = await mountOnRequests()
+    await wrapper.get('[data-testid="decision-row"] .ledger-toggle').trigger('click')
+    const cell = wrapper.get('[data-testid="candidate-quality"]')
+    // The reference reads 100 %, and the measured cell still reads unknown.
+    expect(cell.get('[data-testid="candidate-account-reference"]').text()).toBe('账号参考 100.0%')
+    expect(cell.get('[data-testid="candidate-quality-unknown"]').text()).toBe('未知')
+    // 100 % is never presented as a measured pass rate with its test counts.
+    expect(cell.find('[data-testid="candidate-quality-contribution"]').exists()).toBe(false)
+    expect(cell.text()).not.toContain('项测试通过')
+  })
+
   it('shows a reload prompt instead of overwriting when the server reports a conflict', async () => {
     api.saveOpenAIEvalConfig.mockRejectedValue({ status: 409, message: 'conflict' })
     const wrapper = mountView()

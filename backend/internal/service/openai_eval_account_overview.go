@@ -311,8 +311,10 @@ func buildAccountOverview(gen *openAIRankingGeneration, cfg *OpenAIEvalConfig, s
 		return a.AccountID < b.AccountID
 	})
 	tier := 0
+	gen.overviewByID = make(map[int64]int, len(gen.overview))
 	for i := range gen.overview {
 		row := &gen.overview[i]
+		gen.overviewByID[row.AccountID] = i
 		if gen.policy == "" {
 			continue
 		}

@@ -28,6 +28,7 @@ type openAIRankingGeneration struct {
 	byKey           map[string]int
 	deadline        time.Time
 	overview        []OpenAIEvalAccountOverviewRow
+	overviewByID    map[int64]int
 	policy          string
 	weights         OpenAIEvalRankingWeights
 	ordering        string

@@ -57,6 +57,9 @@
             <p v-else-if="trace.ranking_basis === 'overview_prior'" class="ledger-fallback" data-testid="dispatch-overview-prior">
               {{ t('admin.modelIntegrity.scheduling.decisions.overviewPrior') }}
             </p>
+            <p v-if="usesAccountReference(trace)" class="ledger-fallback" data-testid="dispatch-account-reference">
+              {{ t('admin.modelIntegrity.scheduling.decisions.accountReferenceTrace') }}
+            </p>
             <details v-if="trace.error" class="ledger-error">
               <summary class="cursor-pointer">{{ t('admin.modelIntegrity.scheduling.decisions.errorLabel') }}</summary>
               <code class="mt-1 block whitespace-pre-wrap break-all font-mono">{{ trace.error }}</code>
@@ -76,8 +79,17 @@
 
         <div v-if="expanded.has(index) && trace.candidates?.length" class="ledger-detail">
           <p v-if="isAffinityOnly(trace)" class="ledger-note">{{ t('admin.modelIntegrity.scheduling.decisions.affinityOnly') }}</p>
-          <p class="ledger-note">{{ t('admin.modelIntegrity.scheduling.decisions.scoreHint') }}</p>
-          <div class="overflow-x-auto">
+          <!-- Avoid degradation ranks the quality tier before the score, so a
+               flat "higher score wins" line would describe the wrong order. -->
+          <p class="ledger-note">{{ t(scoreHintKey(trace)) }}</p>
+          <!-- `relative` makes this scroller the containing block for the cell's
+               visually hidden detail text. Tailwind's sr-only is position:
+               absolute, and without a positioned ancestor it resolves against
+               the page wrapper at its offset inside the wide table, which grows
+               document.scrollWidth and scrolls the whole page sideways on
+               narrow screens. As a containing block it scrolls with the table
+               instead: still hidden from sight, still read by screen readers. -->
+          <div class="relative overflow-x-auto">
             <table class="cand-table">
               <thead>
                 <tr>
@@ -117,6 +129,10 @@
                     </template>
                     <template v-else-if="qualityOf(candidate).kind === 'unknown'">
                       <span class="block text-gray-500 dark:text-gray-400" data-testid="candidate-quality-unknown" :title="qualityHint(candidate)">{{ t('admin.modelIntegrity.scheduling.decisions.qualityUnknown') }}</span>
+                      <span v-if="accountReference(candidate)" class="account-ref" data-testid="candidate-account-reference" :title="referenceHint(candidate)">
+                        {{ t('admin.modelIntegrity.scheduling.decisions.accountReference', { ratio: formatPercent(accountReference(candidate)!.ratio) }) }}
+                      </span>
+                      <span v-if="accountReference(candidate)" class="sr-only" data-testid="candidate-account-reference-detail">{{ referenceHint(candidate) }}</span>
                       <span v-if="neutralContribution(candidate) !== null" class="block text-[11px] text-gray-500 dark:text-gray-400" data-testid="candidate-quality-neutral">{{ t('admin.modelIntegrity.scheduling.rank.table.qualityNeutral', { value: formatNumber(neutralContribution(candidate) as number) }) }}</span>
                     </template>
                     <span v-else class="text-gray-400">—</span>
@@ -152,7 +168,7 @@ import { computed, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/icons/Icon.vue'
 import type { SchedulerDecisionCandidate, SchedulerDecisionTrace } from '@/api/admin/accounts'
-import { candidateReasonKey, decisionKey, dispatchFactorReading, dispatchQuality, exclusionKey, fallbackReasonKey, neutralQualityContribution, orderCandidates, policyKey, RANKING_FACTORS, unknownReasonKey, type DispatchFactor, type DispatchQuality } from '@/views/admin/modelIntegrity/modelIntegrity'
+import { candidateReasonKey, decisionKey, dispatchFactorReading, dispatchQuality, exclusionKey, fallbackReasonKey, neutralQualityContribution, orderCandidates, policyKey, policyQualityEmphasis, accountQualityReference, RANKING_FACTORS, unknownReasonKey, type AccountQualityReference, type DispatchFactor, type DispatchQuality } from '@/views/admin/modelIntegrity/modelIntegrity'
 
 /** Column order of the measured factors. */
 const DISPATCH_FACTORS: DispatchFactor[] = ['price', 'error_rate', 'ttft', 'load']
@@ -234,9 +250,44 @@ function unknownHint(reason: string | null) {
 const qualityOf = (candidate: SchedulerDecisionCandidate): DispatchQuality => dispatchQuality(candidate)
 const assessed = (candidate: SchedulerDecisionCandidate) => dispatchQuality(candidate) as Extract<DispatchQuality, { kind: 'assessed' }>
 
+/**
+ * How this decision ordered its candidates. Avoid degradation compares the
+ * quality tier before the weighted score, so its note must not claim that a
+ * higher score alone ranks first; custom balance keeps an explicit quality
+ * weight that the generic line also does not describe.
+ */
+function scoreHintKey(trace: SchedulerDecisionTrace) {
+  const emphasis = policyQualityEmphasis(trace.scheduling_policy ?? '')
+  if (emphasis === 'tier') return 'admin.modelIntegrity.scheduling.decisions.scoreHintTier'
+  if (emphasis === 'weighted') return 'admin.modelIntegrity.scheduling.decisions.scoreHintWeighted'
+  return 'admin.modelIntegrity.scheduling.decisions.scoreHint'
+}
+
 function qualityHint(candidate: SchedulerDecisionCandidate) {
-  const quality = dispatchQuality(candidate)
-  return quality.kind === 'unknown' ? unknownHint(quality.reason) : ''
+  // Under an account-wide reference the measured cell is unknown for a
+  // different reason, so the generic "no evidence, scored neutral" hint would
+  // describe the wrong thing.
+  return accountQualityReference(candidate)
+    ? t('admin.modelIntegrity.scheduling.decisions.qualityUnknownAccountReference')
+    : unknownHint(dispatchQuality(candidate).kind === 'unknown' ? (dispatchQuality(candidate) as Extract<DispatchQuality, { kind: 'unknown' }>).reason : null)
+}
+
+const accountReference = (candidate: SchedulerDecisionCandidate): AccountQualityReference | null => accountQualityReference(candidate)
+
+/**
+ * The account-wide reference keeps its scope with it: which models it came
+ * from, when it was evaluated and when it expires. An account-wide figure
+ * without those is easy to mistake for a measurement of this model.
+ */
+function referenceHint(candidate: SchedulerDecisionCandidate) {
+  const reference = accountQualityReference(candidate)
+  if (!reference) return ''
+  const sources = reference.sourceModels.length ? reference.sourceModels.join(t('admin.modelIntegrity.scheduling.rules.weightsSeparator')) : t('admin.modelIntegrity.scheduling.decisions.accountReferenceNoSources')
+  return t('admin.modelIntegrity.scheduling.decisions.accountReferenceHint', {
+    sources,
+    evaluated: formatAbsolute(reference.evaluatedAt),
+    expires: formatAbsolute(reference.expiresAt)
+  })
 }
 
 /** Points an unassessed pass rate contributed under custom balance; a scoring rule, not a pass rate. */
@@ -247,18 +298,33 @@ function neutralContribution(candidate: SchedulerDecisionCandidate) {
 /**
  * The pass-rate column appears when the decision used a policy that reads it
  * (so a missing rate is shown as unknown, never as 100 %), or when any
- * candidate carries a pass rate or a pass-rate contribution.
+ * candidate carries a pass rate, an account-wide reference or a pass-rate
+ * contribution.
  */
 function hasQuality(trace: SchedulerDecisionTrace) {
   if (trace.scheduling_policy === 'avoid_degradation') return true
   return (trace.candidates ?? []).some(candidate =>
-    dispatchQuality(candidate).kind === 'assessed' || Boolean(candidate.quality_contribution) || (candidate.contributions?.quality ?? 0) > 0)
+    dispatchQuality(candidate).kind === 'assessed' || Boolean(accountQualityReference(candidate)) || Boolean(candidate.quality_contribution) || (candidate.contributions?.quality ?? 0) > 0)
 }
 
 const formatSigned = (value: number) => `${value > 0 ? '+' : ''}${formatNumber(value)}`
 
 function isAffinityOnly(trace: SchedulerDecisionTrace) {
   return ['previous_response_id', 'session_hash', 'guardian_parent'].includes(trace.layer) && trace.reason_code !== 'sticky_escape'
+}
+
+/**
+ * True when any candidate was ordered by the account-wide reference. The
+ * ranking basis itself stays 'snapshot' or 'live_fallback': the order came from
+ * the published evaluation as usual, only its quality tier used the reference.
+ *
+ * An owner-bound request is excluded: the account was chosen by a binding rule
+ * and the evaluated row is attached only to describe it, so the request was not
+ * ordered by the reference and the ledger must not say it was.
+ */
+function usesAccountReference(trace: SchedulerDecisionTrace) {
+  if (trace.ranking_basis === 'owner') return false
+  return (trace.candidates ?? []).some(candidate => accountQualityReference(candidate) !== null)
 }
 
 function accountLabel(id: number) {
@@ -337,6 +403,8 @@ const formatAbsolute = (value: string) => {
 .ledger-basis-owner { @apply bg-amber-100 text-amber-900 dark:bg-amber-900/40 dark:text-amber-200; }
 .ledger-basis-overview_prior { @apply bg-sky-100 text-sky-900 dark:bg-sky-900/40 dark:text-sky-200; }
 .ledger-fallback { @apply mt-1 max-w-[72ch] text-xs leading-snug text-gray-500 dark:text-gray-400; }
+/* Teal, not sky: this is a reference from other models, not the cold-pool ranking position. */
+.account-ref { @apply mt-0.5 inline-block max-w-full whitespace-normal break-words rounded bg-teal-50 px-1.5 py-0.5 text-[11px] tabular-nums text-teal-800 dark:bg-teal-900/40 dark:text-teal-200; }
 .contrib { @apply inline-flex gap-1 text-[11px] tabular-nums; }
 .contrib-part { @apply rounded bg-gray-100 px-1 py-0.5 text-gray-700 dark:bg-dark-700 dark:text-gray-300; }
 .contrib-zero { @apply text-gray-400 dark:text-gray-500; }

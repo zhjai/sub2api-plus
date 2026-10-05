@@ -27,6 +27,7 @@ func (s *defaultOpenAIAccountScheduler) explicitRanking(ctx context.Context, req
 	var monitoring []openAIRankingMonitorEvidence
 	var monitorErr error
 	var latestErr error
+	var priors map[int64]*OpenAIEvalAccountQualityPrior
 	now := time.Now()
 	r := s.service.evalRanking
 	if r != nil {
@@ -58,6 +59,9 @@ func (s *defaultOpenAIAccountScheduler) explicitRanking(ctx context.Context, req
 		}
 		gen := r.current
 		readErr := errors.Join(latestErr, monitorErr)
+		if readErr == nil && r.lastError == nil {
+			priors = accountQualityPriors(gen, cfg, groupID, model, effort, accounts, latest, now)
+		}
 		if prior, ok := s.overviewPriorLocked(r, gen, cfg, req, accounts, loads, latest, monitoring, readErr, now); ok {
 			trace.RankingBasis, trace.RankingFallbackReason = "overview_prior", nil
 			trace.EvaluationID, trace.SnapshotEvaluatedAt = rankingPtr(gen.summary.EvaluationID), rankingPtr(gen.summary.EvaluatedAt)
@@ -134,6 +138,9 @@ func (s *defaultOpenAIAccountScheduler) explicitRanking(ctx context.Context, req
 					trace.EvaluationID = rankingPtr(gen.summary.EvaluationID)
 					trace.SnapshotEvaluatedAt = rankingPtr(gen.summary.EvaluatedAt)
 					rows := append([]OpenAIEvalRankedAccount(nil), dim.Accounts...)
+					for i := range rows {
+						rows[i].AccountQualityPrior = cloneAccountQualityPrior(rows[i].AccountQualityPrior)
+					}
 					r.mu.Unlock()
 					return rows, trace, nil
 				}
@@ -164,7 +171,7 @@ func (s *defaultOpenAIAccountScheduler) explicitRanking(ctx context.Context, req
 		compatible := a.Platform == NormalizeOpenAICompatiblePlatform(req.Platform) && a.IsOpenAICompatible() && a.IsModelSupported(req.RequestedModel)
 		inputs = append(inputs, openAIEvalRankingInput{account: a, factors: f, compatible: compatible, upstream: []string{a.GetMappedModel(req.RequestedModel)}})
 	}
-	return scoreOpenAIEvalRanking(policy, weights, inputs, now, s.service.openAIOAuthSchedulingRateMultiplier(ctx)), trace, nil
+	return scoreOpenAIEvalRanking(policy, weights, inputs, now, s.service.openAIOAuthSchedulingRateMultiplier(ctx), priors), trace, nil
 }
 
 // Called after live admission filters; the overview never supplies current-model quality.
@@ -241,6 +248,7 @@ func (s *defaultOpenAIAccountScheduler) overviewPriorLocked(r *OpenAIEvalRanking
 		}
 		row := prior.OpenAIEvalRankedAccount
 		row.Factors = emptyOpenAIEvalRankingFactors()
+		row.QualityBasis, row.AccountQualityPrior = "none", nil
 		row.Factors.Price, row.Factors.Load = prior.Factors.Price, prior.Factors.Load
 		row.Contributions, row.QualityTier = OpenAIEvalRankingWeights{}, nil
 		row.UpstreamModels = []string{upstream}
@@ -297,6 +305,11 @@ func rankedScheduleCandidate(row OpenAIEvalRankedAccount) OpenAIAccountScheduleC
 		candidate.OverviewPrior = row.OverviewPrior
 		candidate.DecisionReason = "overview_prior"
 		candidate.QualityBasis = "unknown_current_model"
+	}
+	if row.AccountQualityPrior != nil {
+		candidate.AccountQualityPrior = cloneAccountQualityPrior(row.AccountQualityPrior)
+		candidate.DecisionReason = "account_prior_tier"
+		candidate.QualityBasis = "account_prior"
 	}
 	if row.PriorityScore != nil {
 		candidate.Score = *row.PriorityScore
