@@ -447,7 +447,7 @@ export default {
         nextRefresh: '下次 {time}',
         neverRefreshed: '尚未评估',
         pending: '新的间隔在保存后生效；当前仍按{interval}评估。「立即评估」使用已保存的配置。',
-        effectsOff: '评测影响已关闭：降智通过率不会影响排序，「避免降智」与「自定义平衡」中的通过率权重暂不生效。',
+        effectsOff: '已保存的策略尚未用于调度，降智通过率暂不影响排序。应用到调度并保存后生效。',
         liveChecks: '账号停用、模型支持、限流冷却、并发和续写响应的账号绑定始终实时判断，不受评估间隔影响。'
       },
       rules: {
@@ -770,20 +770,28 @@ export default {
         dirtyNote: '评估始终使用已保存的策略，未保存的修改不会计入。要先保存才能评估这些修改。',
         blocked: '存在未解决的配置冲突，请重新加载后再评估。',
         effectsOffTitle: '该排行目前不用于调度。',
-        effectsOffBody: '下方配置已保存且有效。开启评测影响并保存后，网关才会按该顺序调度。',
+        effectsOffBody: '下方配置已保存且有效。保存具体的默认策略或已启用的模型规则后，网关按该顺序调度。',
         effects: {
           title: '评测影响',
-          hint: '开启后，网关按评估出的账号排行和已保存的策略选择账号；关闭时沿用系统调度权重，策略仍会保存。',
-          toggle: '使用评估排序进行调度',
-          inactive: '已保存但未生效',
-          selectionEnabled: '因为你选择了调度策略，已自动置为开启。保存后生效；如需停用评估排序，请关闭后保存。',
-          selectionEnabledOff: '因为你选择了系统默认策略，已自动置为关闭。保存后生效。',
-          explicitOff: '评测影响为关闭，已保存的策略会被保留，但不参与调度。'
+          hint: '保存具体的默认策略或已启用的模型规则后，相应请求按评估排行调度；选择系统默认且没有模型规则时，沿用系统调度权重。',
+          savedLabel: '已保存',
+          pendingLabel: '保存后',
+          legacyOff: '该策略保存于自动启用之前，目前尚未用于调度。应用后保存即可生效。',
+          apply: '应用到调度',
+          routing: {
+            policy: '默认策略「{policy}」，按评估排行调度。',
+            policyOff: '默认策略「{policy}」，未用于调度。',
+            system: '系统默认，按系统调度权重调度。',
+            systemRules: '系统默认；{count} 条已启用的模型规则按评估排行调度。',
+            systemRulesOff: '系统默认；{count} 条已启用的模型规则未用于调度。',
+            rules: '{count} 条已启用的模型规则作用于对应模型。',
+            rulesOff: '{count} 条已启用的模型规则同样未用于调度。'
+          }
         },
         effective: {
           active: '已生效',
           active_partial: '已生效，覆盖不完整',
-          inactive_effects_off: '未生效：评测影响已关闭',
+          inactive_effects_off: '未生效：未应用到调度',
           inactive_legacy_policy: '未生效：使用系统默认策略',
           live_fallback: '请求时回退',
           no_targets: '未生效：没有测试对象',
@@ -792,7 +800,7 @@ export default {
       },
       board: {
         title: '账号排行',
-        hint: '每个账号一行，覆盖全部分组，按默认策略和真实证据排序。分数与名次由服务端计算，浏览器不会重新计算。',
+        hint: '每个账号一行，覆盖全部分组，按默认策略和全部模型的汇总真实证据排序。实际调度优先使用所请求模型的证据，其次参考同模型其他推理强度，最后参考此汇总排行。分数与名次由服务端计算，浏览器不会重新计算。',
         group: '分组',
         allGroups: '全部分组',
         ungrouped: '无分组',
@@ -904,7 +912,7 @@ export default {
           legacy: '按系统调度权重排列，与启用本功能前一致。'
         },
         inactive: {
-          inactive_effects_off: '评测影响已关闭，此排行仅供参考。开启上方「使用评估排序进行调度」并保存后生效。',
+          inactive_effects_off: '评估排行尚未用于调度；保存具体的默认策略或已启用的模型规则后生效。',
           inactive_legacy_policy: '默认策略为「系统默认」，网关按系统调度权重选择账号，此排行仅供参考。',
           no_targets: '没有可排序的对象，此排行不会用于调度。'
         }
@@ -936,7 +944,7 @@ export default {
         coverage: '覆盖',
         applied: '用于调度',
         appliedYes: '是',
-        appliedNo: '否，评测影响已关闭',
+        appliedNo: '否，未应用到调度',
         next: '下次评估 {time}',
         requestsFailed: '请求调度记录读取失败：{reason}',
         requestsFailedKept: '下方是该筛选上次成功读取的记录，可能不是最新。'

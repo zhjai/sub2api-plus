@@ -408,10 +408,10 @@ into a pre-release, specify its exact version with `-v` or `--version`:
 
 ```bash
 # Fresh installation
-curl -fsSL https://raw.githubusercontent.com/zhjai/sub2api-plus/main/deploy/install.sh | sudo bash -s -- install -v v0.2.11-zhjai.15
+curl -fsSL https://raw.githubusercontent.com/zhjai/sub2api-plus/main/deploy/install.sh | sudo bash -s -- install -v v0.2.11-zhjai.16
 
 # Upgrade an existing binary installation
-curl -fsSL https://raw.githubusercontent.com/zhjai/sub2api-plus/main/deploy/install.sh | sudo bash -s -- upgrade -v v0.2.11-zhjai.15
+curl -fsSL https://raw.githubusercontent.com/zhjai/sub2api-plus/main/deploy/install.sh | sudo bash -s -- upgrade -v v0.2.11-zhjai.16
 ```
 
 The installer accepts derived fork versions ending in `-alpha`, `-beta`, or

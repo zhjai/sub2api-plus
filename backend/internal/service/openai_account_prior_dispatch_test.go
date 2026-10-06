@@ -102,6 +102,75 @@ func TestOpenAIAccountPriorModelIsolationAndUntestedFallback(t *testing.T) {
 	}
 }
 
+func TestOpenAIAccountPriorConfiguredUnknownUsesModelReference(t *testing.T) {
+	evaluation, repository, accounts, gateway := rankingHarness(t)
+	repository.config.SchedulingPolicy = OpenAIEvalSchedulingPolicyAvoidDegradation
+	repository.config.Revision++
+	schedule := OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 300}
+	for _, id := range []int64{1, 2} {
+		for _, effort := range []string{"medium", "high"} {
+			repository.config.Accounts = append(repository.config.Accounts, OpenAIEvalAccountConfig{
+				AccountID: id, RequestedModel: "gpt-6.1-sol", ReasoningEffort: effort, CandySchedule: schedule,
+			})
+		}
+	}
+	now := time.Now()
+	repository.runs = []OpenAIEvalRun{
+		overviewQualityRun(1, 1, "gpt-6.1-sol", "medium", OpenAIEvalTypeCandy, false, now),
+		overviewQualityRun(2, 2, "gpt-6.1-sol", "medium", OpenAIEvalTypeCandy, true, now),
+	}
+	_, err := evaluation.EvaluateScheduling(context.Background(), 1)
+	require.NoError(t, err)
+	ctx := WithRequestedReasoningEffort(context.Background(), "high")
+	selected, decision, err := gateway.SelectAccountWithScheduler(ctx, rankingPtr(int64(7)), "", "", "gpt-6.1-sol", nil, OpenAIUpstreamTransportAny, false)
+	require.NoError(t, err)
+	require.Equal(t, accounts.items[1].ID, selected.Account.ID)
+	selected.ReleaseFunc()
+	for _, candidate := range decision.Candidates {
+		require.False(t, candidate.Factors.Quality.Known)
+		require.Nil(t, candidate.QualityRatio)
+		require.Equal(t, "model_effort_fallback", candidate.QualityBasis)
+		require.NotNil(t, candidate.AccountQualityPrior)
+	}
+	// The first exact high-effort verdict supersedes the reference.
+	repository.runs = append(repository.runs,
+		overviewQualityRun(3, 1, "gpt-6.1-sol", "high", OpenAIEvalTypeCandy, true, time.Now()),
+		overviewQualityRun(4, 2, "gpt-6.1-sol", "high", OpenAIEvalTypeCandy, false, time.Now()))
+	selected, _, err = gateway.SelectAccountWithScheduler(ctx, rankingPtr(int64(7)), "", "", "gpt-6.1-sol", nil, OpenAIUpstreamTransportAny, false)
+	require.NoError(t, err)
+	require.Equal(t, accounts.items[0].ID, selected.Account.ID)
+	selected.ReleaseFunc()
+}
+
+func TestOpenAIAccountPriorCustomQualityWeightUsesReference(t *testing.T) {
+	evaluation, repository, _, gateway := rankingHarness(t)
+	repository.config.SchedulingPolicy = OpenAIEvalSchedulingPolicyCustomBalance
+	repository.config.CustomBalance = OpenAIEvalPolicyWeights{Quality: 1}
+	repository.config.Revision++
+	schedule := OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 300}
+	repository.config.Accounts = []OpenAIEvalAccountConfig{
+		{AccountID: 1, RequestedModel: "gpt-6.1-sol", ReasoningEffort: "medium", CandySchedule: schedule},
+		{AccountID: 2, RequestedModel: "gpt-6.1-sol", ReasoningEffort: "medium", CandySchedule: schedule},
+	}
+	repository.runs = []OpenAIEvalRun{
+		overviewQualityRun(1, 1, "gpt-6.1-sol", "medium", OpenAIEvalTypeCandy, false, time.Now()),
+		overviewQualityRun(2, 2, "gpt-6.1-sol", "medium", OpenAIEvalTypeCandy, true, time.Now()),
+	}
+	_, err := evaluation.EvaluateScheduling(context.Background(), 1)
+	require.NoError(t, err)
+	ctx := WithRequestedReasoningEffort(context.Background(), "high")
+	selected, decision, err := gateway.SelectAccountWithScheduler(ctx, rankingPtr(int64(7)), "", "", "gpt-6.1-sol", nil, OpenAIUpstreamTransportAny, false)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, selected.Account.ID)
+	selected.ReleaseFunc()
+	for _, candidate := range decision.Candidates {
+		require.False(t, candidate.Factors.Quality.Known)
+		require.Nil(t, candidate.QualityRatio)
+		require.NotNil(t, candidate.AccountQualityPrior)
+		require.Equal(t, 100*candidate.AccountQualityPrior.Ratio, candidate.Contributions.Quality)
+	}
+}
+
 func TestOpenAIAccountPriorDoesNotCrossModelLaunderWithinCandidatePool(t *testing.T) {
 	s, repo, accounts, gateway := rankingHarness(t)
 	repo.config.SchedulingPolicy = OpenAIEvalSchedulingPolicyAvoidDegradation

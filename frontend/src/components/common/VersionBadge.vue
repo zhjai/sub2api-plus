@@ -652,7 +652,7 @@ import { useClipboard } from '@/composables/useClipboard'
 import Icon from '@/components/icons/Icon.vue'
 
 const GITHUB_REPO = 'zhjai/sub2api-plus'
-// Fork image published by CI (tags carry no "v" prefix, e.g. ghcr.io/zhjai/sub2api:0.2.11-zhjai.15)
+// Fork image published by CI (tags carry no "v" prefix, e.g. ghcr.io/zhjai/sub2api:0.2.11-zhjai.16)
 const DOCKER_IMAGE = 'ghcr.io/zhjai/sub2api'
 
 const { t } = useI18n()

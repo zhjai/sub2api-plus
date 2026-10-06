@@ -23,21 +23,26 @@
               <p class="sched-hint">{{ t('admin.modelIntegrity.scheduling.policy.hint') }}</p>
             </div>
 
-            <!-- Activation is explicit and sits next to the policy it activates. -->
+            <!-- The saved policy is the activation control: saved state first, then what saving would change. -->
             <div class="effects" data-testid="effects-panel">
-              <label class="effects-switch">
-                <Toggle v-model="config.effects_enabled" data-testid="effects-toggle" @update:model-value="markExplicitEffects" />
-                <span>
-                  <span class="effects-switch-label">{{ t('admin.modelIntegrity.scheduling.evaluation.effects.toggle') }}</span>
-                  <span class="effects-switch-hint">{{ t('admin.modelIntegrity.scheduling.evaluation.effects.hint') }}</span>
-                </span>
-              </label>
-              <p v-if="!config.effects_enabled" class="effects-off" data-testid="effects-explicit-off">{{ t('admin.modelIntegrity.scheduling.evaluation.effects.explicitOff') }}</p>
-              <p v-if="activationNote" class="effects-note" role="status" data-testid="effects-auto-note">{{ activationNote }}</p>
+              <p class="effects-status" data-testid="effects-status">
+                <span class="effects-label">{{ t('admin.modelIntegrity.scheduling.evaluation.effects.savedLabel') }}</span>
+                <span>{{ routingText(savedRouting) }}</span>
+                <span class="effects-pill" :class="`effects-pill-${effectiveTone}`" data-testid="effects-state">{{ t(`admin.modelIntegrity.scheduling.evaluation.effective.${effectiveKey}`) }}</span>
+              </p>
+              <p v-if="savedLegacyOff" class="effects-legacy" data-testid="effects-legacy">
+                <span>{{ t('admin.modelIntegrity.scheduling.evaluation.effects.legacyOff') }}</span>
+                <button v-if="!config.effects_enabled" type="button" class="btn btn-secondary btn-sm" data-testid="effects-apply" @click="config.effects_enabled = true">{{ t('admin.modelIntegrity.scheduling.evaluation.effects.apply') }}</button>
+              </p>
+              <p v-if="routingPending" class="effects-pending" data-testid="effects-pending">
+                <span class="effects-label">{{ t('admin.modelIntegrity.scheduling.evaluation.effects.pendingLabel') }}</span>
+                <span>{{ routingText(pendingRouting) }}</span>
+              </p>
+              <p class="effects-switch-hint">{{ t('admin.modelIntegrity.scheduling.evaluation.effects.hint') }}</p>
             </div>
 
             <PolicyMixer
-              v-model="policyChoice"
+              v-model="defaultPolicy"
               name="default-policy"
               :label="t('admin.modelIntegrity.scheduling.policy.defaultLabel')"
               :custom-balance="config.custom_balance"
@@ -54,7 +59,7 @@
               {{ t('admin.modelIntegrity.scheduling.policy.sharedNote') }}
               <template v-if="usesAvoidDegradation"> {{ t('admin.modelIntegrity.scheduling.policy.avoidNote') }}</template>
             </p>
-            <p v-if="usesQuality && !config.effects_enabled" class="sched-warn" role="note" data-testid="quality-effects-off">{{ t('admin.modelIntegrity.scheduling.quality.effectsOff') }}</p>
+            <p v-if="usesQuality && savedLegacyOff && !config.effects_enabled" class="sched-warn" role="note" data-testid="quality-effects-off">{{ t('admin.modelIntegrity.scheduling.quality.effectsOff') }}</p>
 
             <!-- 调度评估间隔. The page's only 立即评估 lives on this row. -->
             <div class="refresh" data-testid="quality-refresh">
@@ -98,7 +103,6 @@
                 </button>
               </div>
               <p class="refresh-status" data-testid="quality-refresh-status" aria-live="polite">
-                <span class="effects-pill" :class="`effects-pill-${effectiveTone}`" data-testid="effects-state">{{ t(`admin.modelIntegrity.scheduling.evaluation.effective.${effectiveKey}`) }}</span>
                 <span v-if="lastEvaluatedAt" data-testid="last-evaluated">{{ t('admin.modelIntegrity.scheduling.quality.lastRefreshTrigger', { time: formatDateTime(lastEvaluatedAt), trigger: lastTriggerText }) }}</span>
                 <span v-else>{{ t('admin.modelIntegrity.scheduling.quality.neverRefreshed') }}</span>
                 <span v-if="nextEvaluationAt" data-testid="next-evaluation">{{ t('admin.modelIntegrity.scheduling.quality.nextRefresh', { time: formatDateTime(nextEvaluationAt) }) }}</span>
@@ -553,45 +557,39 @@ const defaultPolicy = computed<OpenAIEvalSchedulingPolicy>({
   get: () => config.scheduling_policy ?? '',
   set: value => { config.scheduling_policy = value }
 })
-/** Weight selection is the event that may visibly turn effects on. */
-const policyChoice = computed<OpenAIEvalSchedulingPolicy>({
-  get: () => config.scheduling_policy ?? '',
-  set: value => {
-    const previous = config.scheduling_policy ?? ''
-    config.scheduling_policy = value
-    applyPolicyChoice(previous, value)
-  }
-})
-/** True when the administrator turned the switch themselves; suppressing the
- *  automatic enable note in that case avoids claiming credit for their action. */
-const explicitEffectsChange = ref(false)
-const activationNote = ref('')
-
 /** Every status the server can report, with an unknown value falling back safely. */
 const effectiveKey = computed(() => (ranking.effectiveStatus && EFFECTIVE_KEYS.includes(ranking.effectiveStatus as never) ? ranking.effectiveStatus : 'inactive_legacy_policy'))
 const effectiveTone = computed(() => effectiveToneOf(ranking.effectiveStatus))
 
-function markExplicitEffects() {
-  explicitEffectsChange.value = true
-  activationNote.value = ''
+/** How requests are routed: the default policy, the enabled model rules, and whether evaluated routing is on. */
+interface Routing { policy: OpenAIEvalSchedulingPolicy; rules: number; effects: boolean }
+/** The policy and switch the server last returned; edits never change it. */
+const savedDefault = ref<{ policy: OpenAIEvalSchedulingPolicy; effects: boolean }>({ policy: '', effects: false })
+const savedRouting = computed<Routing>(() => ({ ...savedDefault.value, rules: savedRules.value.length }))
+/** Recorded after every load and successful save, while the page matches the server. */
+function recordSaved() {
+  savedDefault.value = { policy: config.scheduling_policy ?? '', effects: Boolean(config.effects_enabled) }
 }
-
 /**
- * Selecting a real policy is the only event that may visibly switch effects on.
- * Loading configuration never does, and an explicit off stays off. The note
- * names what happened so the switch never moves without explanation.
+ * Evaluated routing is needed by a concrete default policy or by any enabled
+ * model rule (every rule policy is concrete). It is set from this on save, so
+ * there is no separate switch and an older saved value cannot stay off.
  */
-function applyPolicyChoice(previous: OpenAIEvalSchedulingPolicy, next: OpenAIEvalSchedulingPolicy) {
-  if (next === previous) return
-  if (next !== '' && !config.effects_enabled) {
-    config.effects_enabled = true
-    activationNote.value = t('admin.modelIntegrity.scheduling.evaluation.effects.selectionEnabled')
-    return
-  }
-  activationNote.value = next === '' && config.effects_enabled && explicitEffectsChange.value
-    ? t('admin.modelIntegrity.scheduling.evaluation.effects.selectionEnabledOff')
-    : ''
+const needsEffects = computed(() => defaultPolicy.value !== '' || activeRules.value.length > 0)
+const pendingRouting = computed<Routing>(() => ({ policy: defaultPolicy.value, rules: activeRules.value.length, effects: needsEffects.value }))
+/** Saved before activation was automatic: a policy or rule is stored, but routing never used it. */
+const savedLegacyOff = computed(() => !savedRouting.value.effects && (savedRouting.value.policy !== '' || savedRouting.value.rules > 0))
+
+function routingText(routing: Routing) {
+  const base = 'admin.modelIntegrity.scheduling.evaluation.effects.routing'
+  const off = routing.effects ? '' : 'Off'
+  if (!routing.policy) return routing.rules ? t(`${base}.systemRules${off}`, { count: routing.rules }) : t(`${base}.system`)
+  const policy = t(`admin.modelIntegrity.scheduling.policy.options.${routing.policy}.name`)
+  const text = t(`${base}.policy${off}`, { policy })
+  return routing.rules ? `${text}${t(`${base}.rules${off}`, { count: routing.rules })}` : text
 }
+/** Shown only for unsaved edits that change how requests would be routed. */
+const routingPending = computed(() => dirty.value && routingText(pendingRouting.value) !== routingText(savedRouting.value))
 
 const publishedTime = (summary: OpenAIEvalRankingSummary | null | undefined) => {
   const time = summary ? Date.parse(summary.published_at || summary.evaluated_at) : NaN
@@ -1002,9 +1000,12 @@ async function handleSave() {
     thresholdsEditor.value?.focusFirstInvalid()
     return
   }
+  // Derived on every save, including edits that keep the policy, so an older stored "off" is replaced.
+  config.effects_enabled = needsEffects.value
   try {
     const result = await save()
     if (result === 'saved' || result === 'saved_evaluation_failed') {
+      recordSaved()
       // An earlier evaluation result no longer describes what is in force.
       evaluationMessage.value = ''
       evaluationError.value = false
@@ -1035,6 +1036,7 @@ async function handleReload() {
     appStore.showError(extractApiErrorMessage(error, t('admin.modelIntegrity.common.loadFailed')))
     return
   }
+  recordSaved()
   // Another revision may have published a new order; the board keeps its rows
   // only if the generation is unchanged.
   await reloadRanking({ invalidate: false })
@@ -1047,6 +1049,8 @@ async function initialLoad() {
     appStore.showError(extractApiErrorMessage(error, t('admin.modelIntegrity.common.loadFailed')))
     return
   }
+  // Loading only records the stored state; it never changes or saves it.
+  recordSaved()
   // The ranking board reads its first page itself when it mounts.
   // Records do not depend on the group list, so neither waits for the other.
   await Promise.all([loadGroups(), loadTraces()])
@@ -1149,10 +1153,11 @@ onMounted(initialLoad)
 .decisions-controls { @apply flex w-full flex-wrap items-center gap-2 sm:w-auto; }
 .decisions-group { @apply h-9 min-w-0 flex-1 py-1 text-sm sm:w-auto sm:min-w-[11rem] sm:flex-none; }
 .effects { @apply space-y-2 rounded-lg border border-gray-200 px-4 py-3 dark:border-dark-700; }
-.effects-switch { @apply flex cursor-pointer items-start gap-3 text-sm; }
-.effects-switch-label { @apply block font-medium text-gray-900 dark:text-white; }
 .effects-switch-hint { @apply mt-0.5 block max-w-[72ch] text-xs leading-relaxed text-gray-500 dark:text-gray-400; }
-.effects-off { @apply max-w-[72ch] text-xs leading-relaxed text-amber-800 dark:text-amber-300; }
+.effects-status { @apply flex flex-wrap items-center gap-x-2 gap-y-1 text-sm font-medium text-gray-900 dark:text-white; }
+.effects-label { @apply text-xs font-normal text-gray-500 dark:text-gray-400; }
+.effects-pending { @apply flex flex-wrap items-baseline gap-x-2 text-sm text-amber-800 dark:text-amber-300; }
+.effects-legacy { @apply flex flex-wrap items-center gap-x-3 gap-y-2 rounded-md bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-900 dark:bg-amber-950/30 dark:text-amber-200; }
 .effects-pill { @apply inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold; }
 .effects-pill-active { @apply bg-primary-600 text-white dark:bg-primary-500; }
 .effects-pill-partial { @apply bg-violet-600 text-white dark:bg-violet-500; }

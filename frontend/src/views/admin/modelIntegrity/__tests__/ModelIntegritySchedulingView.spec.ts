@@ -1037,17 +1037,21 @@ describe('ModelIntegritySchedulingView integrity pass rate controls', () => {
     expect(wrapper.text()).not.toContain('有未保存的更改')
   })
 
-  it('warns that the pass rate is inactive while evaluation effects are off', async () => {
+  it('warns that the pass rate is inactive while an older saved policy is not applied', async () => {
     api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ effects_enabled: false, scheduling_policy: 'stability_first' }))
     const wrapper = mountView()
     await flushPromises()
     // Stability first ignores the pass rate, so there is nothing to warn about.
     expect(wrapper.find('[data-testid="quality-effects-off"]').exists()).toBe(false)
     await wrapper.get('[data-testid="policy-avoid_degradation"]').setValue(true)
-    // Selecting a real policy turns effects on visibly instead of leaving a
-    // policy saved but silently unused.
-    expect(wrapper.get('[data-testid="effects-auto-note"]').text()).toContain('已自动置为开启')
-    expect((wrapper.get('[data-testid="effects-toggle"]').element as HTMLButtonElement).getAttribute('aria-checked')).toBe('true')
+    expect(wrapper.get('[data-testid="quality-effects-off"]').exists()).toBe(true)
+    // Applying clears the warning; the selection stays pending until saved.
+    await wrapper.get('[data-testid="effects-apply"]').trigger('click')
+    expect(wrapper.find('[data-testid="quality-effects-off"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="effects-pending"]').text()).toContain(zhT('admin.modelIntegrity.scheduling.policy.options.avoid_degradation.name'))
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    expect((api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig).effects_enabled).toBe(true)
   })
 
   it('keeps request errors and first-token latency apart from the pass rate in the ledger', async () => {
@@ -1612,7 +1616,7 @@ describe('ModelIntegritySchedulingView account priority rules', () => {
     const section = wrapper.get('[data-testid="account-rules"]')
     expect(section.text()).toContain('数字越小越优先')
     expect(section.text()).toContain('未配置规则，账号按调度策略排序。')
-    await wrapper.get('[data-testid="effects-toggle"]').trigger('click')
+    await wrapper.get('[data-testid="policy-cost_first"]').setValue(true)
     await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
     await flushPromises()
     expect((api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig).account_priority_rules).toEqual([])

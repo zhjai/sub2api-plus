@@ -133,7 +133,7 @@ func scoreOpenAIEvalRankingWithThresholds(policy string, weights OpenAIEvalRanki
 		row.QualityBasis = "none"
 		if rankingQualityFraction(row.Factors.Quality) != nil {
 			row.QualityBasis = "exact"
-		} else if openAIEvalRankingUsesQuality(policy, weights) && row.Factors.Quality.Selected == 0 && len(priorSets) > 0 {
+		} else if openAIEvalRankingUsesQuality(policy, weights) && len(priorSets) > 0 {
 			if prior := priorSets[0][row.AccountID]; prior != nil && now.Before(prior.ExpiresAt) {
 				row.AccountQualityPrior = cloneAccountQualityPrior(prior)
 				row.QualityBasis = openAIEvalQualityPriorBasis(prior)
@@ -168,8 +168,12 @@ func scoreOpenAIEvalRankingWithThresholds(policy string, weights OpenAIEvalRanki
 			}
 		}
 		if input.compatible && policy != "" {
+			qualityScore := f.Quality.Score
+			if row.AccountQualityPrior != nil {
+				qualityScore = row.AccountQualityPrior.Ratio
+			}
 			row.Contributions = OpenAIEvalRankingWeights{Price: 100 * weights.Price * f.Price.Score, ErrorRate: 100 * weights.ErrorRate * f.ErrorRate.Score,
-				TTFT: 100 * weights.TTFT * f.TTFT.Score, Load: 100 * weights.Load * f.Load.Score, Quality: 100 * weights.Quality * f.Quality.Score, AbsolutePriorities: append([]string(nil), weights.AbsolutePriorities...)}
+				TTFT: 100 * weights.TTFT * f.TTFT.Score, Load: 100 * weights.Load * f.Load.Score, Quality: 100 * weights.Quality * qualityScore, AbsolutePriorities: append([]string(nil), weights.AbsolutePriorities...)}
 			c := row.Contributions
 			row.PriorityScore = rankingPtr(c.Price + c.ErrorRate + c.TTFT + c.Load + c.Quality)
 		}

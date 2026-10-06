@@ -447,7 +447,7 @@ export default {
         nextRefresh: 'Next {time}',
         neverRefreshed: 'Not evaluated yet',
         pending: 'The new interval applies after saving; it still evaluates every {interval}. “Evaluate now” uses the saved settings.',
-        effectsOff: 'Evaluation effects are off: the integrity pass rate does not affect ranking, and pass-rate weights in “Avoid degradation” and “Custom balance” are inactive.',
+        effectsOff: 'The saved policy is not used for scheduling yet, so the integrity pass rate does not affect ranking. Apply it to scheduling, then save.',
         liveChecks: 'Account disabling, model support, rate-limit cooldown, concurrency and continued-response account binding are always checked live, whatever the interval.'
       },
       rules: {
@@ -770,20 +770,28 @@ export default {
         dirtyNote: 'Evaluation always uses the saved policy, so unsaved edits are not included. Save first to evaluate them.',
         blocked: 'A configuration conflict is unresolved. Reload before evaluating.',
         effectsOffTitle: 'This ranking is not used for scheduling right now.',
-        effectsOffBody: 'The configuration below is saved and valid. Turn on evaluation effects and save to make the gateway schedule in this order.',
+        effectsOffBody: 'The configuration below is saved and valid. Save a concrete default policy or an enabled model rule to make the gateway schedule in this order.',
         effects: {
           title: 'Evaluation effects',
-          hint: 'When on, the gateway picks accounts by the evaluated ranking and the saved policy. When off, it uses the system scheduling weights; the policy stays saved.',
-          toggle: 'Use the evaluated ranking for scheduling',
-          inactive: 'Saved but not in force',
-          selectionEnabled: 'Turned on because you selected a policy. Save to apply it; turn it off and save to stop using the evaluated ranking.',
-          selectionEnabledOff: 'Turned off because you selected the system default policy. Save to apply it.',
-          explicitOff: 'Effects are set to off, so the saved policy is stored but not used for scheduling.'
+          hint: 'Saving a concrete default policy, or an enabled model rule, schedules those requests by the evaluated ranking. System default without model rules keeps the system scheduling weights.',
+          savedLabel: 'Saved',
+          pendingLabel: 'After saving',
+          legacyOff: 'This policy was saved before activation was automatic, so scheduling does not use it yet. Apply it, then save.',
+          apply: 'Apply to scheduling',
+          routing: {
+            policy: 'Default policy “{policy}”, scheduled by the evaluated ranking.',
+            policyOff: 'Default policy “{policy}”, not used for scheduling.',
+            system: 'System default, scheduled by the system weights.',
+            systemRules: 'System default; {count} enabled model rules use the evaluated ranking.',
+            systemRulesOff: 'System default; {count} enabled model rules are not used for scheduling.',
+            rules: ' {count} enabled model rules apply to their models.',
+            rulesOff: ' {count} enabled model rules are not used either.'
+          }
         },
         effective: {
           active: 'In force',
           active_partial: 'In force with partial coverage',
-          inactive_effects_off: 'Not in force: effects are off',
+          inactive_effects_off: 'Not in force: not applied to scheduling',
           inactive_legacy_policy: 'Not in force: system default policy',
           live_fallback: 'Fallback at request time',
           no_targets: 'Not in force: no targets',
@@ -792,7 +800,7 @@ export default {
       },
       board: {
         title: 'Account ranking',
-        hint: 'One row per account across every group, ranked by the default policy from real evidence. Scores and ranks come from the server and are never recalculated in the browser.',
+        hint: 'One row per account across every group, ranked by the default policy from real evidence aggregated over all models. Requests are dispatched by evidence for the requested model first, then the same model at other reasoning efforts, then this aggregate ranking. Scores and ranks come from the server and are never recalculated in the browser.',
         group: 'Group',
         allGroups: 'All groups',
         ungrouped: 'No group',
@@ -905,7 +913,7 @@ export default {
           legacy: 'Ordered by the system scheduling weights, as before this feature was enabled.'
         },
         inactive: {
-          inactive_effects_off: 'Evaluation effects are off, so this ranking is for reference. Turn on “Use the evaluated ranking for scheduling” above and save to apply it.',
+          inactive_effects_off: 'The evaluated ranking is not in force; save a concrete default policy or an enabled model rule to apply it.',
           inactive_legacy_policy: 'The default policy is “System default”, so the gateway uses the system scheduling weights. This ranking is for reference.',
           no_targets: 'There is nothing to rank, so this ranking is not used for scheduling.'
         }
@@ -937,7 +945,7 @@ export default {
         coverage: 'Coverage',
         applied: 'Used for scheduling',
         appliedYes: 'Yes',
-        appliedNo: 'No, effects were off',
+        appliedNo: 'No, not applied to scheduling',
         next: 'Next evaluation {time}',
         requestsFailed: 'Could not load request records: {reason}',
         requestsFailedKept: 'The records below are from the last successful read with this filter and may be out of date.'

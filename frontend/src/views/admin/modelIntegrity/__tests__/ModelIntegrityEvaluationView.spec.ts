@@ -144,43 +144,102 @@ beforeEach(() => {
 })
 
 describe('evaluation activation', () => {
-  it('states that a saved policy is not in force while effects are off', async () => {
+  const policyName = (policy: string) => zhT(`admin.modelIntegrity.scheduling.policy.options.${policy}.name`)
+  const routing = (key: string, params: Record<string, unknown> = {}) => zhT(`admin.modelIntegrity.scheduling.evaluation.effects.routing.${key}`, params)
+  const save = async (wrapper: ReturnType<typeof mountView>) => {
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    return api.saveOpenAIEvalConfig.mock.calls.at(-1)![0] as OpenAIEvalConfig
+  }
+  /** The server stores what was sent, so the re-read after saving returns it. */
+  const echoSaves = () => api.getOpenAIEvalConfig.mockImplementation(async () => ({ ...(api.saveOpenAIEvalConfig.mock.calls.at(-1)![0] as OpenAIEvalConfig), revision: 5 }))
+
+  it('states that an older saved policy is not in force, without changing or saving it on load', async () => {
     api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ scheduling_policy: 'stability_first', effects_enabled: false, effective_status: 'inactive_effects_off' }))
     const wrapper = mountView()
     await flushPromises()
-    expect(wrapper.get('[data-testid="effects-state"]').text()).toContain('未生效：评测影响已关闭')
-    expect(wrapper.get('[data-testid="effects-explicit-off"]').text()).toContain('已保存的策略会被保留，但不参与调度')
+    expect(wrapper.find('[data-testid="effects-toggle"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="effects-state"]').text()).toContain('未生效：未应用到调度')
+    expect(wrapper.get('[data-testid="effects-status"]').text()).toContain(routing('policyOff', { policy: policyName('stability_first') }))
+    expect(wrapper.get('[data-testid="effects-legacy"]').text()).toContain('该策略保存于自动启用之前')
     expect(wrapper.get('[data-testid="ranking-effects-off"]').text()).toContain('该排行目前不用于调度')
+    expect(wrapper.find('[data-testid="effects-pending"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="model-integrity-save"]').attributes('disabled')).toBeDefined()
+    expect(api.saveOpenAIEvalConfig).not.toHaveBeenCalled()
   })
 
-  it('turns effects on visibly only when a policy is selected, and only by that event', async () => {
+  it('activates an older saved policy when another edit is saved without changing the policy', async () => {
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ scheduling_policy: 'avoid_degradation', effects_enabled: false, effective_status: 'inactive_effects_off' }))
     const wrapper = mountView()
     await flushPromises()
-    // Loading a saved policy never switches effects on by itself.
-    expect(wrapper.get('[data-testid="effects-toggle"]').attributes('aria-checked')).toBe('false')
-    expect(wrapper.find('[data-testid="effects-auto-note"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="bps-master"]').trigger('click')
+    expect(wrapper.get('[data-testid="effects-pending"]').text()).toContain(routing('policy', { policy: policyName('avoid_degradation') }))
+    echoSaves()
+    const payload = await save(wrapper)
+    expect(payload.scheduling_policy).toBe('avoid_degradation')
+    expect(payload.effects_enabled).toBe(true)
+    expect(wrapper.find('[data-testid="effects-legacy"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="effects-status"]').text()).toContain(routing('policy', { policy: policyName('avoid_degradation') }))
+  })
 
+  it('offers an explicit apply for an older saved policy, which still needs a save', async () => {
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ scheduling_policy: 'cost_first', effects_enabled: false }))
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('[data-testid="effects-apply"]').trigger('click')
+    expect(api.saveOpenAIEvalConfig).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="effects-apply"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="effects-pending"]').text()).toContain(routing('policy', { policy: policyName('cost_first') }))
+    expect((await save(wrapper)).effects_enabled).toBe(true)
+  })
+
+  it('shows a selected policy as pending until it is saved', async () => {
+    const wrapper = mountView()
+    await flushPromises()
     await wrapper.get('[data-testid="policy-cost_first"]').setValue(true)
-    expect(wrapper.get('[data-testid="effects-toggle"]').attributes('aria-checked')).toBe('true')
-    expect(wrapper.get('[data-testid="effects-auto-note"]').text()).toContain('已自动置为开启')
+    expect(wrapper.get('[data-testid="effects-status"]').text()).toContain(routing('system'))
+    expect(wrapper.get('[data-testid="effects-pending"]').text()).toContain(routing('policy', { policy: policyName('cost_first') }))
+    echoSaves()
+    const payload = await save(wrapper)
+    expect(payload.effects_enabled).toBe(true)
+    expect(wrapper.get('[data-testid="effects-status"]').text()).toContain(routing('policy', { policy: policyName('cost_first') }))
+    expect(wrapper.find('[data-testid="effects-pending"]').exists()).toBe(false)
   })
 
-  it('respects an explicit off after effects were auto-enabled', async () => {
+  it('keeps enabled model rules in force under the system default', async () => {
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ effects_enabled: true, policies: [{ requested_model: 'gpt-5', policy: 'cost_first', enabled: true }] }))
     const wrapper = mountView()
     await flushPromises()
-    await wrapper.get('[data-testid="policy-cost_first"]').setValue(true)
-    await wrapper.get('[data-testid="effects-toggle"]').trigger('click')
-    await flushPromises()
-    expect(wrapper.get('[data-testid="effects-toggle"]').attributes('aria-checked')).toBe('false')
-    // The switch itself is the source of truth; the note states what off means.
-    expect(wrapper.get('[data-testid="effects-explicit-off"]').text()).toContain('评测影响为关闭，已保存的策略会被保留')
+    expect(wrapper.get('[data-testid="effects-status"]').text()).toContain(routing('systemRules', { count: 1 }))
+    await wrapper.get('[data-testid="bps-master"]').trigger('click')
+    const payload = await save(wrapper)
+    expect(payload.scheduling_policy).toBe('')
+    expect(payload.effects_enabled).toBe(true)
   })
 
-  it('does not switch effects on when only loading a configuration', async () => {
-    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ scheduling_policy: 'avoid_degradation', effects_enabled: false }))
+  it('activates an older saved model rule under the system default when saved', async () => {
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ effects_enabled: false, policies: [{ requested_model: 'gpt-5', policy: 'stability_first', enabled: true }] }))
     const wrapper = mountView()
     await flushPromises()
-    expect(wrapper.get('[data-testid="effects-toggle"]').attributes('aria-checked')).toBe('false')
+    expect(wrapper.get('[data-testid="effects-status"]').text()).toContain(routing('systemRulesOff', { count: 1 }))
+    expect(wrapper.find('[data-testid="effects-legacy"]').exists()).toBe(true)
+    await wrapper.get('[data-testid="bps-master"]').trigger('click')
+    expect((await save(wrapper)).effects_enabled).toBe(true)
+  })
+
+  it('returns to system routing when the system default has no enabled model rule', async () => {
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ scheduling_policy: 'cost_first', effects_enabled: true, policies: [{ requested_model: 'gpt-5', policy: 'cost_first', enabled: true }] }))
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('[data-testid="policy-legacy"]').setValue(true)
+    // The enabled rule still needs evaluated routing.
+    expect(wrapper.get('[data-testid="effects-pending"]').text()).toContain(routing('systemRules', { count: 1 }))
+    await wrapper.get('[data-testid="rule-enabled"]').trigger('click')
+    expect(wrapper.get('[data-testid="effects-pending"]').text()).toContain(routing('system'))
+    const payload = await save(wrapper)
+    expect(payload.scheduling_policy).toBe('')
+    expect(payload.effects_enabled).toBe(false)
+    expect(payload.policies?.[0].enabled).toBe(false)
   })
 })
 
@@ -325,7 +384,7 @@ describe('evaluation records', () => {
     expect(records.map(record => record.attributes('data-evaluation-id'))).toEqual(['instance-1-8', 'instance-1-7'])
     expect(records[0].text()).toContain('定时评估')
     expect(records[1].text()).toContain('上一次')
-    expect(records[1].get('[data-testid="record-applied"]').text()).toContain('否，评测影响已关闭')
+    expect(records[1].get('[data-testid="record-applied"]').text()).toContain('否，未应用到调度')
   })
 
   it('keeps the previous record and states the failure when an evaluation fails', async () => {
