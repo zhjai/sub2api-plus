@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 )
 
 const maxOpenAIResponsesRejectedFieldRetries = 6
+const openAIReplayIDRejectionReason = "replayed input item ID rejection"
 
 var (
 	openAIResponsesRejectedNamespaceParamPattern  = regexp.MustCompile(`(?i)^input\[(\d+)\]\.namespace$`)
@@ -36,11 +38,56 @@ type openAIResponsesRejectedFieldRetryState struct {
 }
 
 type openAIResponsesRejectedFieldRetryBudget struct {
-	mu       sync.Mutex
-	attempts int
+	mu              sync.Mutex
+	attempts        int
+	replayIDRetried bool
 }
 
 const openAIResponsesRejectedFieldRetryBudgetContextKey = "openai_responses_rejected_field_retry_budget"
+
+type openAIResponsesRejectedFieldWSTurnBudget struct {
+	turn   int
+	budget *openAIResponsesRejectedFieldRetryBudget
+}
+
+const openAIResponsesRejectedFieldWSTurnBudgetContextKey = "openai_responses_rejected_field_ws_turn_budget"
+
+type openAIReplayLogicalTurnOffsetKey struct{}
+
+func withOpenAIReplayLogicalTurnOffset(ctx context.Context, c *gin.Context) context.Context {
+	offset := 0
+	if c != nil {
+		if existing, ok := c.Get(openAIResponsesRejectedFieldWSTurnBudgetContextKey); ok {
+			if budget, ok := existing.(*openAIResponsesRejectedFieldWSTurnBudget); ok && budget != nil && budget.turn > 0 {
+				offset = budget.turn - 1
+			}
+		}
+	}
+	return context.WithValue(ctx, openAIReplayLogicalTurnOffsetKey{}, offset)
+}
+
+func openAIResponsesRejectedFieldRetryStateForLogicalWSTurn(ctx context.Context, c *gin.Context, initialBody []byte, localTurn int) *openAIResponsesRejectedFieldRetryState {
+	offset, _ := ctx.Value(openAIReplayLogicalTurnOffsetKey{}).(int)
+	return openAIResponsesRejectedFieldRetryStateForWSTurn(c, initialBody, localTurn+offset)
+}
+
+func openAIResponsesRejectedFieldRetryStateForWSTurn(c *gin.Context, initialBody []byte, turn int) *openAIResponsesRejectedFieldRetryState {
+	if c == nil {
+		return newOpenAIResponsesRejectedFieldRetryState(initialBody)
+	}
+	var turnBudget *openAIResponsesRejectedFieldWSTurnBudget
+	if existing, ok := c.Get(openAIResponsesRejectedFieldWSTurnBudgetContextKey); ok {
+		turnBudget, _ = existing.(*openAIResponsesRejectedFieldWSTurnBudget)
+	}
+	if turnBudget == nil || turnBudget.turn != turn {
+		turnBudget = &openAIResponsesRejectedFieldWSTurnBudget{
+			turn:   turn,
+			budget: &openAIResponsesRejectedFieldRetryBudget{},
+		}
+		c.Set(openAIResponsesRejectedFieldWSTurnBudgetContextKey, turnBudget)
+	}
+	return newOpenAIResponsesRejectedFieldRetryStateWithBudget(initialBody, turnBudget.budget)
+}
 
 // openAIResponsesRejectedFieldRetryStateForRequest returns a fresh loop guard
 // for one account attempt backed by the inbound request's shared retry budget.
@@ -76,6 +123,12 @@ func newOpenAIResponsesRejectedFieldRetryStateWithBudget(initialBody []byte, bud
 }
 
 func (s *openAIResponsesRejectedFieldRetryState) Allow(nextBody []byte) bool {
+	return s.AllowNormalization(nextBody, "")
+}
+
+// Replay IDs have a single request-wide repair budget, even if a subsequent
+// rejection names another item. Other compatibility transforms keep their cap.
+func (s *openAIResponsesRejectedFieldRetryState) AllowNormalization(nextBody []byte, reason string) bool {
 	if s == nil || s.budget == nil || len(nextBody) == 0 {
 		return false
 	}
@@ -87,11 +140,17 @@ func (s *openAIResponsesRejectedFieldRetryState) Allow(nextBody []byte) bool {
 	}
 	s.budget.mu.Lock()
 	defer s.budget.mu.Unlock()
+	if reason == openAIReplayIDRejectionReason && s.budget.replayIDRetried {
+		return false
+	}
 	if s.budget.attempts >= maxOpenAIResponsesRejectedFieldRetries {
 		return false
 	}
 	s.seenBodyHashes[bodyHash] = struct{}{}
 	s.budget.attempts++
+	if reason == openAIReplayIDRejectionReason {
+		s.budget.replayIDRetried = true
+	}
 	return true
 }
 
@@ -119,6 +178,9 @@ func normalizeOpenAIResponsesRejectedFieldRetryBody(statusCode int, body, respon
 	code := strings.ToLower(strings.TrimSpace(extractUpstreamErrorCode(responseBody)))
 	message := strings.ToLower(strings.TrimSpace(extractUpstreamErrorMessage(responseBody)))
 	param := strings.ToLower(strings.TrimSpace(gjson.GetBytes(responseBody, "error.param").String()))
+	if retryBody, changed, err := repairOpenAIVAPIRejectedReplayIDs(body, responseBody, code, param); changed || err != nil {
+		return retryBody, openAIReplayIDRejectionReason, changed, err
+	}
 	if code == "invalid_function_parameters" &&
 		openAIResponsesToolParametersParamPattern.MatchString(param) &&
 		openAIResponsesMissingSchemaTypePattern.MatchString(message) {

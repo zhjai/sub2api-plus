@@ -83,6 +83,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	if account == nil {
 		return errors.New("account is nil")
 	}
+	ctx = withOpenAIReplayLogicalTurnOffset(ctx, c)
 	// A handler may reuse the same gin context across account failover attempts.
 	// Never let an OAuth attempt's response aliases leak into the next account.
 	setCodexToolNameReverse(c, nil)
@@ -1033,6 +1034,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		eventCount := 0
 		tokenEventCount := 0
 		terminalEventCount := 0
+		replayIDBootstrapOnly := true
 		replayCollector := &openAIWSToolCallReplayCollector{}
 		firstEventType := ""
 		lastEventType := ""
@@ -1088,6 +1090,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			}
 
 			eventType, eventResponseID, _ := parseOpenAIWSEventEnvelope(upstreamMessage)
+			if eventType != "response.created" && eventType != "response.in_progress" && eventType != "error" {
+				replayIDBootstrapOnly = false
+			}
 			observeOpenAIToolCapabilitySSE(c, eventType, upstreamMessage)
 			integrity.observe(eventType, upstreamMessage)
 			responseModelObserver.ObserveOpenAI(upstreamMessage, eventType)
@@ -1115,7 +1120,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				s.handleOpenAIWSErrorEventTransientFailure(ctx, account, mappedModel, lease.HandshakeHeaders(), upstreamMessage)
 				errCodeRaw, errTypeRaw, errMsgRaw := parseOpenAIWSErrorEventFields(upstreamMessage)
 				statusCode := openAIWSRejectedFieldRetryHTTPStatus(upstreamMessage)
-				if !wroteDownstream && statusCode == http.StatusBadRequest && rejectedFieldRetryState != nil {
+				if !wroteDownstream && statusCode == http.StatusBadRequest && rejectedFieldRetryState != nil && (!isOpenAIReplayItemIDRejection(statusCode, upstreamMessage) || replayIDBootstrapOnly) {
 					retryBody, retryReason, changed, retryErr := normalizeOpenAIResponsesRejectedFieldRetryBody(
 						statusCode,
 						payload,
@@ -1124,7 +1129,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					if retryErr != nil {
 						return nil, fmt.Errorf("normalize websocket rejected field retry: %w", retryErr)
 					}
-					if changed && rejectedFieldRetryState.Allow(retryBody) {
+					if changed && ctx.Err() == nil && rejectedFieldRetryState.AllowNormalization(retryBody, retryReason) {
 						logOpenAIWSModeInfo(
 							"ingress_ws_rejected_field_retry account_id=%d turn=%d conn_id=%s reason=%s",
 							account.ID,
@@ -1390,7 +1395,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	defer releaseSessionLease()
 
 	turn := 1
-	rejectedFieldRetryState = newOpenAIResponsesRejectedFieldRetryState(currentPayload)
+	rejectedFieldRetryState = openAIResponsesRejectedFieldRetryStateForLogicalWSTurn(ctx, c, currentPayload, turn)
 	turnRetry := 0
 	turnPrevRecoveryTried := false
 	lastTurnFinishedAt := time.Time{}
@@ -1905,6 +1910,14 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			if errors.As(relayErr, &rejectedFieldErr) && rejectedFieldErr != nil && len(rejectedFieldErr.body) > 0 {
 				currentPayload = append([]byte(nil), rejectedFieldErr.body...)
 				currentPayloadBytes = len(currentPayload)
+				resetSessionLease(true)
+				retryLease, acquireErr := acquireTurnLease(turn, "", false, true)
+				if acquireErr != nil {
+					return fmt.Errorf("acquire websocket rejected field retry: %w", acquireErr)
+				}
+				sessionLease = retryLease
+				sessionConnID = strings.TrimSpace(sessionLease.ConnID())
+				pinSessionConn(sessionConnID)
 				skipBeforeTurn = true
 				continue
 			}
@@ -2094,7 +2107,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		currentImageInputSize = nextPayload.imageInputSize
 		currentPayloadBytes = nextPayload.payloadBytes
 		currentRequestedReasoningEffort = nextPayload.requestedReasoningEffort
-		rejectedFieldRetryState = newOpenAIResponsesRejectedFieldRetryState(currentPayload)
+		rejectedFieldRetryState = openAIResponsesRejectedFieldRetryStateForLogicalWSTurn(ctx, c, currentPayload, turn+1)
 		storeDisabled = s.isOpenAIWSStoreDisabledInRequestRaw(currentPayload, account)
 		if !storeDisabled {
 			unpinSessionConn(sessionConnID)

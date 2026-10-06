@@ -984,6 +984,14 @@ export default {
       groupUpdatedSuccess: 'Group updated successfully',
       groupDeletedSuccess: 'Group deleted successfully',
       rateMultiplierHint: 'Cost multiplier for this group (e.g., 1.5 = 150% of base cost)',
+      billingRateMode: {
+        label: 'Rate multiplier source',
+        group: 'Fixed group multiplier',
+        groupHint: 'Every request is billed at this group\'s multiplier. Per-user group multipliers still take priority.',
+        account: 'Actual account multiplier',
+        accountHint: 'Each request is billed at the multiplier of the account that served it. Group and per-user multipliers are ignored; accounts without a multiplier bill at 1.0.',
+        rateMultiplierAccountHint: 'Billing uses the actual account multiplier, so this value is not applied to token usage. It is only a fallback when the serving account is unknown.'
+      },
       exclusiveHint: 'Exclusive group, manually assign to specific users',
       exclusiveTooltip: {
         title: 'What is an exclusive group?',

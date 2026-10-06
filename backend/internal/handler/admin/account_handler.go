@@ -111,9 +111,22 @@ func (h *AccountHandler) GetSchedulerDecisions(c *gin.Context) {
 	if limit > 256 {
 		limit = 256
 	}
+	var groupID *int64
+	if raw := strings.TrimSpace(c.Query("group_id")); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || parsed <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "group_id must be a positive integer"})
+			return
+		}
+		groupID = &parsed
+	}
 	var traces []service.OpenAIAccountScheduleTrace
 	if h.openAIGatewayService != nil {
-		traces = h.openAIGatewayService.RecentOpenAIAccountScheduleTraces(limit)
+		if groupID != nil {
+			traces = h.openAIGatewayService.RecentOpenAIAccountScheduleTraces(limit, *groupID)
+		} else {
+			traces = h.openAIGatewayService.RecentOpenAIAccountScheduleTraces(limit)
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"items": traces, "limit": limit})
 }

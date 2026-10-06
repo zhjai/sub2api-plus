@@ -413,6 +413,80 @@ func TestGatewayServiceRecordUsage_TimePricingUsesPricingAt(t *testing.T) {
 	require.InDelta(t, baseCost*2*0.8, usageRepo.lastLog.ActualCost, 1e-12)
 	require.InDelta(t, 0.8, usageRepo.lastLog.RateMultiplier, 1e-12)
 }
+
+func TestGatewayServiceRecordUsage_UsesSelectedAccountRateForBillingCommand(t *testing.T) {
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: true}}
+	userRepo := &openAIRecordUsageUserRepoStub{}
+	svc := newGatewayRecordUsageServiceWithBillingRepoForTest(usageRepo, billingRepo, userRepo, &openAIRecordUsageSubRepoStub{})
+
+	groupID := int64(906)
+	accountRate := 0.25
+	group := &Group{ID: groupID, Platform: PlatformAnthropic, RateMultiplier: 2, BillingRateMode: GroupBillingRateModeAccount}
+	account := &Account{
+		ID:             706,
+		Type:           AccountTypeAPIKey,
+		Platform:       PlatformAnthropic,
+		RateMultiplier: &accountRate,
+		Extra:          map[string]any{"quota_limit": 100.0},
+	}
+
+	err := svc.RecordUsage(context.Background(), &RecordUsageInput{
+		Result: &ForwardResult{
+			RequestID: "gateway_selected_account_rate_command",
+			Model:     "claude-sonnet-4",
+			Usage:     ClaudeUsage{InputTokens: 1000, OutputTokens: 500},
+			Duration:  time.Second,
+		},
+		APIKey:  &APIKey{ID: 806, GroupID: &groupID, Group: group, User: &User{ID: 606}},
+		User:    &User{ID: 606},
+		Account: account,
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, usageRepo.lastLog)
+	require.NotNil(t, billingRepo.lastCmd)
+	require.InDelta(t, accountRate, usageRepo.lastLog.RateMultiplier, 1e-12)
+	require.NotNil(t, usageRepo.lastLog.AccountRateMultiplier)
+	require.InDelta(t, accountRate, *usageRepo.lastLog.AccountRateMultiplier, 1e-12)
+	require.InDelta(t, usageRepo.lastLog.ActualCost, billingRepo.lastCmd.BalanceCost, 1e-12,
+		"final balance charge must use the selected account rate")
+	require.InDelta(t, usageRepo.lastLog.TotalCost*accountRate, billingRepo.lastCmd.AccountQuotaCost, 1e-12,
+		"account quota charge must retain the selected account rate")
+}
+
+func TestGatewayServiceRecordUsage_ZeroSelectedAccountRateSkipsChargesButKeepsSnapshot(t *testing.T) {
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: true}}
+	userRepo := &openAIRecordUsageUserRepoStub{}
+	svc := newGatewayRecordUsageServiceWithBillingRepoForTest(usageRepo, billingRepo, userRepo, &openAIRecordUsageSubRepoStub{})
+
+	groupID := int64(907)
+	accountRate := 0.0
+	group := &Group{ID: groupID, Platform: PlatformAnthropic, RateMultiplier: 2, BillingRateMode: GroupBillingRateModeAccount}
+	account := &Account{ID: 707, Platform: PlatformAnthropic, RateMultiplier: &accountRate}
+
+	err := svc.RecordUsage(context.Background(), &RecordUsageInput{
+		Result: &ForwardResult{
+			RequestID: "gateway_zero_selected_account_rate",
+			Model:     "claude-sonnet-4",
+			Usage:     ClaudeUsage{InputTokens: 1000, OutputTokens: 500},
+			Duration:  time.Second,
+		},
+		APIKey:  &APIKey{ID: 807, GroupID: &groupID, Group: group, User: &User{ID: 607}},
+		User:    &User{ID: 607},
+		Account: account,
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, usageRepo.lastLog)
+	require.NotNil(t, usageRepo.lastLog.AccountRateMultiplier)
+	require.Zero(t, usageRepo.lastLog.RateMultiplier)
+	require.Zero(t, usageRepo.lastLog.ActualCost)
+	require.NotNil(t, billingRepo.lastCmd)
+	require.Zero(t, billingRepo.lastCmd.BalanceCost)
+	require.Zero(t, billingRepo.lastCmd.AccountQuotaCost)
+}
 func TestGatewayServiceRecordUsage_UsesExplicitPricingAtForPeakRate(t *testing.T) {
 	for _, platform := range []string{PlatformAnthropic, PlatformGemini, PlatformGrok, PlatformAntigravity} {
 		t.Run(platform, func(t *testing.T) {

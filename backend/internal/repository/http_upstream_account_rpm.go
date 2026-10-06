@@ -56,6 +56,18 @@ func accountRPMSingleSend(transport *http.Transport, req *http.Request) (*http.R
 	// Use an isolated clone; the shared unlimited transport must stay untouched.
 	transport = transport.Clone()
 	transport.MaxConnsPerHost = 0
+	evaluation := service.HTTPUpstreamSingleSendRequired(req.Context())
+	// Evaluation performs nonblocking admission before dialing so its outer
+	// wait can release capacity without retaining a connection. Business
+	// requests retain their post-dial admission contract.
+	if evaluation {
+		if err := service.AdmitAccountRPMHTTPRetry(req.Context()); err != nil {
+			if req.Body != nil {
+				_ = req.Body.Close()
+			}
+			return nil, err
+		}
+	}
 	port := req.URL.Port()
 	if port == "" {
 		port = "443"
@@ -70,16 +82,14 @@ func accountRPMSingleSend(transport *http.Transport, req *http.Request) (*http.R
 		}
 		return nil, err
 	}
-	var admissionErr error
-	if !service.HTTPUpstreamSingleSendRequired(req.Context()) {
-		admissionErr = service.AdmitAccountRPMHTTPRetry(req.Context())
-	}
-	if admissionErr != nil {
-		_ = conn.Close()
-		if req.Body != nil {
-			_ = req.Body.Close()
+	if !evaluation {
+		if err := service.AdmitAccountRPMHTTPRetry(req.Context()); err != nil {
+			_ = conn.Close()
+			if req.Body != nil {
+				_ = req.Body.Close()
+			}
+			return nil, err
 		}
-		return nil, admissionErr
 	}
 	resp, err := conn.RoundTrip(req)
 	if err != nil {

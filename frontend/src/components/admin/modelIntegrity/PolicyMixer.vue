@@ -20,30 +20,31 @@
         <span class="mixer-radio" aria-hidden="true" />
         {{ t(`admin.modelIntegrity.scheduling.policy.options.${policyKey(policy)}.name`) }}
       </span>
-      <span class="mixer-effect">{{ t(`admin.modelIntegrity.scheduling.policy.options.${policyKey(policy)}.effect`) }}</span>
-      <!-- The preset weights this policy actually ranks with, including load at
-           evaluation time. The pass rate is either a weighted factor or a
-           filter, never silently dropped. -->
-      <span v-if="presetWeights(policy)" class="mixer-weights" data-testid="mixer-weights">
-        <span v-for="factor in RANKING_FACTORS" :key="factor" class="mixer-weight" :class="{ 'mixer-weight-zero': !(presetWeights(policy)![factor] > 0) }">
-          <span class="mixer-weight-name">{{ t(`admin.modelIntegrity.scheduling.rank.weights.${factor}`) }}</span>
-          <!-- The pass rate is a tier filter under avoid degradation, so it is
-               stated rather than drawn as a weight price could trade against. -->
-          <span
-            v-if="factor === 'quality' && QUALITY_MODE[policy] !== 'weighted'"
-            class="mixer-weight-value"
-            :class="`mixer-weight-mode-${QUALITY_MODE[policy]}`"
-            :data-testid="`mixer-quality-${policyKey(policy)}`"
-          >{{ t(`admin.modelIntegrity.scheduling.policy.qualityMode.${QUALITY_MODE[policy]}`) }}</span>
-          <span v-else class="mixer-weight-value tabular-nums">{{ Math.round((presetWeights(policy)![factor] ?? 0) * 100) }}%</span>
-        </span>
+      <span class="mixer-effect">{{ effectText(policy) }}</span>
+      <!-- How the policy compares two accounts, step by step: each step only
+           breaks ties of the one before it. A preset publishes a price-only
+           weight set, so percentages would describe a score the order does not
+           use; the steps are the order itself. -->
+      <span v-if="orderSteps(policy)" class="mixer-order" data-testid="mixer-order">
+        <ol class="mixer-order-list">
+          <!-- A single step is not a sequence, so custom balance shows its basis unnumbered. -->
+          <li v-for="(step, index) in orderSteps(policy)" :key="step" class="mixer-order-step" :class="{ 'mixer-order-single': orderSteps(policy)!.length === 1 }">
+            <span v-if="orderSteps(policy)!.length > 1" class="mixer-order-num" aria-hidden="true">{{ index + 1 }}</span>
+            <span
+              class="mixer-order-text"
+              :class="{ 'mixer-order-quality': step === 'quality' || step === 'priority.quality' }"
+              :data-testid="step === 'quality' ? `mixer-quality-${policyKey(policy)}` : undefined"
+            >{{ t(`admin.modelIntegrity.scheduling.policy.order.${step}`) }}</span>
+          </li>
+        </ol>
       </span>
-      <!-- Policies without published preset weights (system default, custom
-           balance) keep the relative-emphasis meters instead. -->
-      <span class="mixer-meters">
+      <!-- System default is the only policy still ordered by the system
+           scheduling weights, so it keeps the relative-emphasis meters. -->
+      <span v-else class="mixer-meters">
         <span v-for="factor in FACTORS" :key="factor" class="mixer-meter">
           <span class="mixer-meter-label">{{ t(`admin.modelIntegrity.scheduling.policy.factors.${factor}`) }}</span>
-          <!-- Quality is a strict first filter under avoid degradation and unused by the presets, so it is stated, not metered. -->
+          <!-- Only “System default” reaches these meters, and it does not read the
+               pass rate, so that factor is stated rather than metered. -->
           <span
             v-if="factor === 'quality' && QUALITY_MODE[policy] !== 'weighted'"
             class="mixer-meter-mode"
@@ -71,24 +72,38 @@
 
 <script setup lang="ts">
 import { useI18n } from 'vue-i18n'
-import type { OpenAIEvalSchedulingPolicy } from '@/api/admin/accounts'
-import { POLICIES, PRESET_WEIGHTS, QUALITY_MODE, RANKING_FACTORS, policyKey, type PolicyFactor } from '@/views/admin/modelIntegrity/modelIntegrity'
-import { POLICY_EMPHASIS } from '@/views/admin/modelIntegrity/modelIntegrity'
+import type { OpenAIEvalPolicyWeights, OpenAIEvalSchedulingPolicy } from '@/api/admin/accounts'
+import { POLICIES, POLICY_EMPHASIS, QUALITY_MODE, absolutePriorities, policyKey, policyOrderKeys, type PolicyFactor } from '@/views/admin/modelIntegrity/modelIntegrity'
 
-withDefaults(defineProps<{
+const props = withDefaults(defineProps<{
   modelValue: OpenAIEvalSchedulingPolicy
   name: string
   label: string
   disabled?: boolean
-}>(), { disabled: false })
+  /** The default custom weights, so the custom balance card describes its real order. */
+  customBalance?: OpenAIEvalPolicyWeights | null
+}>(), { disabled: false, customBalance: null })
 
 const emit = defineEmits<{ (e: 'update:modelValue', value: OpenAIEvalSchedulingPolicy): void }>()
 const { t } = useI18n()
 const FACTORS: PolicyFactor[] = ['quality', 'price', 'errors', 'speed']
 
-/** The published preset weights for a policy; Custom Balance has none of its own. */
-function presetWeights(policy: OpenAIEvalSchedulingPolicy) {
-  return policy !== '' && policy !== 'custom_balance' ? PRESET_WEIGHTS[policy] : null
+/**
+ * The comparison steps a ranking policy applies, or null for the system
+ * default, which keeps the weight meters. Never derived from the published
+ * weight set: those weights only build the price score the presets sort by.
+ */
+function orderSteps(policy: OpenAIEvalSchedulingPolicy) {
+  return policy ? policyOrderKeys(policy, props.customBalance) : null
+}
+
+/** With priorities, custom balance is no longer a pure weighted sort, so it says so. */
+function effectText(policy: OpenAIEvalSchedulingPolicy) {
+  const key = policyKey(policy)
+  if (policy === 'custom_balance' && absolutePriorities(props.customBalance).length) {
+    return t(`admin.modelIntegrity.scheduling.policy.options.${key}.effectWithPriorities`)
+  }
+  return t(`admin.modelIntegrity.scheduling.policy.options.${key}.effect`)
 }
 </script>
 
@@ -103,15 +118,16 @@ function presetWeights(policy: OpenAIEvalSchedulingPolicy) {
 .mixer-option-active .mixer-radio { @apply border-primary-600 dark:border-primary-400; box-shadow: inset 0 0 0 2px white; background: theme('colors.primary.600'); }
 :global(.dark) .mixer-option-active .mixer-radio { box-shadow: inset 0 0 0 2px theme('colors.dark.800'); }
 .mixer-effect { @apply min-h-[2.75rem] text-[0.8125rem] leading-relaxed text-gray-600 dark:text-gray-400; }
-.mixer-weights { @apply grid gap-1 rounded-md bg-gray-50 px-2.5 py-2 dark:bg-dark-900/60; }
-.mixer-weight { @apply flex items-baseline justify-between gap-2 text-xs text-gray-700 dark:text-gray-300; }
-.mixer-weight-zero { @apply text-gray-400 dark:text-gray-500; }
-.mixer-weight-name { @apply min-w-0 truncate; }
-.mixer-weight-value { @apply shrink-0 font-medium; }
-.mixer-weight-mode-tier { @apply text-violet-700 dark:text-violet-300; }
-.mixer-weight-mode-ignored { @apply text-gray-400 dark:text-gray-500; }
+/* The order is a sequence, so it is numbered; a later step only ties an earlier one. */
+.mixer-order { @apply mt-auto rounded-md bg-gray-50 px-2.5 py-2 dark:bg-dark-900/60; }
+.mixer-order-list { @apply grid gap-1; }
+.mixer-order-step { @apply grid grid-cols-[1rem_1fr] items-baseline gap-2 text-xs text-gray-700 dark:text-gray-300; }
+.mixer-order-single { @apply grid-cols-1; }
+.mixer-order-num { @apply text-center text-[11px] tabular-nums text-gray-400 dark:text-gray-500; }
+.mixer-order-text { @apply min-w-0; }
+/* The pass rate is a comparison step, never a weight price could trade against. */
+.mixer-order-quality { @apply font-medium text-violet-700 dark:text-violet-300; }
 .mixer-meters { @apply mt-auto grid gap-1.5 border-t border-gray-100 pt-3 dark:border-dark-700; }
-.mixer-weights + .mixer-meters { @apply mt-0; }
 .mixer-meter { @apply grid grid-cols-[5.5rem_1fr] items-center gap-2 text-xs text-gray-500 dark:text-gray-400; }
 .mixer-meter-track { @apply grid h-2 grid-cols-4 gap-0.5; }
 .mixer-meter-mode { @apply text-xs leading-none; }

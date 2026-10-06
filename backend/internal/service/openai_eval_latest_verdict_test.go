@@ -146,6 +146,22 @@ func TestOpenAIEvalLatestVerdictPrismPassesBothTypes(t *testing.T) {
 	require.Equal(t, "upstream_error", repo.runs[1].Error)
 }
 
+func TestOpenAIEvalLatestVerdictDiagnosticDoesNotHideRealPass(t *testing.T) {
+	s, repo, now := latestVerdictHarness(t)
+	diagnostic := repo.runs[0]
+	diagnostic.ID = 900
+	diagnostic.FinishedAt = now
+	diagnostic.TriggerSource = "manual"
+	diagnostic.DiagnosticOnly = true
+	diagnostic.Status = "warning"
+	diagnostic.Samples = []OpenAIEvalSampleRecord{{Valid: true, Answer: "29"}}
+	repo.runs = append(repo.runs, diagnostic)
+	_, err := s.EvaluateScheduling(context.Background(), 1)
+	require.NoError(t, err)
+	assertLatestVerdict(t, s, 1)
+	require.True(t, repo.runs[len(repo.runs)-1].DiagnosticOnly, "diagnostic remains auditable")
+}
+
 func TestOpenAIEvalLatestVerdictManualAndPeriodicRecompute(t *testing.T) {
 	s, repo, now := latestVerdictHarness(t)
 	first, err := s.EvaluateScheduling(context.Background(), 1)

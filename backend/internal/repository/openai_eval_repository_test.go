@@ -79,6 +79,21 @@ func TestOpenAIEvalFinishAndHistoryPreserveSampleEvidence(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestOpenAIEvalRunMetadataRoundTripPreservesDiagnosticOnly(t *testing.T) {
+	run := &service.OpenAIEvalRun{
+		DiagnosticOnly: true,
+		Protocol:       "responses",
+		Outcome:        service.OpenAIEvalOutcome{Status: "pass", SampleCount: 1},
+	}
+	raw, err := marshalOpenAIEvalRunOutcome(run)
+	require.NoError(t, err)
+	var got service.OpenAIEvalRun
+	require.NoError(t, unmarshalOpenAIEvalRunOutcome(raw, &got))
+	require.True(t, got.DiagnosticOnly)
+	require.Equal(t, "responses", got.Protocol)
+	require.Equal(t, run.Outcome, got.Outcome)
+}
+
 func TestOpenAIEvalConfigAttemptsPersistInJSONWithoutSchemaChange(t *testing.T) {
 	repo, mock := openAIEvalSaveConfigDB(t)
 	cfg := &service.OpenAIEvalConfig{MaxRequestAttempts: 8, Accounts: []service.OpenAIEvalAccountConfig{}}

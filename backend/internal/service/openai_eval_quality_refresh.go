@@ -89,6 +89,12 @@ type openAIEvalQualitySnapshotStore struct {
 var openAIEvalQualitySnapshots = &openAIEvalQualitySnapshotStore{}
 
 func normalizeOpenAIEvalQualityConfig(config *OpenAIEvalConfig) error {
+	if _, err := buildOpenAIEvalAccountPriorityIndex(config.AccountPriorityRules); err != nil {
+		return fmt.Errorf("build account priority rules: %w", err)
+	}
+	if err := normalizeOpenAIEvalSchedulingThresholds(config); err != nil {
+		return err
+	}
 	config.QualityRefreshIntervalSeconds = openAIEvalQualityRefreshSeconds(config)
 	if config.QualityRefreshIntervalSeconds < 300 || int64(config.QualityRefreshIntervalSeconds) > OpenAIEvalMaxIntervalSeconds {
 		return errors.New("quality_refresh_interval_seconds must be at least 300 and fit integer storage")
@@ -96,7 +102,7 @@ func normalizeOpenAIEvalQualityConfig(config *OpenAIEvalConfig) error {
 	// Inactive custom settings are also validated; zero-valued legacy configs
 	// remain valid until the custom policy is explicitly selected.
 	normalize := func(weights *OpenAIEvalPolicyWeights, required bool) error {
-		if *weights == (OpenAIEvalPolicyWeights{}) && !required {
+		if openAIEvalPolicyWeightsZero(*weights) && !required {
 			return nil
 		}
 		normalized, err := normalizeOpenAIEvalPolicyWeights(*weights)
@@ -169,20 +175,23 @@ func (cache *openAIEvalQualitySnapshotStore) configure(config *OpenAIEvalConfig)
 	if interval < 300 || int64(interval) > OpenAIEvalMaxIntervalSeconds {
 		return errors.New("invalid quality refresh interval")
 	}
-	enabled := config != nil && config.EffectsEnabled
+	// Evidence snapshots remain available whenever a quality configuration exists.
+	// EffectsEnabled controls whether the optional policy affects production
+	// routing; it must not hide persisted evidence or hard safety state.
+	enabled := config != nil
 	revision := int64(0)
 	if config != nil {
 		revision = config.Revision
 	}
-	policy := newOpenAIEvalSchedulingPolicySnapshot(config)
+	policy, err := newOpenAIEvalSchedulingPolicySnapshot(config)
+	if err != nil {
+		return err
+	}
 	payload, _ := json.Marshal(struct {
 		AttributionRule string
-		Revision        int64
-		Enabled         bool
 		Interval        int
 		Routes          []openAIEvalQualityRoute
-		Policy          *openAIEvalSchedulingPolicySnapshot
-	}{OpenAIEvalModelTraceRuleVersion, revision, enabled, interval, routes, policy})
+	}{OpenAIEvalModelTraceRuleVersion, interval, routes})
 	signature := sha256.Sum256(payload)
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
@@ -190,6 +199,11 @@ func (cache *openAIEvalQualitySnapshotStore) configure(config *OpenAIEvalConfig)
 		return ErrOpenAIEvalQualityRefreshSuperseded
 	}
 	if signature == cache.signature {
+		// Policy activation and revision changes do not invalidate persisted or
+		// in-memory quality evidence. Only the evidence input contract (routes,
+		// cadence, or attribution version) requires a rebuild.
+		cache.configRevision = revision
+		cache.enabled = enabled
 		openAIEvalSchedulingPolicy.Store(policy)
 		return nil
 	}
@@ -218,9 +232,6 @@ func (cache *openAIEvalQualitySnapshotStore) clearLocked() {
 }
 
 func (cache *openAIEvalQualitySnapshotStore) lookup(accountID int64, model, effort string, now time.Time) (OpenAIEvalQualityAssessment, bool) {
-	if !OpenAIEvalEffectsEnabled() {
-		return OpenAIEvalQualityAssessment{}, false
-	}
 	key := (openAIEvalQualityRoute{AccountID: accountID, Model: openAIEvalQualityDimension(model), Effort: openAIEvalQualityDimension(effort)}).key()
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
@@ -308,7 +319,7 @@ func (s *OpenAIEvalService) refreshOpenAIEvalQuality(ctx context.Context, force 
 	cache.ticket++
 	ticket, generation := cache.ticket, cache.generation
 	routes := append([]openAIEvalQualityRoute(nil), cache.routes...)
-	enabled := cache.enabled && OpenAIEvalEffectsEnabled()
+	enabled := cache.enabled
 	interval := cache.interval
 	cache.mu.Unlock()
 	entries := make(map[string]OpenAIEvalQualityAssessment)
@@ -373,7 +384,7 @@ func (s *OpenAIEvalService) refreshOpenAIEvalQuality(ctx context.Context, force 
 	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
-	if cache.generation != generation || cache.ticket != ticket || (enabled && !OpenAIEvalEffectsEnabled()) {
+	if cache.generation != generation || cache.ticket != ticket || cache.configRevision != config.Revision {
 		return nil, ErrOpenAIEvalQualityRefreshSuperseded
 	}
 	if err = ctx.Err(); err != nil {
@@ -417,7 +428,7 @@ func (s *OpenAIEvalService) latestQualityRefreshRuns(ctx context.Context, routes
 		}
 		for _, run := range runs {
 			key := OpenAIEvalEvidenceKey{run.AccountID, openAIEvalQualityDimension(run.RequestedModel), openAIEvalQualityDimension(run.ReasoningEffort), run.TestType}
-			if !selected[key] || run.Status == "running" || !openAIEvalQualityRunSourceSupported(run.TriggerSource) {
+			if !selected[key] || run.Status == "running" || run.DiagnosticOnly || !openAIEvalQualityRunSourceSupported(run.TriggerSource) {
 				continue
 			}
 			old, found := latest[key]

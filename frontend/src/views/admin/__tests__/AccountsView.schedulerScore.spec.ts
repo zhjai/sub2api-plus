@@ -38,6 +38,15 @@ vi.mock('@/api/admin', () => ({
   }
 }))
 
+const { listSchedulerDecisions } = vi.hoisted(() => ({
+  listSchedulerDecisions: vi.fn()
+}))
+
+vi.mock('@/api/admin/accounts', async () => {
+  const actual = await vi.importActual<typeof import('@/api/admin/accounts')>('@/api/admin/accounts')
+  return { ...actual, listSchedulerDecisions }
+})
+
 vi.mock('@/stores/app', () => ({
   useAppStore: () => ({
     showError: vi.fn(),
@@ -249,5 +258,16 @@ describe('admin AccountsView scheduler score column', () => {
     const emptyCell = wrapper.find('[data-test="scheduler-score-3"]')
     expect(emptyCell.exists()).toBe(true)
     expect(emptyCell.text()).toBe('-')
+  })
+
+  // Scheduling explanations live on the Model Integrity scheduling page only.
+  it('keeps request-level scheduling explanations off the accounts page', async () => {
+    listSchedulerDecisions.mockReset()
+    const wrapper = mountView()
+    await flushPromises()
+
+    expect(listSchedulerDecisions).not.toHaveBeenCalled()
+    expect(wrapper.html()).not.toContain('admin.accounts.schedulerTrace')
+    expect(wrapper.html()).not.toContain('admin.accounts.schedulerScore.hint')
   })
 })

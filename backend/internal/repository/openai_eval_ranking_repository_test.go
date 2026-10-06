@@ -14,7 +14,7 @@ import (
 func TestRankingLatestCompletedEvidenceExactEmptyEffortAndTerminalOrdering(t *testing.T) {
 	repo, mock := openAIEvalSaveConfigDB(t)
 	keys := []service.OpenAIEvalEvidenceKey{{AccountID: 17, RequestedModel: "gpt-6.1-sol", ReasoningEffort: "", TestType: "candy"}}
-	pattern := `(?s)SELECT r.id,.*FROM jsonb_to_recordset\(\$1::jsonb\).*JOIN LATERAL.*WHERE account_id=k.account_id AND lower\(btrim\(requested_model\)\)=lower\(btrim\(k.requested_model\)\)\s+AND lower\(btrim\(reasoning_effort\)\)=lower\(btrim\(k.reasoning_effort\)\) AND test_type=k.test_type\s+AND trigger_source IN \('manual', 'scheduled'\) AND finished_at IS NOT NULL AND status <> 'running'\s+ORDER BY finished_at DESC, id DESC LIMIT 1`
+	pattern := `(?s)SELECT r.id,.*FROM jsonb_to_recordset\(\$1::jsonb\).*JOIN LATERAL.*WHERE account_id=k.account_id.*NOT \(outcome @> '\{"diagnostic_only": true\}'::jsonb\).*ORDER BY finished_at DESC, id DESC LIMIT 1`
 	now := time.Now()
 	rows := sqlmock.NewRows([]string{"id", "account_id", "test_type", "requested_model", "reasoning_effort", "data_version", "baseline_version", "status", "outcome", "samples", "finished_at", "trigger_source", "error_code"}).
 		AddRow(11, 17, "candy", "gpt-6.1-sol", "", service.OpenAIEvalDataVersion, "", "error", []byte(`{}`), []byte(`[]`), now, "scheduled", "timeout")
@@ -37,5 +37,18 @@ func TestRankingLatestMalformedEvidenceStaysUnknown(t *testing.T) {
 	runs, err := repo.LatestCompletedRuns(context.Background(), []service.OpenAIEvalEvidenceKey{{AccountID: 17}})
 	require.NoError(t, err)
 	require.Equal(t, "insufficient", runs[0].Status)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRankingLatestQueryExcludesDiagnosticOnlyEvidence(t *testing.T) {
+	repo, mock := openAIEvalSaveConfigDB(t)
+	pattern := `(?s)FROM jsonb_to_recordset.*NOT \(outcome @> '\{"diagnostic_only": true\}'::jsonb\)`
+	rows := sqlmock.NewRows([]string{"id", "account_id", "test_type", "requested_model", "reasoning_effort", "data_version", "baseline_version", "status", "outcome", "samples", "finished_at", "trigger_source", "error_code"}).
+		AddRow(12, 17, "candy", "gpt-6.1-sol", "", service.OpenAIEvalDataVersion, "", "pass", []byte(`{"status":"pass","diagnostic_only":false}`), []byte(`[]`), time.Now(), "manual", "")
+	mock.ExpectQuery(pattern).WillReturnRows(rows)
+	runs, err := repo.LatestCompletedRuns(context.Background(), []service.OpenAIEvalEvidenceKey{{AccountID: 17, RequestedModel: "gpt-6.1-sol", TestType: service.OpenAIEvalTypeCandy}})
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+	require.False(t, runs[0].DiagnosticOnly)
 	require.NoError(t, mock.ExpectationsWereMet())
 }

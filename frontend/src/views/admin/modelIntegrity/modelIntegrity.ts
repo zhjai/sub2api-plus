@@ -10,6 +10,7 @@ import type {
   OpenAIEvalOverviewModel,
   OpenAIEvalPolicyWeights,
   OpenAIEvalRankingFactorKey,
+  OpenAIEvalRankingFactorWeights,
   OpenAIEvalRankingFactors,
   OpenAIEvalRankingWeights,
   OpenAIEvalRouteConfig,
@@ -18,6 +19,7 @@ import type {
   OpenAIEvalSchedule,
   OpenAIEvalSchedulingPolicy,
   OpenAIEvalSchedulingPolicyRule,
+  OpenAIEvalSchedulingThresholds,
   SchedulerDecisionCandidate
 } from '@/api/admin/accounts'
 import type { Account } from '@/types'
@@ -87,8 +89,9 @@ export const TEST_TYPE_META: Record<EvalTestType, TestTypeMeta> = {
 
 /**
  * Upstream attempts per logical sample, including the first request. Shared by
- * Candy, Fingerprint and ModelTrace; State Probe never retries because its two
- * requests are linked by one ticket.
+ * Candy, Fingerprint and ModelTrace. State Probe reads the same setting, but
+ * one attempt there is a whole mint/continue chain, so its ceiling is
+ * STATE_PROBE_MAX_CHAINS × STATE_PROBE_REQUESTS.
  */
 export const DEFAULT_MAX_REQUEST_ATTEMPTS = 3
 export const MIN_MAX_REQUEST_ATTEMPTS = 1
@@ -102,14 +105,28 @@ export function normalizeMaxRequestAttempts(value: unknown): number {
   return Math.min(Math.max(Math.trunc(raw), MIN_MAX_REQUEST_ATTEMPTS), MAX_MAX_REQUEST_ATTEMPTS)
 }
 
-export function retriesSamples(type: EvalTestType): boolean {
-  return type !== 'state_probe'
-}
-
 /** Candy uses the configured sample count; one is the server default. */
 export const CANDY_REQUESTS = 1
 /** State Probe mints a ticket and continues it once. */
 export const STATE_PROBE_REQUESTS = 2
+/**
+ * One retry feeds a fresh mint/continue chain, so a failed probe starts over
+ * rather than re-sending the failed request. The server caps the chain count at
+ * three (openAIStateProbeMaxAttempts), i.e. six sends, even when the shared
+ * attempts setting is higher.
+ */
+export const STATE_PROBE_MAX_CHAINS = 3
+/**
+ * How many mint/continue chains a State Probe run may send. Attempts above the
+ * server's cap change nothing, so the count is clamped before it is used.
+ */
+export function stateProbeChains(maxAttempts: number): number {
+  return Math.min(normalizeMaxRequestAttempts(maxAttempts), STATE_PROBE_MAX_CHAINS)
+}
+/** Requests one State Probe run can send at most: chains × linked requests. */
+export function stateProbeMaxRequests(maxAttempts: number): number {
+  return STATE_PROBE_REQUESTS * stateProbeChains(maxAttempts)
+}
 const DEFAULT_FINGERPRINT_SAMPLES: Record<string, number> = { quick: 60, standard: 200, strict: 400 }
 
 export function scheduleOf(route: OpenAIEvalRouteConfig, type: EvalTestType): OpenAIEvalSchedule {
@@ -226,12 +243,15 @@ export function toSavePayload(config: OpenAIEvalConfig): OpenAIEvalConfig {
     effects_enabled: config.effects_enabled,
     bps_auto_enabled: config.bps_auto_enabled,
     scheduling_policy: config.scheduling_policy ?? '',
-    custom_balance: normalizeCustomBalance(config.custom_balance),
+    custom_balance: customBalancePayload(config.custom_balance),
+    // Copied as edited: the scheduling page refuses to save invalid values,
+    // and the tests page never touches them.
+    scheduling_thresholds: normalizeSchedulingThresholds(config.scheduling_thresholds),
     policies: (config.policies ?? []).map(rule => ({
       ...rule,
       reasoning_effort: rule.reasoning_effort || '',
       ...(rule.policy === 'custom_balance'
-        ? { custom_balance: normalizeCustomBalance(rule.custom_balance ?? config.custom_balance) }
+        ? { custom_balance: customBalancePayload(rule.custom_balance ?? config.custom_balance) }
         : {})
     })),
     bps_accounts: (config.bps_accounts ?? []).map(bpsAccountPayload),
@@ -329,27 +349,95 @@ export function foldLegacyStability(weights: OpenAIEvalPolicyWeights): OpenAIEva
     ttft: stability > 0 ? roundWeight(Number(weights.ttft) + stability * LEGACY_STABILITY_TTFT_SHARE) : Number(weights.ttft),
     load: Number(weights.load),
     quality: Number.isFinite(quality) ? quality : 0,
-    stability: 0
+    stability: 0,
+    // Saving the weights must never reorder or erase the strict comparisons.
+    ...(weights.absolute_priorities?.length ? { absolute_priorities: absolutePriorities(weights) } : {})
   }
 }
 
-/** Older backends emitted an all-zero object even though it cannot be saved. */
+/** Server aliases for absolute priorities (openAIEvalAbsolutePriorityFactors). */
+const PRIORITY_ALIASES: Record<string, CustomFactor> = {
+  cost: 'cost', price: 'cost', error_rate: 'error_rate', errors: 'error_rate',
+  ttft: 'ttft', latency: 'ttft', load: 'load', quality: 'quality'
+}
+
+/**
+ * The strict comparisons, in order, using the server's canonical names. An
+ * alias the API accepted ("price") reads as its factor; an unknown name or a
+ * repeat is dropped, because the server would reject the save over it.
+ */
+export function absolutePriorities(weights?: Pick<OpenAIEvalPolicyWeights, 'absolute_priorities'> | null): CustomFactor[] {
+  const out: CustomFactor[] = []
+  for (const raw of weights?.absolute_priorities ?? []) {
+    const factor = PRIORITY_ALIASES[String(raw).trim().toLowerCase()]
+    if (factor && !out.includes(factor)) out.push(factor)
+  }
+  return out
+}
+
+/**
+ * Older backends emitted an all-zero object even though it cannot be saved;
+ * that, or any negative/non-numeric value, reads as the defaults. All-zero
+ * weights with a priority order are a valid choice and are kept as they are.
+ */
 export function normalizeCustomBalance(weights?: OpenAIEvalPolicyWeights): OpenAIEvalPolicyWeights {
   if (!weights) return { ...DEFAULT_CUSTOM_BALANCE, stability: 0 }
   const legacy = [weights.cost, weights.stability ?? 0, weights.error_rate, weights.ttft, weights.load, weights.quality ?? 0].map(Number)
-  if (legacy.some(value => !Number.isFinite(value) || value < 0) || legacy.reduce((sum, value) => sum + value, 0) <= 0) {
-    return { ...DEFAULT_CUSTOM_BALANCE, stability: 0 }
+  const priorities = absolutePriorities(weights)
+  const zeroTotal = legacy.reduce((sum, value) => sum + value, 0) <= 0
+  if (legacy.some(value => !Number.isFinite(value) || value < 0) || (zeroTotal && !priorities.length)) {
+    // The weights are replaced, but the strict order is the admin's own choice.
+    return { ...DEFAULT_CUSTOM_BALANCE, stability: 0, ...(priorities.length ? { absolute_priorities: priorities } : {}) }
   }
   return foldLegacyStability(weights)
 }
 
-/** False when the server would reject the weights: any negative/non-numeric value or an all-zero total. */
-export function isValidCustomBalance(weights?: OpenAIEvalPolicyWeights): boolean {
-  if (!weights) return false
+/**
+ * The weights as sent on save. `absolute_priorities` is always present: the
+ * server keeps its stored list when the field is missing, so an empty list is
+ * the only way to clear the last priority.
+ */
+export function customBalancePayload(weights?: OpenAIEvalPolicyWeights): OpenAIEvalPolicyWeights {
+  const normalized = normalizeCustomBalance(weights)
+  return { ...normalized, absolute_priorities: absolutePriorities(normalized) }
+}
+
+/**
+ * Why the server would reject the weights, or null when it would accept them.
+ * Every weight may be 0 once there is a priority order: accounts that tie on
+ * every priority then keep the server's account-ID order.
+ */
+export type CustomBalanceIssue = 'invalid_value' | 'zero_total'
+
+export function customBalanceIssue(weights?: OpenAIEvalPolicyWeights): CustomBalanceIssue | null {
+  if (!weights) return 'zero_total'
   // Fold first: a quality-only set is valid, and a legacy stability weight still counts.
   const folded = foldLegacyStability(weights)
   const values = CUSTOM_FACTORS.map(factor => Number(folded[factor] ?? 0))
-  return values.every(value => Number.isFinite(value) && value >= 0) && values.reduce((sum, value) => sum + value, 0) > 0
+  if (!values.every(value => Number.isFinite(value) && value >= 0)) return 'invalid_value'
+  if (values.reduce((sum, value) => sum + value, 0) > 0 || absolutePriorities(weights).length) return null
+  return 'zero_total'
+}
+
+/** False when the server would reject the weights: any negative/non-numeric value, or an all-zero total without a priority. */
+export function isValidCustomBalance(weights?: OpenAIEvalPolicyWeights): boolean {
+  return customBalanceIssue(weights) === null
+}
+
+/** True when no weight (a legacy stability weight included) is above 0, so a weighted score cannot break any tie. */
+export function hasNoPositiveWeight(weights?: Partial<OpenAIEvalPolicyWeights> | null): boolean {
+  if (!weights) return false
+  return ![...CUSTOM_FACTORS, 'stability' as const].some(factor => Number(weights[factor] ?? 0) > 0)
+}
+
+/** i18n key for a rejected weight set; negative values cannot be typed, so they share the zero-total text. */
+const CUSTOM_BALANCE_ISSUE_KEYS: Record<CustomBalanceIssue, string> = {
+  invalid_value: 'admin.modelIntegrity.scheduling.policy.custom.zeroTotal',
+  zero_total: 'admin.modelIntegrity.scheduling.policy.custom.zeroTotal'
+}
+
+export function customBalanceIssueKey(issue: CustomBalanceIssue): string {
+  return CUSTOM_BALANCE_ISSUE_KEYS[issue]
 }
 
 /** Whole-percent share of each factor after the normalization the server applies on save. */
@@ -357,7 +445,109 @@ export function customBalanceShares(weights?: OpenAIEvalPolicyWeights): Record<C
   const normalized = normalizeCustomBalance(weights)
   const weight = (factor: CustomFactor) => Number(normalized[factor] ?? 0)
   const total = CUSTOM_FACTORS.reduce((sum, factor) => sum + weight(factor), 0)
-  return Object.fromEntries(CUSTOM_FACTORS.map(factor => [factor, Math.round((weight(factor) / total) * 100)])) as Record<CustomFactor, number>
+  // All-zero weights (valid with priorities) have no share to divide.
+  return Object.fromEntries(CUSTOM_FACTORS.map(factor => [factor, total > 0 ? Math.round((weight(factor) / total) * 100) : 0])) as Record<CustomFactor, number>
+}
+
+// ---------------------------------------------------------------------------
+// Runtime thresholds (scheduling_thresholds)
+//
+// Exceeding a threshold moves an account behind the accounts within it; it
+// never disables the account. Only real requests count, and only once the
+// shared minimum sample counts are reached.
+// ---------------------------------------------------------------------------
+
+/**
+ * Policies an administrator can set runtime thresholds for. Custom balance is
+ * deliberately absent: it is ordered only by its own priorities and weights (openAIEvalRankingWeights
+ * ignores custom thresholds), so exposing a row here would imply an effect it
+ * does not have. The server keeps a custom_balance threshold object for API
+ * compatibility and it is preserved through every save.
+ */
+export const THRESHOLD_POLICIES = ['cost_first', 'stability_first', 'avoid_degradation'] as const
+export type ThresholdPolicy = typeof THRESHOLD_POLICIES[number]
+/**
+ * Every policy key the server's object carries. `custom_balance` is not
+ * editable here, but it has to survive normalization or a save would drop it.
+ */
+export const THRESHOLD_ROUND_TRIP_POLICIES = [...THRESHOLD_POLICIES, 'custom_balance'] as const
+export const THRESHOLD_SAMPLE_KEYS = ['min_error_samples', 'min_ttft_samples'] as const
+export type ThresholdSampleKey = typeof THRESHOLD_SAMPLE_KEYS[number]
+/** Identifies one editable value, e.g. 'stability_first.error_rate' or 'min_ttft_samples'. */
+export type ThresholdField = `${ThresholdPolicy}.error_rate` | `${ThresholdPolicy}.ttft_seconds` | ThresholdSampleKey
+
+export const MAX_TTFT_THRESHOLD_SECONDS = 86_400
+export const MIN_THRESHOLD_SAMPLES = 1
+export const MAX_THRESHOLD_SAMPLES = 1_000_000
+
+export const DEFAULT_SCHEDULING_THRESHOLDS: OpenAIEvalSchedulingThresholds = {
+  cost_first: { error_rate: 0.2, ttft_seconds: 15 },
+  stability_first: { error_rate: 0.05, ttft_seconds: 8 },
+  avoid_degradation: { error_rate: 0.2, ttft_seconds: 15 },
+  custom_balance: { error_rate: 0.2, ttft_seconds: 15 },
+  min_error_samples: 10,
+  min_ttft_samples: 20
+}
+
+const numberOr = (value: unknown, fallback: number) => (typeof value === 'number' ? value : fallback)
+
+/**
+ * A fresh copy with every missing value taken from the defaults. Values the
+ * server sent are kept exactly, including an explicit 0 % error rate, so a
+ * save sends back what was loaded; validation reports anything out of range.
+ */
+export function normalizeSchedulingThresholds(value?: Partial<OpenAIEvalSchedulingThresholds> | null): OpenAIEvalSchedulingThresholds {
+  const source = value && typeof value === 'object' ? value : {}
+  const result = { ...DEFAULT_SCHEDULING_THRESHOLDS } as OpenAIEvalSchedulingThresholds
+  for (const policy of THRESHOLD_ROUND_TRIP_POLICIES) {
+    const own = source[policy]
+    const fallback = DEFAULT_SCHEDULING_THRESHOLDS[policy]
+    result[policy] = {
+      error_rate: numberOr(own?.error_rate, fallback.error_rate),
+      ttft_seconds: numberOr(own?.ttft_seconds, fallback.ttft_seconds)
+    }
+  }
+  for (const key of THRESHOLD_SAMPLE_KEYS) result[key] = numberOr(source[key], DEFAULT_SCHEDULING_THRESHOLDS[key])
+  return result
+}
+
+export function isValidThresholdErrorRate(value: unknown): boolean {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1
+}
+
+export function isValidThresholdTTFT(value: unknown): boolean {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= MAX_TTFT_THRESHOLD_SECONDS
+}
+
+export function isValidThresholdSamples(value: unknown): boolean {
+  return typeof value === 'number' && Number.isInteger(value) && value >= MIN_THRESHOLD_SAMPLES && value <= MAX_THRESHOLD_SAMPLES
+}
+
+/**
+ * Every editable value the server would reject, in the order they appear on
+ * the page. `custom_balance` is deliberately not validated: no row edits it,
+ * so flagging it would block saving on a value the page never showed.
+ */
+export function invalidThresholdFields(thresholds?: OpenAIEvalSchedulingThresholds | null): ThresholdField[] {
+  const value = normalizeSchedulingThresholds(thresholds)
+  const invalid: ThresholdField[] = []
+  for (const policy of THRESHOLD_POLICIES) {
+    if (!isValidThresholdErrorRate(value[policy].error_rate)) invalid.push(`${policy}.error_rate`)
+    if (!isValidThresholdTTFT(value[policy].ttft_seconds)) invalid.push(`${policy}.ttft_seconds`)
+  }
+  for (const key of THRESHOLD_SAMPLE_KEYS) if (!isValidThresholdSamples(value[key])) invalid.push(key)
+  return invalid
+}
+
+/** The stored ratio as the percentage shown in the editor, without float noise (0.07 → "7"). */
+export function errorRatePercentText(ratio: number): string {
+  return Number.isFinite(ratio) ? String(Number((ratio * 100).toFixed(6))) : ''
+}
+
+/** Reads typed text as a number; empty or non-numeric text is NaN, never 0. */
+export function parseThresholdInput(text: string): number {
+  const trimmed = text.trim()
+  return trimmed === '' ? NaN : Number(trimmed)
 }
 
 export function requestsPerRun(route: OpenAIEvalRouteConfig, type: EvalTestType, catalog?: OpenAIEvalModelCatalog | null, sampleMode?: string): number {
@@ -387,16 +577,21 @@ export function totalDailyRequests(routes: OpenAIEvalRouteConfig[], catalog?: Op
   return routes.reduce((sum, route) => sum + TEST_TYPES.reduce((inner, type) => inner + dailyRequests(route, type, catalog), 0), 0)
 }
 
-/** Upper bound for one run when every sample uses all of its attempts. */
+/**
+ * Upper bound for one run when every sample uses all of its attempts. State
+ * Probe is not exempt: its attempts are chains of two linked requests, capped
+ * at STATE_PROBE_MAX_CHAINS, so the ceiling is 2 × min(attempts, 3).
+ */
 export function maxRequestsPerRun(route: OpenAIEvalRouteConfig, type: EvalTestType, maxAttempts: number, catalog?: OpenAIEvalModelCatalog | null, sampleMode?: string): number {
+  if (type === 'state_probe') return stateProbeMaxRequests(maxAttempts)
   const samples = requestsPerRun(route, type, catalog, sampleMode)
-  return retriesSamples(type) ? samples * normalizeMaxRequestAttempts(maxAttempts) : samples
+  return samples * normalizeMaxRequestAttempts(maxAttempts)
 }
 
 /** Daily upper bound for all automatic schedules if every sample used all attempts. */
 export function totalDailyMaxRequests(routes: OpenAIEvalRouteConfig[], maxAttempts: number, catalog?: OpenAIEvalModelCatalog | null): number {
   const attempts = normalizeMaxRequestAttempts(maxAttempts)
-  return routes.reduce((sum, route) => sum + TEST_TYPES.reduce((inner, type) => inner + dailyRequests(route, type, catalog) * (retriesSamples(type) ? attempts : 1), 0), 0)
+  return routes.reduce((sum, route) => sum + TEST_TYPES.reduce((inner, type) => inner + dailyRequests(route, type, catalog) * (type === 'state_probe' ? stateProbeChains(attempts) : attempts), 0), 0)
 }
 
 export function activeScheduleCount(routes: OpenAIEvalRouteConfig[]): number {
@@ -589,29 +784,62 @@ export const POLICIES: OpenAIEvalSchedulingPolicy[] = ['', 'cost_first', 'stabil
 export type PolicyFactor = 'quality' | 'price' | 'errors' | 'speed'
 
 /**
- * Relative emphasis (0–4) each policy gives the integrity pass rate, price,
- * error rate and first-token latency. Mirrors openai_account_scheduler.go:
- * default weights are error 0.8 / ttft 0.5 / upstream cost 0 (admin-tunable);
- * cost_first lifts cost to ≥2 and scales error/ttft by 0.65; stability_first
- * lifts error ≥2.5, ttft ≥1.5 and ignores the pass rate; avoid_degradation
- * first keeps only the best known pass-rate tier, then ranks it with error
- * ≥2.5, ttft ≥1.25 and cost scaled by 0.25. Custom balance weighs the pass
- * rate as one factor among the others. These are display levels only; once a
- * ranking policy is in force the published order (PRESET_WEIGHTS below)
- * replaces account priority, the system weights and movable session affinity.
+ * Relative emphasis (0–4) of the system default weights in
+ * openai_account_scheduler.go (error 0.8 / ttft 0.5 / upstream cost 0,
+ * admin-tunable). Display levels only, and only for “System default”: every
+ * other policy is shown by its sort order (POLICY_ORDER).
  */
 export const POLICY_EMPHASIS: Record<string, Record<PolicyFactor, number>> = {
-  '': { quality: 0, price: 1, errors: 2, speed: 2 },
-  cost_first: { quality: 0, price: 4, errors: 1, speed: 1 },
-  stability_first: { quality: 0, price: 1, errors: 4, speed: 4 },
-  avoid_degradation: { quality: 0, price: 1, errors: 3, speed: 2 },
-  custom_balance: { quality: 2, price: 2, errors: 2, speed: 2 }
+  '': { quality: 0, price: 1, errors: 2, speed: 2 }
+}
+
+/** The ranking policies, as opposed to the system default. */
+export type RankingPolicy = Exclude<OpenAIEvalSchedulingPolicy, ''>
+/** Policies with a fixed order rather than administrator weights. */
+export type PresetPolicy = Exclude<RankingPolicy, 'custom_balance'>
+
+export function isPresetPolicy(policy: string | null | undefined): policy is PresetPolicy {
+  return policy === 'cost_first' || policy === 'stability_first' || policy === 'avoid_degradation'
+}
+
+export type OrderStep = 'within_thresholds' | 'quality' | 'price' | 'weighted_score'
+
+/**
+ * How each policy compares two accounts, step by step; a later step only
+ * breaks ties of the earlier ones. Mirrors rankingPolicyLess in
+ * openai_eval_scheduling_thresholds.go. Accounts that fail a live check
+ * (disabled, ownership, group, capacity) never reach this comparison.
+ * Custom balance has no threshold step: rankingThresholdReasons returns nil
+ * for it, so its absolute priorities and custom weights decide alone (see
+ * policyOrderKeys). Its threshold row exists for API
+ * compatibility only and is never read.
+ */
+export const POLICY_ORDER: Record<RankingPolicy, OrderStep[]> = {
+  cost_first: ['within_thresholds', 'price'],
+  stability_first: ['within_thresholds', 'price'],
+  avoid_degradation: ['within_thresholds', 'quality', 'price'],
+  custom_balance: ['weighted_score']
 }
 
 /**
- * How each policy treats the pass rate. 'tier' is a strict first filter (best
- * known tier, falling to the next only without capacity), so it is never drawn
- * as a finite weight that price could outweigh. Only custom balance weighs it.
+ * i18n key suffixes under scheduling.policy.order for one policy. Custom
+ * balance with absolute priorities compares each priority strictly first, so
+ * the weighted score only breaks the ties they leave. With every weight at 0
+ * there is no score, so the server's account-ID order breaks them instead.
+ */
+export function policyOrderKeys(policy: RankingPolicy, custom?: Partial<OpenAIEvalPolicyWeights> | null): string[] {
+  if (policy !== 'custom_balance') return POLICY_ORDER[policy]
+  const priorities = absolutePriorities(custom)
+  if (!priorities.length) return POLICY_ORDER.custom_balance
+  // Priorities alone (no weights given) say nothing about the score.
+  const weightless = custom?.cost !== undefined && hasNoPositiveWeight(custom)
+  return [...priorities.map(factor => `priority.${factor}`), weightless ? 'account_order' : 'weighted_tiebreak']
+}
+
+/**
+ * How each policy treats the pass rate. 'tier' is a strict comparison step
+ * ahead of price, never a finite weight that price could outweigh. Only
+ * custom balance weighs it.
  */
 export const QUALITY_MODE: Record<string, 'tier' | 'weighted' | 'ignored'> = {
   '': 'ignored',
@@ -703,24 +931,38 @@ export function orderCandidates<T extends { selected: boolean; eligible: boolean
 // Scheduling evaluation rankings (rc3)
 //
 // Everything here is presentation of server-computed numbers: the page never
-// derives a score, a rank or a tier. The frozen preset weights below mirror
-// openai_eval_ranking.go so the "what this policy weighs" copy on screen
-// matches the scorer the backend actually runs.
+// derives a score, a rank or a tier. The preset weight sets below mirror
+// openAIEvalRankingWeights so the copy on screen matches the scorer the
+// backend actually runs — and, since the presets publish a price-only set,
+// so that the page never presents it as the whole comparison.
 // ---------------------------------------------------------------------------
 
 /**
- * The preset weight sets the backend applies, as published in the frozen
- * contract. `load` is the concurrency load measured at evaluation time; live
- * concurrency and RPM admission are still checked separately per request.
+ * The weights the backend publishes for the presets
+ * (openAIEvalRankingWeights). They only produce the price score shown on the
+ * board; the order itself compares the threshold tier, then (avoid
+ * degradation) the pass rate, then price — see POLICY_ORDER. Error rate and
+ * first-token latency act through the runtime thresholds, never as weights.
  */
-export const PRESET_WEIGHTS: Record<Exclude<OpenAIEvalSchedulingPolicy, '' | 'custom_balance'>, OpenAIEvalRankingWeights> = {
-  cost_first: { price: 0.6, error_rate: 0.2, ttft: 0.1, load: 0.1, quality: 0 },
-  stability_first: { price: 0.1, error_rate: 0.5, ttft: 0.3, load: 0.1, quality: 0 },
-  avoid_degradation: { price: 0.4, error_rate: 0.35, ttft: 0.15, load: 0.1, quality: 0 }
+export const PRESET_WEIGHTS: Record<PresetPolicy, OpenAIEvalRankingWeights> = {
+  cost_first: { price: 1, error_rate: 0, ttft: 0, load: 0, quality: 0 },
+  stability_first: { price: 1, error_rate: 0, ttft: 0, load: 0, quality: 0 },
+  avoid_degradation: { price: 1, error_rate: 0, ttft: 0, load: 0, quality: 0 }
 }
 
+/**
+ * Every weight set the backend publishes for a non-custom policy: the
+ * price-only set above for the presets, plus the all-zero set it returns for
+ * the system default, which ranks with the system scheduling weights instead
+ * of a published score. Used to keep the page from drawing a stale percentage.
+ */
+export const PUBLISHED_PRESET_WEIGHTS: OpenAIEvalRankingWeights[] = [
+  ...Object.values(PRESET_WEIGHTS),
+  { price: 0, error_rate: 0, ttft: 0, load: 0, quality: 0 }
+]
+
 /** Factors in the order the ranking contract lists them. */
-export const RANKING_FACTORS: (keyof OpenAIEvalRankingWeights)[] = ['price', 'error_rate', 'ttft', 'load', 'quality']
+export const RANKING_FACTORS: OpenAIEvalRankingFactorKey[] = ['price', 'error_rate', 'ttft', 'load', 'quality']
 
 /** The weights a policy ranks with. Custom Balance reads the saved config. */
 export function weightsForPolicy(policy: OpenAIEvalSchedulingPolicy, custom?: OpenAIEvalPolicyWeights | null): OpenAIEvalRankingWeights | null {
@@ -735,9 +977,8 @@ export function weightsForPolicy(policy: OpenAIEvalSchedulingPolicy, custom?: Op
 }
 
 /**
- * Avoid degradation ignores the weighted quality term by design — it filters
- * on the pass-rate tier before the weighted score is ever compared — so its
- * quality weight is 0 and the copy must say the tier decides, not a weight.
+ * Avoid degradation compares the pass rate as its own step before price, so
+ * its quality weight is 0 and the copy must say the tier decides, not a weight.
  */
 export function policyQualityEmphasis(policy: OpenAIEvalSchedulingPolicy): 'tier' | 'weighted' | 'ignored' {
   if (policy === 'avoid_degradation') return 'tier'
@@ -856,6 +1097,27 @@ export function orderingKey(ordering: string | undefined): string {
 }
 
 /**
+ * The board's order explanation. The server still labels cost first and
+ * stability first 'score_desc', but they sort by price after the threshold
+ * tier, so the policy decides the text before the ordering field does.
+ * Custom balance with absolute priorities is also labelled 'score_desc',
+ * although the priorities decide before the score does.
+ */
+export function boardOrderingKey(ordering: string | undefined, policy: string | null | undefined, weights?: Pick<OpenAIEvalPolicyWeights, 'absolute_priorities'> | null): string {
+  if (policy === 'cost_first' || policy === 'stability_first') return 'price_asc'
+  if (policy === 'custom_balance' && absolutePriorities(weights).length) return 'priorities_then_score'
+  return orderingKey(ordering)
+}
+
+export const THRESHOLD_REASONS = ['error_rate_threshold', 'ttft_threshold'] as const
+export type ThresholdReason = typeof THRESHOLD_REASONS[number]
+
+/** Known reason codes for an i18n key; anything else is shown with its raw code. */
+export function thresholdReasonKey(code: string): ThresholdReason | 'other' {
+  return (THRESHOLD_REASONS as readonly string[]).includes(code) ? code as ThresholdReason : 'other'
+}
+
+/**
  * Quality states that mean "not assessable". They are never rendered as a
  * pass rate: missing integrity evidence is unknown, never healthy.
  */
@@ -962,7 +1224,7 @@ export function sourceKind(source: string | null | undefined): FactorSourceKind 
 export function factorSourceKind(
   factor: OpenAIEvalRankingFactorKey,
   factors: OpenAIEvalRankingFactors,
-  contributions?: Pick<OpenAIEvalRankingWeights, 'quality'> | null
+  contributions?: Pick<OpenAIEvalRankingFactorWeights, 'quality'> | null
 ): FactorSourceKind {
   if (factor === 'quality') {
     if (isQualityAssessed(factors.quality.state) && factors.quality.ratio != null) return 'measured'
@@ -986,7 +1248,7 @@ export function accountFactorSourceKind(
   factor: OpenAIEvalRankingFactorKey,
   factors: OpenAIEvalRankingFactors,
   models: Pick<OpenAIEvalOverviewModel, 'factors'>[],
-  contributions?: Pick<OpenAIEvalRankingWeights, 'quality'> | null
+  contributions?: Pick<OpenAIEvalRankingFactorWeights, 'quality'> | null
 ): FactorSourceKind {
   const own = factorSourceKind(factor, factors, contributions)
   if (factor !== 'error_rate' && factor !== 'ttft') return own
@@ -1131,7 +1393,7 @@ export function dispatchQuality(candidate: SchedulerDecisionCandidate): Dispatch
  * scores unknown evidence at the neutral midpoint, which is a scoring rule,
  * not a measured 50 % pass rate.
  */
-export function neutralQualityContribution(contributions: Pick<OpenAIEvalRankingWeights, 'quality'> | null | undefined, assessed: boolean): number | null {
+export function neutralQualityContribution(contributions: Pick<OpenAIEvalRankingFactorWeights, 'quality'> | null | undefined, assessed: boolean): number | null {
   if (assessed) return null
   const value = contributions?.quality
   return value != null && value > 0 ? value : null

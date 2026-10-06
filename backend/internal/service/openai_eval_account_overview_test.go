@@ -256,6 +256,7 @@ func TestOpenAIAccountOverviewQualityTestEffortModelWeighting(t *testing.T) {
 			switch invalid {
 			case "error":
 				run.Status = "error"
+				run.Error = "insufficient_valid_samples"
 			case "expired":
 				run.FinishedAt = now.Add(-24 * time.Hour)
 			case "future":
@@ -271,6 +272,9 @@ func TestOpenAIAccountOverviewQualityTestEffortModelWeighting(t *testing.T) {
 			q := qualityFromLatestRuns(&repo.config, 1, "gpt-6.1-sol", "high", latest, now)
 			require.False(t, q.Known)
 			require.Nil(t, q.Ratio)
+			if invalid == "error" {
+				require.Equal(t, "insufficient_valid_samples", q.EvidenceErrorCode)
+			}
 		})
 	}
 }

@@ -33,7 +33,7 @@ func openAIEvalQualityRunSourceSupported(source string) bool {
 // Failed request attempts remain diagnostics. A final attribution based on
 // valid outputs is still a quality verdict, even if other requests failed.
 func openAIEvalQualityCountsFromRun(run *OpenAIEvalRun) OpenAIEvalQualityCounts {
-	if run == nil {
+	if run == nil || run.DiagnosticOnly {
 		return OpenAIEvalQualityCounts{}
 	}
 	copy := *run

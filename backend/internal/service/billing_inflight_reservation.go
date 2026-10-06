@@ -336,6 +336,9 @@ type inflightEstimateDeps struct {
 	// 仅在首选/渠道候选均无法定价（或 composite 分组）时才调用；实现只读调度器快照，
 	// 不在请求路径上直接查库，也不按模型名缓存（内存不随请求模型名增长）。
 	accountMappedModels func(ctx context.Context, apiKey *APIKey, model string) []string
+	// maxAccountRate is used only by account-billing groups to reserve against
+	// the most expensive currently eligible account before routing chooses one.
+	maxAccountRate func(ctx context.Context, apiKey *APIKey, model string) float64
 }
 
 // inflightSnapshotLister 调度器快照读取（与账号选择同源：Redis 快照，未命中时由快照服务自身回源并回填）。
@@ -361,6 +364,32 @@ func inflightAccountMappedModelsFromSnapshot(list inflightSnapshotLister, resolv
 			return nil
 		}
 		return accountMappedModelsFrom(accounts, model)
+	}
+}
+
+func inflightMaxAccountRateFromSnapshot(list inflightSnapshotLister, resolvePlatform func(ctx context.Context, apiKey *APIKey, model string) (string, bool, bool)) func(context.Context, *APIKey, string) float64 {
+	if list == nil || resolvePlatform == nil {
+		return nil
+	}
+	return func(ctx context.Context, apiKey *APIKey, model string) float64 {
+		if apiKey == nil {
+			return -1
+		}
+		platform, forced, ok := resolvePlatform(ctx, apiKey, model)
+		if !ok || platform == "" {
+			return -1
+		}
+		accounts, err := list(ctx, apiKey.GroupID, platform, forced)
+		if err != nil || len(accounts) == 0 {
+			return -1
+		}
+		maxRate := 0.0
+		for _, account := range accounts {
+			if rate := account.BillingRateMultiplier(); rate > maxRate {
+				maxRate = rate
+			}
+		}
+		return maxRate
 	}
 }
 
@@ -426,7 +455,7 @@ func inflightBillingModelCandidates(ctx context.Context, deps inflightEstimateDe
 	return primary, fallbacks, upstreamInput
 }
 
-func (d inflightEstimateDeps) rates(ctx context.Context, apiKey *APIKey) (text, image float64) {
+func (d inflightEstimateDeps) rates(ctx context.Context, apiKey *APIKey, model string) (text, image float64) {
 	rate := 1.0
 	if d.cfg != nil && d.cfg.Default.RateMultiplier > 0 {
 		rate = d.cfg.Default.RateMultiplier
@@ -435,6 +464,11 @@ func (d inflightEstimateDeps) rates(ctx context.Context, apiKey *APIKey) (text, 
 		rate = apiKey.Group.RateMultiplier
 		if d.userGroupRate != nil && apiKey.User != nil {
 			rate = d.userGroupRate(ctx, apiKey.User.ID, *apiKey.GroupID, rate)
+		}
+		if apiKey.Group.UsesAccountBillingRate() && d.maxAccountRate != nil {
+			if maxRate := d.maxAccountRate(ctx, apiKey, model); maxRate >= 0 {
+				rate = maxRate
+			}
 		}
 	}
 	return computePeakAwareMultipliers(apiKey, rate, timezone.Now())
@@ -581,7 +615,7 @@ func (d inflightEstimateDeps) estimate(ctx context.Context, apiKey *APIKey, req 
 		// 非计量请求（媒体状态查询、custom-voices 等）：无需预留，也不算「无法定价」。
 		return 0, true
 	}
-	textRate, imageRate := d.rates(ctx, apiKey)
+	textRate, imageRate := d.rates(ctx, apiKey, req.Model)
 	if textRate <= 0 && imageRate <= 0 {
 		// 免费分组：不计费，也无需预留。
 		return 0, true
@@ -667,6 +701,16 @@ func (s *GatewayService) inflightEstimateDeps() inflightEstimateDeps {
 				return platform, forced, err == nil
 			},
 		)
+		d.maxAccountRate = inflightMaxAccountRateFromSnapshot(
+			func(ctx context.Context, groupID *int64, platform string, forced bool) ([]Account, error) {
+				accounts, _, err := snap.ListSchedulableAccounts(ctx, groupID, platform, forced)
+				return accounts, err
+			},
+			func(ctx context.Context, apiKey *APIKey, _ string) (string, bool, bool) {
+				platform, forced, err := s.resolvePlatform(ctx, apiKey.GroupID, apiKey.Group, "")
+				return platform, forced, err == nil
+			},
+		)
 	}
 	return d
 }
@@ -696,6 +740,19 @@ func (s *OpenAIGatewayService) inflightEstimateDeps() inflightEstimateDeps {
 			func(ctx context.Context, apiKey *APIKey, model string) (string, bool, bool) {
 				platform := PlatformOpenAI
 				if apiKey.Group != nil && apiKey.Group.Platform != "" && apiKey.Group.Platform != PlatformComposite {
+					platform = apiKey.Group.Platform
+				}
+				return NormalizeOpenAICompatiblePlatform(platform), false, true
+			},
+		)
+		d.maxAccountRate = inflightMaxAccountRateFromSnapshot(
+			func(ctx context.Context, groupID *int64, platform string, forced bool) ([]Account, error) {
+				accounts, _, err := snap.ListSchedulableAccounts(ctx, groupID, platform, forced)
+				return accounts, err
+			},
+			func(ctx context.Context, apiKey *APIKey, _ string) (string, bool, bool) {
+				platform := PlatformOpenAI
+				if apiKey != nil && apiKey.Group != nil && apiKey.Group.Platform != "" && apiKey.Group.Platform != PlatformComposite {
 					platform = apiKey.Group.Platform
 				}
 				return NormalizeOpenAICompatiblePlatform(platform), false, true

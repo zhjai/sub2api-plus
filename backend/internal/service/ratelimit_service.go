@@ -2144,6 +2144,9 @@ func (s *RateLimitService) RecoverAccountState(ctx context.Context, accountID in
 	}
 
 	result := &SuccessfulTestRecoveryResult{}
+	if automatic, _ := ctx.Value(openAIEvalAutomaticKey{}).(bool); automatic && (account == nil || !account.Schedulable) {
+		return result, nil
+	}
 	if account.Status == StatusError {
 		if err := s.accountRepo.ClearError(ctx, accountID); err != nil {
 			return nil, err

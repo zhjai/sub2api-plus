@@ -35,7 +35,8 @@
         {{ t('admin.modelIntegrity.tests.detail.fingerprintMetric', { jsd: formatMetric(run.outcome.fingerprint.mean_jsd), p: formatMetric(run.outcome.fingerprint.p_value) }) }}
       </p>
       <p v-if="run.outcome.state_probe" class="text-xs text-gray-600 dark:text-gray-300">
-        {{ t('admin.modelIntegrity.tests.detail.stateProbeMetric', { mint: run.outcome.state_probe.mint_status ?? '—', cont: run.outcome.state_probe.continue_status ?? '—', ticket: probeTicket }) }}
+        <!-- With retries the status codes belong to the last chain sent, so the chain count is named with them. -->
+        {{ t(probeChains > 1 ? 'admin.modelIntegrity.tests.detail.stateProbeMetricChains' : 'admin.modelIntegrity.tests.detail.stateProbeMetric', { chains: probeChains, mint: run.outcome.state_probe.mint_status ?? '—', cont: run.outcome.state_probe.continue_status ?? '—', ticket: probeTicket }) }}
       </p>
       <div v-if="run.outcome.modeltrace?.candidates?.length">
         <p class="input-label">{{ t('admin.modelIntegrity.tests.detail.candidates') }}</p>
@@ -67,7 +68,7 @@
                 </span>
                 <span v-else-if="item.answer" class="sample-brief">{{ item.answer }}</span>
                 <span v-else-if="isProbe && item.sample.http_status" class="sample-brief">{{ t('admin.modelIntegrity.tests.samples.http', { status: item.sample.http_status }) }}</span>
-                <!-- The probe's two linked requests never retry; a per-request attempt count would suggest otherwise. -->
+                <!-- A failed chain starts over instead, so each record is a single send and a per-record attempt count would suggest otherwise. -->
                 <span v-if="isProbe && item.sample.attempts === 0" class="sample-attempts" data-testid="sample-not-sent">{{ t('admin.modelIntegrity.tests.samples.stateProbe.notSent') }}</span>
                 <span v-else-if="!isProbe && item.sample.attempts != null" class="sample-attempts">{{ t('admin.modelIntegrity.tests.samples.attempts', { count: item.sample.attempts }) }}</span>
               </summary>
@@ -128,7 +129,7 @@ import { useI18n } from 'vue-i18n'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import type { OpenAIEvalModelCatalog, OpenAIEvalRun } from '@/api/admin/accounts'
 import { candyExpectedAnswer, candyExtractedAnswer, candyFullReply, isAttributionRun, isHistoricalDataVersion, redactSecrets, resultTone, sampleAnswer, sampleLacksDetail, sampleState, type EvalTestType } from '@/views/admin/modelIntegrity/modelIntegrity'
-import { diagnosticSamples, reinterpretationText, runExplanation, runStatusLabel, sampleErrorHeadline, stateProbeRequestName } from '@/views/admin/modelIntegrity/runText'
+import { diagnosticSamples, reinterpretationText, runExplanation, runStatusLabel, sampleErrorHeadline, stateProbeChainCount, stateProbeRequestName } from '@/views/admin/modelIntegrity/runText'
 
 const props = defineProps<{
   run: OpenAIEvalRun | null
@@ -159,6 +160,7 @@ const technical = computed(() => {
 })
 const isProbe = computed(() => props.run?.test_type === 'state_probe')
 const isCandy = computed(() => props.run?.test_type === 'candy')
+const probeChains = computed(() => (props.run && isProbe.value ? stateProbeChainCount(props.run) : 1))
 /** Only a probe that reached a verdict may say whether the route changed; a failed one says nothing. */
 const probeTicket = computed(() => {
   const probe = props.run?.outcome.state_probe
@@ -169,14 +171,15 @@ const probeTicket = computed(() => {
 const samples = computed(() => {
   const run = props.run
   if (!run) return []
+  const probe = run.test_type === 'state_probe'
+  const chains = probe ? stateProbeChainCount(run) : 1
   return diagnosticSamples(run).map((sample, index) => {
     const state = sampleState(sample, run.test_type as EvalTestType)
-    const probe = run.test_type === 'state_probe'
     return {
       index,
       sample,
       state,
-      title: (probe && stateProbeRequestName(t, sample)) || t('admin.modelIntegrity.tests.samples.index', { n: index + 1 }),
+      title: (probe && stateProbeRequestName(t, sample, chains)) || t('admin.modelIntegrity.tests.samples.index', { n: index + 1 }),
       stateLabel: probe && state === 'valid' ? t('admin.modelIntegrity.tests.samples.stateProbe.completed') : t(`admin.modelIntegrity.tests.samples.state.${state}`),
       answer: sampleAnswer(sample),
       extracted: candyExtractedAnswer(sample, expectedAnswer.value),

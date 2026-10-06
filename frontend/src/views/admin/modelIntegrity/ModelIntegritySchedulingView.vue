@@ -40,6 +40,7 @@
               v-model="policyChoice"
               name="default-policy"
               :label="t('admin.modelIntegrity.scheduling.policy.defaultLabel')"
+              :custom-balance="config.custom_balance"
             />
             <div v-if="defaultPolicy === 'custom_balance'" class="custom-balance" data-testid="custom-balance">
               <div class="custom-balance-head">
@@ -181,6 +182,19 @@
                 </li>
               </ul>
             </div>
+
+            <div class="thresholds" data-testid="scheduling-thresholds">
+              <div class="sched-section-head">
+                <h3 class="sched-h3">{{ t('admin.modelIntegrity.scheduling.thresholds.title') }}</h3>
+                <p class="sched-hint">{{ t('admin.modelIntegrity.scheduling.thresholds.hint') }}</p>
+              </div>
+              <SchedulingThresholdsEditor
+                ref="thresholdsEditor"
+                v-model="config.scheduling_thresholds"
+                :legend="t('admin.modelIntegrity.scheduling.thresholds.title')"
+                :in-use="thresholdPoliciesInUse"
+              />
+            </div>
           </section>
 
           <aside class="sched-gates" aria-labelledby="gates-title">
@@ -320,13 +334,35 @@
           </div>
           <div v-else id="records-panel-requests" role="tabpanel" aria-labelledby="records-tab-requests" class="space-y-3" data-testid="records-requests">
             <div class="decisions-head">
-              <p class="sched-hint">{{ t('admin.modelIntegrity.scheduling.decisions.hint', { limit: TRACE_LIMIT }) }}</p>
-              <button type="button" class="btn btn-secondary btn-sm" :disabled="tracesLoading" data-testid="requests-refresh" @click="loadTraces">
-                <Icon name="refresh" size="sm" :class="tracesLoading ? 'motion-safe:animate-spin' : ''" />{{ t('admin.modelIntegrity.common.refresh') }}
-              </button>
+              <p class="sched-hint">{{ t('admin.modelIntegrity.scheduling.decisions.hint', { window: TRACE_RETAINED }) }}</p>
+              <div class="decisions-controls">
+                <!-- The server filters its retained records by the group the request was routed in. -->
+                <select v-model="traceGroupId" class="input decisions-group" :aria-label="t('admin.modelIntegrity.scheduling.decisions.filterGroupLabel')" data-testid="requests-group">
+                  <option :value="null">{{ t('admin.modelIntegrity.scheduling.decisions.filterGroup') }}</option>
+                  <option v-for="group in groups" :key="group.id" :value="group.id">{{ group.name }}</option>
+                  <!-- Keeps a chosen group selectable when the list no longer has it. -->
+                  <option v-if="traceGroupId !== null && !groups.some(group => group.id === traceGroupId)" :value="traceGroupId">{{ groupFilterName(traceGroupId) }}</option>
+                </select>
+                <button type="button" class="btn btn-secondary btn-sm h-9" :disabled="tracesLoading" :aria-busy="tracesLoading ? 'true' : undefined" data-testid="requests-refresh" @click="loadTraces">
+                  <Icon name="refresh" size="sm" :class="tracesLoading ? 'motion-safe:animate-spin' : ''" />{{ t('admin.modelIntegrity.common.refresh') }}
+                </button>
+              </div>
             </div>
-            <p v-if="tracesError" class="evaluate-message evaluate-message-error" role="alert" data-testid="requests-error">{{ tracesError }}</p>
-            <DecisionLedger :traces="traces" :account-name="accountName" :limit="TRACE_LIMIT" />
+            <p v-if="groupsFailed" class="sched-note" data-testid="requests-groups-failed">{{ t('admin.modelIntegrity.scheduling.decisions.groupsUnavailable') }}</p>
+            <p v-if="tracesError" class="evaluate-message evaluate-message-error" role="alert" data-testid="requests-error">
+              {{ tracesError }}
+              <span v-if="traces.length" class="block text-xs" data-testid="requests-kept">{{ t('admin.modelIntegrity.scheduling.records.requestsFailedKept') }}</span>
+            </p>
+            <p v-if="tracesScope" class="sched-note" aria-live="polite" data-testid="requests-scope">{{ tracesScope }}</p>
+            <DecisionLedger
+              :traces="traces"
+              :account-name="accountName"
+              :retained="TRACE_RETAINED"
+              :loading="tracesLoading"
+              :failed="Boolean(tracesError)"
+              :group-filter="traceGroupId === null ? null : groupFilterName(traceGroupId)"
+              @clear-group="traceGroupId = null"
+            />
           </div>
         </section>
       </template>
@@ -382,15 +418,19 @@ import AccountLeaderboard from '@/components/admin/modelIntegrity/AccountLeaderb
 import EvaluationRecords from '@/components/admin/modelIntegrity/EvaluationRecords.vue'
 import BpsAccountDialog from '@/components/admin/modelIntegrity/BpsAccountDialog.vue'
 import PolicyWeightsEditor from '@/components/admin/modelIntegrity/PolicyWeightsEditor.vue'
+import SchedulingThresholdsEditor from '@/components/admin/modelIntegrity/SchedulingThresholdsEditor.vue'
 import { accountsAPI, listSchedulerDecisions, type OpenAIEvalAccountOverview, type OpenAIEvalBPSAccountConfig, type OpenAIEvalRankingSummary, type OpenAIEvalSchedulingPolicy, type OpenAIEvalSchedulingPolicyRule, type SchedulerDecisionTrace } from '@/api/admin/accounts'
 import groupsAPI from '@/api/admin/groups'
 import type { AdminGroup } from '@/types'
 import { useAppStore } from '@/stores/app'
 import { extractApiErrorMessage } from '@/utils/apiError'
-import { CUSTOM_FACTORS, CUSTOM_INTERVAL, DAY, EFFECTIVE_KEYS, HOUR, MAX_INTERVAL_MINUTES, QUALITY_REFRESH_INTERVALS, bpsAccountLane, bpsDisabledKey, bpsModeOf, canResetBPSAccount, customBalanceShares, effectiveTone as effectiveToneOf, isDirectOAuthRoute, isInactiveStatus, isValidCustomBalance, normalizeBPSAccount, normalizeCustomBalance, normalizeQualityRefreshInterval, rankingErrorText, rankingTriggerKey, type BPSLane, type RankingReadOutcome } from './modelIntegrity'
+import { CUSTOM_FACTORS, CUSTOM_INTERVAL, DAY, EFFECTIVE_KEYS, HOUR, MAX_INTERVAL_MINUTES, QUALITY_REFRESH_INTERVALS, THRESHOLD_POLICIES, absolutePriorities, customBalanceIssue, customBalanceIssueKey, invalidThresholdFields,bpsAccountLane, bpsDisabledKey, bpsModeOf, canResetBPSAccount, customBalanceShares, effectiveTone as effectiveToneOf, hasNoPositiveWeight, isDirectOAuthRoute, isInactiveStatus, isValidCustomBalance, normalizeBPSAccount, normalizeCustomBalance, normalizeQualityRefreshInterval, rankingErrorText, rankingTriggerKey, type BPSLane, type RankingReadOutcome } from './modelIntegrity'
 import { useModelIntegrityConfig } from './useModelIntegrityConfig'
 
+/** Records read per request; the server filters its retained window before applying it. */
 const TRACE_LIMIT = 50
+/** Records each instance keeps in memory, across all groups; cleared on restart. */
+const TRACE_RETAINED = 256
 const RULE_POLICIES: OpenAIEvalSchedulingPolicyRule['policy'][] = ['cost_first', 'stability_first', 'avoid_degradation', 'custom_balance']
 const GATES = ['session', 'model', 'status', 'features', 'privacy', 'capacity'] as const
 const RECORD_TABS = ['evaluations', 'requests'] as const
@@ -403,9 +443,17 @@ const { config, catalog, accounts, loading, loaded, saving, conflict, dirty, ran
 const traces = ref<SchedulerDecisionTrace[]>([])
 const tracesLoading = ref(false)
 const tracesError = ref('')
+/** Request-record group filter; null is all groups. */
+const traceGroupId = ref<number | null>(null)
+/** The filter the records on screen were read with; undefined while none are. */
+const tracesGroupId = ref<number | null | undefined>(undefined)
+/** Only the newest read may update the records, whatever order responses arrive in. */
+let traceRequest = 0
 const recordTab = ref<RecordTab>('evaluations')
 // -- Evaluation and ranking ------------------------------------------------
 const groups = ref<AdminGroup[]>([])
+/** The group list could not be read; the request filter then offers all groups only. */
+const groupsFailed = ref(false)
 const evaluating = ref(false)
 const evaluationMessage = ref('')
 const evaluationError = ref(false)
@@ -575,6 +623,12 @@ const usesAvoidDegradation = computed(() => defaultPolicy.value === 'avoid_degra
 const usesQuality = computed(() => usesAvoidDegradation.value ||
   (defaultPolicy.value === 'custom_balance' && Number(config.custom_balance?.quality) > 0) ||
   rules.value.some(rule => rule.policy === 'custom_balance' && Number(rule.custom_balance?.quality) > 0))
+/** Threshold rows the default policy or a model rule currently uses, as edited. */
+const thresholdPoliciesInUse = computed(() => {
+  const used = new Set<string>([defaultPolicy.value, ...rules.value.map(rule => rule.policy)])
+  return THRESHOLD_POLICIES.filter(policy => used.has(policy))
+})
+const thresholdsEditor = ref<InstanceType<typeof SchedulingThresholdsEditor> | null>(null)
 
 // 调度评估间隔: how often the pass-rate snapshot is rebuilt, not how often tests run.
 const refreshCustom = ref(false)
@@ -632,9 +686,16 @@ function setRulePolicy(rule: OpenAIEvalSchedulingPolicyRule, policy: OpenAIEvalS
 }
 
 function weightSummary(rule: OpenAIEvalSchedulingPolicyRule) {
-  if (!isValidCustomBalance(rule.custom_balance)) return t('admin.modelIntegrity.scheduling.policy.custom.zeroTotal')
+  const issue = customBalanceIssue(rule.custom_balance)
+  if (issue) return t(customBalanceIssueKey(issue))
   const shares = customBalanceShares(rule.custom_balance)
-  return CUSTOM_FACTORS.map(factor => `${t(`admin.modelIntegrity.scheduling.policy.custom.${factor}`)} ${shares[factor]}%`).join(t('admin.modelIntegrity.scheduling.rules.weightsSeparator'))
+  const weights = CUSTOM_FACTORS.map(factor => `${t(`admin.modelIntegrity.scheduling.policy.custom.${factor}`)} ${shares[factor]}%`).join(t('admin.modelIntegrity.scheduling.rules.weightsSeparator'))
+  const priorities = absolutePriorities(rule.custom_balance)
+  if (!priorities.length) return weights
+  const list = priorities.map(factor => t(`admin.modelIntegrity.scheduling.policy.custom.${factor}`)).join(t('admin.modelIntegrity.scheduling.policy.custom.priorities.summaryJoin'))
+  // Every weight at 0% has no score to list; account order breaks the ties.
+  if (hasNoPositiveWeight(rule.custom_balance)) return t('admin.modelIntegrity.scheduling.policy.custom.priorities.summaryAccountOrder', { list })
+  return t('admin.modelIntegrity.scheduling.policy.custom.priorities.summary', { list, weights })
 }
 
 const duplicateRuleIndexes = computed(() => {
@@ -741,17 +802,45 @@ async function confirmReset() {
 }
 
 async function loadTraces() {
+  const groupId = traceGroupId.value
+  const request = ++traceRequest
+  // Records read with another filter never stand in for this one, not even while it loads.
+  if (tracesGroupId.value !== groupId) {
+    traces.value = []
+    tracesGroupId.value = undefined
+  }
   tracesLoading.value = true
   tracesError.value = ''
   try {
-    traces.value = (await listSchedulerDecisions(TRACE_LIMIT)).items ?? []
+    const page = await listSchedulerDecisions(TRACE_LIMIT, groupId)
+    if (request !== traceRequest) return
+    traces.value = page.items ?? []
+    tracesGroupId.value = groupId
   } catch (error) {
-    // The records already on screen stay; the failure is stated next to them.
+    if (request !== traceRequest) return
+    // Records already read with this filter stay; the failure is stated next to them.
     tracesError.value = t('admin.modelIntegrity.scheduling.records.requestsFailed', { reason: extractApiErrorMessage(error, t('admin.modelIntegrity.common.loadFailed')) })
   } finally {
-    tracesLoading.value = false
+    if (request === traceRequest) tracesLoading.value = false
   }
 }
+
+watch(traceGroupId, loadTraces)
+
+/** The filter's label; the filter itself is by ID, so today's name is right here. */
+function groupFilterName(id: number) {
+  return groups.value.find(group => group.id === id)?.name || t('admin.modelIntegrity.scheduling.decisions.groupId', { id })
+}
+
+/** What the list covers: the retained window, the group, and the per-read cap. */
+const tracesScope = computed(() => {
+  if (!traces.value.length || tracesGroupId.value === undefined) return ''
+  const count = traces.value.length
+  const scope = tracesGroupId.value === null
+    ? t('admin.modelIntegrity.scheduling.decisions.scopeAll', { window: TRACE_RETAINED, count })
+    : t('admin.modelIntegrity.scheduling.decisions.scopeGroup', { window: TRACE_RETAINED, count, group: groupFilterName(tracesGroupId.value) })
+  return count >= TRACE_LIMIT ? `${scope}${t('admin.modelIntegrity.scheduling.decisions.scopeCapped', { limit: TRACE_LIMIT })}` : scope
+})
 
 async function handleSave() {
   if (duplicateRuleIndexes.value.size || rules.value.some(rule => !rule.requested_model)) {
@@ -762,11 +851,18 @@ async function handleSave() {
   for (const rule of rules.value) {
     if (rule.policy === 'custom_balance' && !rule.custom_balance) rule.custom_balance = normalizeCustomBalance(config.custom_balance)
   }
-  // An all-zero set would be silently replaced by the defaults on save, so stop and show where it is.
+  // A rejected set would fail the whole save or be replaced by the defaults, so stop and show where it is.
   const invalidRules = rules.value.filter(rule => rule.policy === 'custom_balance' && !isValidCustomBalance(rule.custom_balance))
-  if ((defaultPolicy.value === 'custom_balance' && !isValidCustomBalance(config.custom_balance)) || invalidRules.length) {
+  const defaultIssue = defaultPolicy.value === 'custom_balance' ? customBalanceIssue(config.custom_balance) : null
+  if (defaultIssue || invalidRules.length) {
     for (const rule of invalidRules) if (!isEditingWeights(rule)) editingWeights.value.push(rule)
-    appStore.showError(t('admin.modelIntegrity.scheduling.policy.custom.zeroTotal'))
+    appStore.showError(t(customBalanceIssueKey(defaultIssue ?? customBalanceIssue(invalidRules[0].custom_balance) ?? 'zero_total')))
+    return
+  }
+  // The server would reject the whole save; stop here so nothing else is lost or reset.
+  if (invalidThresholdFields(config.scheduling_thresholds).length) {
+    appStore.showError(t('admin.modelIntegrity.scheduling.thresholds.invalid'))
+    thresholdsEditor.value?.focusFirstInvalid()
     return
   }
   try {
@@ -815,16 +911,18 @@ async function initialLoad() {
     return
   }
   // The ranking board reads its first page itself when it mounts.
-  await loadGroups()
-  await loadTraces()
+  // Records do not depend on the group list, so neither waits for the other.
+  await Promise.all([loadGroups(), loadTraces()])
 }
 
 /** Group names for the ranking filter; a failure here leaves the filter empty. */
 async function loadGroups() {
   try {
     groups.value = await groupsAPI.getAll('openai')
+    groupsFailed.value = false
   } catch {
     groups.value = []
+    groupsFailed.value = true
   }
 }
 
@@ -868,6 +966,7 @@ onMounted(initialLoad)
 .bps-head { @apply flex flex-wrap items-start justify-between gap-4; }
 .sched-warn { @apply max-w-[80ch] rounded-md bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-900 dark:bg-amber-950/30 dark:text-amber-200; }
 .refresh { @apply space-y-3 border-t border-gray-100 pt-5 dark:border-dark-700; }
+.thresholds { @apply space-y-3 border-t border-gray-100 pt-5 dark:border-dark-700; }
 .refresh-row { @apply flex flex-wrap items-end gap-3; }
 /* The page's single evaluate action, pushed to the right end of the interval row. */
 .refresh-run { @apply ml-auto h-9; }
@@ -899,6 +998,8 @@ onMounted(initialLoad)
 .lane-inactive { @apply text-gray-500 dark:text-gray-400; }
 .lane-inactive::before { @apply bg-gray-300 dark:bg-dark-500; }
 .decisions-head { @apply flex flex-wrap items-center justify-between gap-3; }
+.decisions-controls { @apply flex w-full flex-wrap items-center gap-2 sm:w-auto; }
+.decisions-group { @apply h-9 min-w-0 flex-1 py-1 text-sm sm:w-auto sm:min-w-[11rem] sm:flex-none; }
 .effects { @apply space-y-2 rounded-lg border border-gray-200 px-4 py-3 dark:border-dark-700; }
 .effects-switch { @apply flex cursor-pointer items-start gap-3 text-sm; }
 .effects-switch-label { @apply block font-medium text-gray-900 dark:text-white; }

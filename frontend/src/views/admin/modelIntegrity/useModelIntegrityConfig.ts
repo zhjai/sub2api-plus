@@ -11,7 +11,7 @@ import {
   type RankingError
 } from '@/api/admin/accounts'
 import type { AccountListItem } from '@/types'
-import { DEFAULT_CUSTOM_BALANCE, DEFAULT_MAX_REQUEST_ATTEMPTS, DEFAULT_QUALITY_REFRESH_SECONDS, normalizeBPSAccount, normalizeCustomBalance, normalizeMaxRequestAttempts, normalizeQualityRefreshInterval, normalizeRoute, toSavePayload } from './modelIntegrity'
+import { DEFAULT_CUSTOM_BALANCE, DEFAULT_MAX_REQUEST_ATTEMPTS, DEFAULT_QUALITY_REFRESH_SECONDS, normalizeBPSAccount, normalizeCustomBalance, normalizeMaxRequestAttempts, normalizeQualityRefreshInterval, normalizeRoute, normalizeSchedulingThresholds, toSavePayload } from './modelIntegrity'
 
 /**
  * 'saved_evaluation_failed' is a real, distinct outcome: the server accepted
@@ -48,7 +48,7 @@ function isConflict(error: unknown): boolean {
  * overwriting what the other page changed.
  */
 export function useModelIntegrityConfig() {
-  const config = reactive<OpenAIEvalConfig>({ effects_enabled: false, bps_auto_enabled: false, scheduling_policy: '', custom_balance: { ...DEFAULT_CUSTOM_BALANCE }, policies: [], bps_accounts: [], max_request_attempts: DEFAULT_MAX_REQUEST_ATTEMPTS, quality_refresh_interval_seconds: DEFAULT_QUALITY_REFRESH_SECONDS, accounts: [] })
+  const config = reactive<OpenAIEvalConfig>({ effects_enabled: false, bps_auto_enabled: false, scheduling_policy: '', custom_balance: { ...DEFAULT_CUSTOM_BALANCE }, scheduling_thresholds: normalizeSchedulingThresholds(), policies: [], bps_accounts: [], max_request_attempts: DEFAULT_MAX_REQUEST_ATTEMPTS, quality_refresh_interval_seconds: DEFAULT_QUALITY_REFRESH_SECONDS, accounts: [] })
   const catalog = ref<OpenAIEvalModelCatalog | null>(null)
   const accounts = ref<AccountListItem[]>([])
   const loading = ref(true)
@@ -112,6 +112,8 @@ export function useModelIntegrityConfig() {
     config.bps_auto_enabled = Boolean(saved.bps_auto_enabled)
     config.scheduling_policy = saved.scheduling_policy ?? ''
     config.custom_balance = normalizeCustomBalance(saved.custom_balance)
+    // A legacy response without the field reads as the defaults; a configured one is kept as sent.
+    config.scheduling_thresholds = normalizeSchedulingThresholds(saved.scheduling_thresholds)
     config.policies = (saved.policies ?? []).map(rule => ({
       ...rule,
       reasoning_effort: rule.reasoning_effort || '',

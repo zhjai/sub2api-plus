@@ -220,7 +220,7 @@ func TestOpenAIRankingScorerFiveFactorsQualityAndTies(t *testing.T) {
 	f := emptyOpenAIEvalRankingFactors()
 	f.ErrorRate = OpenAIEvalRankingErrorRate{OpenAIEvalFactorMeta: rankingKnown(.8, now), Value: rankingPtr(.2), SampleCount: 5}
 	f.Load = OpenAIEvalRankingLoad{OpenAIEvalFactorMeta: rankingKnown(.25, now)}
-	rows := scoreOpenAIEvalRanking(OpenAIEvalSchedulingPolicyCostFirst, OpenAIEvalRankingWeights{.6, .2, .1, .1, 0}, []openAIEvalRankingInput{{account: account, factors: f, compatible: true}}, now, nil)
+	rows := scoreOpenAIEvalRanking(OpenAIEvalSchedulingPolicyCostFirst, OpenAIEvalRankingWeights{Price: .6, ErrorRate: .2, TTFT: .1, Load: .1}, []openAIEvalRankingInput{{account: account, factors: f, compatible: true}}, now, nil)
 	require.InDelta(t, 30+16+9+2.5, *rows[0].PriorityScore, 1e-9)
 	require.True(t, rows[0].Factors.Price.Known)
 	require.Equal(t, .5, rows[0].Factors.Price.Score)
@@ -235,15 +235,52 @@ func TestOpenAIRankingScorerFiveFactorsQualityAndTies(t *testing.T) {
 		}
 		inputs = append(inputs, openAIEvalRankingInput{account: &a, factors: f, compatible: true})
 	}
-	rows = scoreOpenAIEvalRanking(OpenAIEvalSchedulingPolicyAvoidDegradation, OpenAIEvalRankingWeights{.4, .35, .15, .1, 0}, inputs, now, nil)
+	rows = scoreOpenAIEvalRanking(OpenAIEvalSchedulingPolicyAvoidDegradation, OpenAIEvalRankingWeights{Price: .4, ErrorRate: .35, TTFT: .15, Load: .1}, inputs, now, nil)
 	require.Equal(t, []int64{4, 3, 2, 1}, []int64{rows[0].AccountID, rows[1].AccountID, rows[2].AccountID, rows[3].AccountID})
-	rows = scoreOpenAIEvalRanking(OpenAIEvalSchedulingPolicyStabilityFirst, OpenAIEvalRankingWeights{.1, .5, .3, .1, 0}, inputs, now, nil)
+	rows = scoreOpenAIEvalRanking(OpenAIEvalSchedulingPolicyStabilityFirst, OpenAIEvalRankingWeights{Price: .1, ErrorRate: .5, TTFT: .3, Load: .1}, inputs, now, nil)
 	for i, row := range rows {
 		require.Equal(t, int64(i+1), row.AccountID)
 		require.Equal(t, 86.0, *row.PriorityScore)
 	}
 	_, weights := openAIEvalRankingWeights(&OpenAIEvalConfig{SchedulingPolicy: OpenAIEvalSchedulingPolicyCustomBalance, CustomBalance: OpenAIEvalPolicyWeights{Stability: 1}}, "gpt-6.1-sol", "")
 	require.Equal(t, OpenAIEvalRankingWeights{ErrorRate: .6, TTFT: .4}, weights)
+}
+
+func TestOpenAIRankingCustomAbsolutePrioritiesOverrideWeights(t *testing.T) {
+	now := time.Now()
+	cheap := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, RateMultiplier: rankingPtr(1.0)}
+	stable := &Account{ID: 2, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, RateMultiplier: rankingPtr(2.0)}
+	cheapFactors := emptyOpenAIEvalRankingFactors()
+	cheapFactors.ErrorRate = OpenAIEvalRankingErrorRate{OpenAIEvalFactorMeta: rankingKnown(.1, now), Value: rankingPtr(.9), SampleCount: 20}
+	stableFactors := emptyOpenAIEvalRankingFactors()
+	stableFactors.ErrorRate = OpenAIEvalRankingErrorRate{OpenAIEvalFactorMeta: rankingKnown(.9, now), Value: rankingPtr(.1), SampleCount: 20}
+	weights := OpenAIEvalRankingWeights{Price: .05, ErrorRate: .95, AbsolutePriorities: []string{"cost", "error_rate"}}
+	rows := scoreOpenAIEvalRanking(OpenAIEvalSchedulingPolicyCustomBalance, weights, []openAIEvalRankingInput{
+		{account: cheap, factors: cheapFactors, compatible: true},
+		{account: stable, factors: stableFactors, compatible: true},
+	}, now, nil)
+	require.Equal(t, int64(1), rows[0].AccountID, "cost absolute priority must beat ordinary error-rate weight")
+
+	weights.AbsolutePriorities = []string{"error_rate", "cost"}
+	rows = scoreOpenAIEvalRanking(OpenAIEvalSchedulingPolicyCustomBalance, weights, []openAIEvalRankingInput{
+		{account: cheap, factors: cheapFactors, compatible: true},
+		{account: stable, factors: stableFactors, compatible: true},
+	}, now, nil)
+	require.Equal(t, int64(2), rows[0].AccountID, "error rate absolute priority must become the first comparison")
+}
+
+func TestOpenAIRankingCustomAbsolutePriorityUnknownFallsThrough(t *testing.T) {
+	now := time.Now()
+	known := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, RateMultiplier: rankingPtr(1.0)}
+	unknown := &Account{ID: 2, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, RateMultiplier: rankingPtr(2.0)}
+	fKnown := emptyOpenAIEvalRankingFactors()
+	fKnown.ErrorRate = OpenAIEvalRankingErrorRate{OpenAIEvalFactorMeta: rankingKnown(.8, now), Value: rankingPtr(.2), SampleCount: 20}
+	fUnknown := emptyOpenAIEvalRankingFactors()
+	rows := scoreOpenAIEvalRanking(OpenAIEvalSchedulingPolicyCustomBalance, OpenAIEvalRankingWeights{Price: 1, AbsolutePriorities: []string{"error_rate"}}, []openAIEvalRankingInput{
+		{account: known, factors: fKnown, compatible: true},
+		{account: unknown, factors: fUnknown, compatible: true},
+	}, now, nil)
+	require.Equal(t, int64(1), rows[0].AccountID, "known absolute factor must beat unknown")
 }
 
 func TestOpenAIRankingLatestOffPeriodUnknownAndExactEffort(t *testing.T) {
@@ -257,6 +294,11 @@ func TestOpenAIRankingLatestOffPeriodUnknownAndExactEffort(t *testing.T) {
 	_, err := s.EvaluateScheduling(context.Background(), 1)
 	require.NoError(t, err)
 	require.Equal(t, 1.0, *rankingDimension(t, s, 7, "gpt-6.1-sol", "").Accounts[0].Factors.Quality.Ratio)
+	assessment, known := openAIEvalQualitySnapshots.lookup(1, "gpt-6.1-sol", "", time.Now())
+	require.True(t, known, "ranking publication must preserve readable evidence with routing effects disabled")
+	require.Equal(t, 1.0, assessment.Ratio())
+	require.False(t, OpenAIEvalEffectsEnabled())
+	require.Equal(t, OpenAIEvalSchedulingPolicyLegacy, OpenAIEvalSchedulingPolicyForRequest("gpt-6.1-sol", ""))
 	for _, status := range []string{"error", "insufficient", "cancelled"} {
 		run := repo.runs[0]
 		run.ID = 2
@@ -279,7 +321,7 @@ func TestOpenAIRankingLatestOffPeriodUnknownAndExactEffort(t *testing.T) {
 	_, err = s.EvaluateScheduling(context.Background(), 1)
 	require.NoError(t, err)
 	require.Nil(t, rankingDimension(t, s, 7, "gpt-6.1-sol", "high").Accounts[0].Factors.Quality.Ratio)
-	require.Zero(t, OpenAIEvalQualityRefreshStatus().RouteCount)
+	require.Equal(t, 1, OpenAIEvalQualityRefreshStatus().RouteCount, "default-effort evidence stays visible without enabling routing")
 }
 
 func TestOpenAIRankingCompleteMembersPaginationAndGeneration(t *testing.T) {

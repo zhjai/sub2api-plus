@@ -237,6 +237,7 @@ type CreateGroupInput struct {
 	Description               string
 	Platform                  string
 	RateMultiplier            float64
+	BillingRateMode           string
 	IsExclusive               bool
 	SubscriptionType          string   // standard/subscription
 	DailyLimitUSD             *float64 // 日限额 (USD)
@@ -317,6 +318,7 @@ type UpdateGroupInput struct {
 	Description               *string
 	Platform                  string
 	RateMultiplier            *float64 // 使用指针以支持设置为0
+	BillingRateMode           *string
 	IsExclusive               *bool
 	Status                    string
 	SubscriptionType          string   // standard/subscription

@@ -159,7 +159,7 @@ type AccountTestService struct {
 	grokWSDialer openAIWSClientDialer
 }
 
-// ResolveOpenAIEvalTarget validates a Responses-evaluation route without
+// ResolveOpenAIEvalTarget validates an OpenAI text-evaluation route without
 // mutating account health or support metadata.
 func (s *AccountTestService) ResolveOpenAIEvalTarget(ctx context.Context, accountID int64, requestedModel string) (*OpenAIEvalTarget, error) {
 	if s == nil || s.accountRepo == nil || s.openaiGatewayService == nil {
@@ -189,10 +189,6 @@ func (s *AccountTestService) ResolveOpenAIEvalTarget(ctx context.Context, accoun
 	if credential.Type != AccountTypeAPIKey && !credential.IsOpenAIOAuthLike() {
 		return nil, fmt.Errorf("unsupported OpenAI evaluation credential type %q", credential.Type)
 	}
-	if credential.Type == AccountTypeAPIKey && !openai_compat.ShouldUseResponsesAPI(credential.Extra) {
-		return nil, errors.New("account is configured for Chat Completions and cannot run Responses evaluation")
-	}
-
 	models, err := s.openaiGatewayService.FetchOpenAIModelsList(ctx, account)
 	if err != nil {
 		return nil, fmt.Errorf("discover account models: %w", err)
@@ -225,9 +221,22 @@ func (s *AccountTestService) ResolveOpenAIEvalTarget(ctx context.Context, accoun
 	}, nil
 }
 
-// RunOpenAIEvalSample performs one bounded Responses request.
+// RunOpenAIEvalSample performs one bounded request using the account's protocol.
 // It deliberately never writes account health, rate-limit, or probe metadata.
 func (s *AccountTestService) RunOpenAIEvalSample(ctx context.Context, target *OpenAIEvalTarget, prompt, reasoningEffort string) (result *OpenAIEvalSampleResponse, resultErr error) {
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		result, resultErr = s.runOpenAIEvalSampleSingleSend(ctx, target, prompt, reasoningEffort)
+		if retry, err := waitOpenAIEvalAdmission(ctx, deadline, resultErr); retry {
+			continue
+		} else if err != nil {
+			return result, err
+		}
+		return result, resultErr
+	}
+}
+
+func (s *AccountTestService) runOpenAIEvalSampleSingleSend(ctx context.Context, target *OpenAIEvalTarget, prompt, reasoningEffort string) (result *OpenAIEvalSampleResponse, resultErr error) {
 	var secrets []string
 	if target != nil {
 		secrets = openAIEvalCredentialSecrets(target.Credential)
@@ -237,6 +246,10 @@ func (s *AccountTestService) RunOpenAIEvalSample(ctx context.Context, target *Op
 			result.Text = sanitizeOpenAIEvalText(result.Text, openAIEvalAnswerLimitFor(ctx), secrets...)
 		}
 		if resultErr != nil {
+			var admission *AccountRPMError
+			if errors.As(resultErr, &admission) {
+				return
+			}
 			var classified *OpenAIEvalRequestError
 			if !errors.As(resultErr, &classified) {
 				classified = &OpenAIEvalRequestError{Code: "request_invalid", Message: resultErr.Error()}
@@ -260,14 +273,19 @@ func (s *AccountTestService) RunOpenAIEvalSample(ctx context.Context, target *Op
 	if s.httpUpstream == nil {
 		return nil, errors.New("HTTP upstream is unavailable")
 	}
-	requestCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-
 	upstreamModel := strings.TrimSpace(target.UpstreamModel)
 	if upstreamModel == "" {
 		return nil, errors.New("OpenAI evaluation upstream model is empty")
 	}
+	release, err := s.acquireOpenAIEvalAccountSlot(ctx, account)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	requestCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
 	isOAuth := credential.IsOpenAIOAuthLike()
+	useChatCompletions := !isOAuth && shouldForwardOpenAIResponsesViaRawChatCompletions(account)
 	accessToken := ""
 	if isOAuth && !credential.IsOpenAIAgentIdentity() {
 		if s.openaiGatewayService == nil {
@@ -298,6 +316,9 @@ func (s *AccountTestService) RunOpenAIEvalSample(ctx context.Context, target *Op
 			return nil, fmt.Errorf("validate OpenAI base URL: %w", err)
 		}
 		apiURL = buildOpenAIResponsesURLForPlatform(credential.Platform, normalized)
+		if useChatCompletions {
+			apiURL = buildOpenAIChatCompletionsURL(normalized)
+		}
 	}
 
 	payload := map[string]any{
@@ -309,11 +330,26 @@ func (s *AccountTestService) RunOpenAIEvalSample(ctx context.Context, target *Op
 		"max_output_tokens": 2048,
 		"truncation":        "disabled",
 	}
+	if useChatCompletions {
+		payload = map[string]any{
+			"model": upstreamModel,
+			"messages": []map[string]string{
+				{"role": "system", "content": "Follow the user's request exactly. Do not use tools."},
+				{"role": "user", "content": prompt},
+			},
+			"stream":                false,
+			"max_completion_tokens": 2048,
+		}
+	}
 	if effort := strings.ToLower(strings.TrimSpace(reasoningEffort)); effort != "" {
 		if !isAllowedOpenAIEvalReasoningEffort(effort) {
 			return nil, fmt.Errorf("unsupported reasoning effort %q", reasoningEffort)
 		}
-		payload["reasoning"] = map[string]string{"effort": effort}
+		if useChatCompletions {
+			payload["reasoning_effort"] = effort
+		} else {
+			payload["reasoning"] = map[string]string{"effort": effort}
+		}
 	}
 	if isOAuth {
 		applyCodexOAuthTransform(payload, true, false)
@@ -347,7 +383,14 @@ func (s *AccountTestService) RunOpenAIEvalSample(ctx context.Context, target *Op
 		enforceCodexIdentityHeadersWithUA(req.Header, credential.GetOpenAIUserAgent())
 	} else {
 		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(credential.GetOpenAIProtocolAPIKey()))
-		applyOpenAICodexProbeHeaders(req.Header)
+		if useChatCompletions {
+			if userAgent := strings.TrimSpace(credential.GetOpenAIUserAgent()); userAgent != "" {
+				req.Header.Set("User-Agent", userAgent)
+			}
+			applyOpenCodeUpstreamUserAgent(credential, apiURL, req.Header)
+		} else {
+			applyOpenAICodexProbeHeaders(req.Header)
+		}
 	}
 	if credential.IsOpenAIAgentIdentity() {
 		authHeaders, authErr := buildAgentIdentityAuthenticationHeaders(requestCtx, s.accountRepo, s.agentIdentityWS, &s.agentIdentityTaskMu, credential)
@@ -381,6 +424,10 @@ func (s *AccountTestService) RunOpenAIEvalSample(ctx context.Context, target *Op
 	}
 	resp, err := s.doOpenAIEvalUpstream(req, proxyURL, account, credential)
 	if err != nil {
+		var admission *AccountRPMError
+		if errors.As(err, &admission) {
+			return nil, err
+		}
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
 		}
@@ -396,12 +443,38 @@ func (s *AccountTestService) RunOpenAIEvalSample(ctx context.Context, target *Op
 	defer func() { _ = resp.Body.Close() }()
 	stopClose := context.AfterFunc(requestCtx, func() { _ = resp.Body.Close() })
 	defer stopClose()
+	if useChatCompletions {
+		return readOpenAIEvalChatCompletionsResponse(requestCtx, resp)
+	}
 	return readOpenAIEvalResponse(requestCtx, resp, isOAuth, true)
 }
 
 func (s *AccountTestService) doOpenAIEvalUpstream(req *http.Request, proxyURL string, account, credential *Account) (*http.Response, error) {
 	req = req.WithContext(WithHTTPUpstreamSingleSend(req.Context()))
+	var cache GatewayCache
+	if s.openaiGatewayService != nil {
+		cache = s.openaiGatewayService.cache
+	}
+	var err error
+	req, err = accountRPMDispatchRequest(req, cache, s.accountRepo, account)
+	if err != nil {
+		return nil, err
+	}
+	policy := req.Context().Value(accountRPMRetryAdmissionKey{}).(accountRPMHTTPPolicy)
+	policy.admit = func(ctx context.Context) error {
+		if err := s.checkOpenAIEvalAutomaticAccount(ctx, account); err != nil {
+			return err
+		}
+		return admitAccountRPM(ctx, cache, s.accountRepo, account)
+	}
+	req = req.WithContext(context.WithValue(req.Context(), accountRPMRetryAdmissionKey{}, policy))
 	if credential.IsOpenAIOAuthLike() && s.pluginManager != nil {
+		if err := s.checkOpenAIEvalAutomaticAccount(req.Context(), account); err != nil {
+			return nil, err
+		}
+		if err := accountRPMPluginDispatchCheck(req.Context(), account); err != nil {
+			return nil, &OpenAIEvalRequestError{Code: "single_send_unsupported", Message: "plugin transport does not support evaluation send admission"}
+		}
 		response, handled, err := s.pluginManager.RoundTripOpenAIOAuth(req.Context(), req, proxyURL, credential)
 		if handled {
 			return response, err
@@ -413,13 +486,15 @@ func (s *AccountTestService) doOpenAIEvalUpstream(req *http.Request, proxyURL st
 		}
 		return nil, &HTTPUpstreamSingleSendUnsupportedError{}
 	}
-	return s.httpUpstream.DoWithTLS(
-		req,
-		proxyURL,
-		account.ID,
-		account.Concurrency,
-		s.tlsFPProfileService.ResolveTLSProfile(account),
-	)
+	if transport, ok := s.httpUpstream.(interface{ HandlesAccountRPMAdmission() bool }); !ok || !transport.HandlesAccountRPMAdmission() {
+		if err := AdmitAccountRPMHTTPRetry(req.Context()); err != nil {
+			if req.Body != nil {
+				_ = req.Body.Close()
+			}
+			return nil, err
+		}
+	}
+	return s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
 }
 
 func isAllowedOpenAIEvalReasoningEffort(effort string) bool {
@@ -643,6 +718,9 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 	if err != nil {
 		return s.sendErrorAndEnd(c, "Account not found")
 	}
+	if err := s.checkOpenAIEvalAutomaticAccount(ctx, account); err != nil {
+		return s.sendErrorAndEnd(c, err.Error())
+	}
 
 	// Synthetic UI load-test accounts exercise the real SSE parsing and modal
 	// interactions, but intentionally do not send their placeholder credentials
@@ -862,7 +940,7 @@ func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account
 		proxyURL = account.Proxy.URL()
 	}
 
-	resp, err := s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+	resp, err := s.doAccountTestUpstreamTLS(req, proxyURL, account, s.tlsFPProfileService.ResolveTLSProfile(account))
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Request failed: %s", err.Error()))
 	}
@@ -934,7 +1012,7 @@ func (s *AccountTestService) testClaudeVertexServiceAccountConnection(c *gin.Con
 		proxyURL = account.Proxy.URL()
 	}
 
-	resp, err := s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+	resp, err := s.doAccountTestUpstreamTLS(req, proxyURL, account, s.tlsFPProfileService.ResolveTLSProfile(account))
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Request failed: %s", err.Error()))
 	}
@@ -1020,7 +1098,7 @@ func (s *AccountTestService) testBedrockAccountConnection(c *gin.Context, ctx co
 		proxyURL = account.Proxy.URL()
 	}
 
-	resp, err := s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, nil)
+	resp, err := s.doAccountTestUpstreamTLS(req, proxyURL, account, nil)
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Request failed: %s", err.Error()))
 	}
@@ -1529,7 +1607,7 @@ func (s *AccountTestService) testGrokResponsesConnection(c *gin.Context, ctx con
 	}
 	s.applyGrokTestRequestHeaders(req, account, authToken, "application/json, text/event-stream")
 
-	resp, err := s.httpUpstream.Do(req, s.grokTestProxyURL(account), account.ID, account.Concurrency)
+	resp, err := s.doAccountTestUpstream(req, s.grokTestProxyURL(account), account, nil)
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Grok Responses API request failed: %s", err.Error()))
 	}
@@ -1617,7 +1695,7 @@ func (s *AccountTestService) testGrokImageGeneration(c *gin.Context, ctx context
 			s.applyGrokTestRequestHeaders(req, account, authToken, "application/json")
 			req.ContentLength = int64(len(payloadBytes))
 		}
-		resp, doErr = s.httpUpstream.Do(req, s.grokTestProxyURL(account), account.ID, account.Concurrency)
+		resp, doErr = s.doAccountTestUpstream(req, s.grokTestProxyURL(account), account, nil)
 		if doErr == nil {
 			break
 		}
@@ -1708,7 +1786,7 @@ func (s *AccountTestService) testGrokVideoGeneration(c *gin.Context, ctx context
 	}
 	s.applyGrokTestRequestHeaders(req, account, authToken, "application/json")
 
-	resp, err := s.httpUpstream.Do(req, s.grokTestProxyURL(account), account.ID, account.Concurrency)
+	resp, err := s.doAccountTestUpstream(req, s.grokTestProxyURL(account), account, nil)
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Grok video request failed: %s", err.Error()))
 	}
@@ -1749,7 +1827,7 @@ func (s *AccountTestService) testGrokVideoGeneration(c *gin.Context, ctx context
 			return s.sendErrorAndEnd(c, "Failed to create Grok video status request")
 		}
 		s.applyGrokTestRequestHeaders(statusReq, account, authToken, "application/json")
-		statusResp, err := s.httpUpstream.Do(statusReq, s.grokTestProxyURL(account), account.ID, account.Concurrency)
+		statusResp, err := s.doAccountTestUpstream(statusReq, s.grokTestProxyURL(account), account, nil)
 		if err != nil {
 			return s.sendErrorAndEnd(c, fmt.Sprintf("Grok video status failed: %s", err.Error()))
 		}
@@ -1806,7 +1884,7 @@ func (s *AccountTestService) emitGrokVideoResult(c *gin.Context, ctx context.Con
 		return s.sendErrorAndEnd(c, "Failed to create Grok video content request")
 	}
 	s.applyGrokTestRequestHeaders(req, account, authToken, "video/*, application/octet-stream, */*")
-	resp, err := s.httpUpstream.Do(req, s.grokTestProxyURL(account), account.ID, account.Concurrency)
+	resp, err := s.doAccountTestUpstream(req, s.grokTestProxyURL(account), account, nil)
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Grok video content download failed: %s", err.Error()))
 	}
@@ -1878,7 +1956,7 @@ User query:
 	}
 	s.applyGrokTestRequestHeaders(req, account, authToken, "application/json")
 
-	resp, err := s.httpUpstream.Do(req, s.grokTestProxyURL(account), account.ID, account.Concurrency)
+	resp, err := s.doAccountTestUpstream(req, s.grokTestProxyURL(account), account, nil)
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("standalone web_search probe failed: %s", err.Error()))
 	}
@@ -1959,7 +2037,7 @@ func (s *AccountTestService) testGrokTTS(c *gin.Context, ctx context.Context, ac
 			return s.sendErrorAndEnd(c, "Failed to create Grok TTS request")
 		}
 		s.applyGrokTestRequestHeaders(req, account, authToken, "audio/*, application/json, */*")
-		resp, err := s.httpUpstream.Do(req, s.grokTestProxyURL(account), account.ID, account.Concurrency)
+		resp, err := s.doAccountTestUpstream(req, s.grokTestProxyURL(account), account, nil)
 		if err != nil {
 			return s.sendErrorAndEnd(c, fmt.Sprintf("Grok TTS failed: %s", err.Error()))
 		}
@@ -2050,7 +2128,7 @@ func (s *AccountTestService) testGrokSTT(c *gin.Context, ctx context.Context, ac
 	}
 	account.ApplyHeaderOverrides(req.Header)
 
-	resp, err := s.httpUpstream.Do(req, s.grokTestProxyURL(account), account.ID, account.Concurrency)
+	resp, err := s.doAccountTestUpstream(req, s.grokTestProxyURL(account), account, nil)
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Grok STT failed: %s", err.Error()))
 	}
@@ -2130,6 +2208,9 @@ func (s *AccountTestService) testGrokRealtime(c *gin.Context, ctx context.Contex
 
 	dialCtx, cancel := context.WithTimeout(ctx, grokRealtimeProbeTimeout)
 	defer cancel()
+	if err := s.checkOpenAIEvalAutomaticAccount(dialCtx, account); err != nil {
+		return s.sendErrorAndEnd(c, err.Error())
+	}
 
 	conn, status, _, dialErr := dialer.Dial(dialCtx, wsURL, headers, s.grokTestProxyURL(account))
 	if dialErr != nil {
@@ -2424,7 +2505,7 @@ func (s *AccountTestService) testOpenAIChatCompletionsConnection(
 		proxyURL = account.Proxy.URL()
 	}
 
-	resp, err := s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+	resp, err := s.doAccountTestUpstreamTLS(req, proxyURL, account, s.tlsFPProfileService.ResolveTLSProfile(account))
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Chat Completions API (/v1/chat/completions) request failed: %s", err.Error()))
 	}
@@ -2706,7 +2787,7 @@ func (s *AccountTestService) testGeminiAccountConnection(c *gin.Context, account
 		proxyURL = account.Proxy.URL()
 	}
 
-	resp, err := s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+	resp, err := s.doAccountTestUpstreamTLS(req, proxyURL, account, s.tlsFPProfileService.ResolveTLSProfile(account))
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Request failed: %s", err.Error()))
 	}
@@ -3334,7 +3415,7 @@ func (s *AccountTestService) testOpenAIImageAPIKey(c *gin.Context, ctx context.C
 		proxyURL = account.Proxy.URL()
 	}
 
-	resp, err := s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+	resp, err := s.doAccountTestUpstreamTLS(req, proxyURL, account, s.tlsFPProfileService.ResolveTLSProfile(account))
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Request failed: %s", err.Error()))
 	}
@@ -3558,7 +3639,20 @@ func (s *AccountTestService) sendErrorAndEnd(c *gin.Context, errorMsg string) er
 // RunTestBackground executes an account test in-memory (no real HTTP client),
 // capturing SSE output via httptest.NewRecorder, then parses the result.
 func (s *AccountTestService) RunTestBackground(ctx context.Context, accountID int64, modelID string) (*ScheduledTestResult, error) {
+	ctx = context.WithValue(ctx, openAIEvalAutomaticKey{}, true)
 	startedAt := time.Now()
+	if err := s.checkOpenAIEvalAutomaticAccount(ctx, &Account{ID: accountID}); err != nil {
+		return &ScheduledTestResult{Status: "failed", ErrorMessage: err.Error(), StartedAt: startedAt, FinishedAt: time.Now()}, nil
+	}
+	account, err := s.accountRepo.GetByID(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	release, err := s.acquireOpenAIEvalAccountSlot(ctx, account)
+	if err != nil {
+		return &ScheduledTestResult{Status: "failed", ErrorMessage: err.Error(), StartedAt: startedAt, FinishedAt: time.Now()}, nil
+	}
+	defer release()
 
 	w := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(w)

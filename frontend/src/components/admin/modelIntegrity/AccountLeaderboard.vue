@@ -20,6 +20,7 @@
     </div>
 
     <p v-if="orderingText" class="lb-note" data-testid="board-ordering">{{ orderingText }}</p>
+    <p v-if="anyThresholdReason" class="lb-note" data-testid="board-threshold-note">{{ t('admin.modelIntegrity.scheduling.board.threshold.evidence') }}</p>
     <p v-if="groupId !== null" class="lb-note" data-testid="board-filter-note">{{ t('admin.modelIntegrity.scheduling.board.filterNote') }}</p>
     <p v-if="notice" class="lb-warn" role="status" data-testid="board-notice">{{ notice }}</p>
     <div v-if="loadError" class="lb-error" role="alert" data-testid="board-error">
@@ -53,6 +54,16 @@
               <p class="lb-account-sub">
                 <span>#{{ row.account_id }}</span>
                 <span v-for="name in groupNames(row)" :key="name" class="lb-group">{{ name }}</span>
+                <!-- Why this account sits behind the rest: its own real requests
+                     exceeded the policy's runtime threshold. Not an exclusion. -->
+                <span
+                  v-for="reason in row.threshold_reasons ?? []"
+                  :key="reason"
+                  class="lb-threshold"
+                  data-testid="board-threshold"
+                  :data-reason="reason"
+                  :title="t('admin.modelIntegrity.scheduling.board.threshold.hint')"
+                >{{ t('admin.modelIntegrity.scheduling.board.threshold.label') }} · {{ thresholdReasonText(reason) }}</span>
                 <span v-if="!row.eligible" class="lb-out" data-testid="board-ineligible">{{ t('admin.modelIntegrity.scheduling.board.ineligible') }}</span>
               </p>
               <p class="lb-account-sub" data-testid="board-coverage">{{ coverageText(row) }}</p>
@@ -103,8 +114,16 @@
             <p v-if="row.quality_cell_count != null" class="lb-detail-line" data-testid="board-cells">
               {{ t('admin.modelIntegrity.scheduling.board.cells', { known: row.quality_cell_count, unknown: row.unknown_quality_cell_count ?? 0 }) }}
             </p>
+            <p v-if="row.threshold_reasons?.length" class="lb-detail-line" data-testid="board-threshold-detail">
+              {{ t('admin.modelIntegrity.scheduling.board.threshold.hint') }}
+            </p>
             <p v-if="row.worst_quality_model" class="lb-detail-line" data-testid="board-worst">
               {{ t('admin.modelIntegrity.scheduling.board.worst', { model: row.worst_quality_model, ratio: row.worst_quality_ratio == null ? t('admin.modelIntegrity.scheduling.board.qualityUnknown') : formatPercent(row.worst_quality_ratio) }) }}
+            </p>
+            <p v-if="row.factors.quality.evidence_error_code || row.factors.quality.evidence_error_message" class="lb-detail-line lb-evidence-error" data-testid="board-quality-error">
+              <span class="lb-detail-key">{{ t('admin.modelIntegrity.scheduling.board.qualityEvidenceError') }}</span>
+              <code v-if="row.factors.quality.evidence_error_code">{{ row.factors.quality.evidence_error_code }}</code>
+              <span v-if="row.factors.quality.evidence_error_message">{{ row.factors.quality.evidence_error_message }}</span>
             </p>
             <p v-if="contributionParts(row).length" class="lb-detail-line" data-testid="board-contributions">
               <span class="lb-detail-key">{{ t('admin.modelIntegrity.scheduling.board.contributions') }}</span>
@@ -194,13 +213,14 @@ import {
   isRankingSnapshotChanged,
   isStaleEvaluation,
   mergeRankedAccounts,
-  orderingKey,
+  boardOrderingKey,
   OVERVIEW_PAGE_SIZE,
   policyKey,
   RANKING_FACTORS,
   rankingErrorText,
   ruleExceptionsFor,
   sameOverviewBinding,
+  thresholdReasonKey,
   type FactorSourceKind,
   type OverviewBinding,
   type RankingReadOutcome
@@ -251,11 +271,16 @@ let discarded: string | null = null
 
 const summary = computed<OpenAIEvalRankingSummary | null>(() => meta.value?.summary ?? null)
 const qualityFirst = computed(() => isQualityFirst(meta.value?.ordering, meta.value?.policy))
+/** True when at least one row on screen carries a threshold badge. */
+const anyThresholdReason = computed(() => rows.value.some(row => (row.threshold_reasons ?? []).length > 0))
 const stale = computed(() => isStaleEvaluation(summary.value?.config_revision, props.currentRevision))
 const policyName = computed(() => (meta.value ? policyLabel(meta.value.policy) : ''))
 const orderingText = computed(() => {
   if (!meta.value || !rows.value.length) return ''
-  return t(`admin.modelIntegrity.scheduling.board.ordering.${orderingKey(meta.value.ordering)}`)
+  // The policy decides the text before the ordering field does: the server
+  // still labels cost first and stability first 'score_desc', but both sort by
+  // price after the threshold tier. Custom balance priorities decide before its score.
+  return t(`admin.modelIntegrity.scheduling.board.ordering.${boardOrderingKey(meta.value.ordering, meta.value.policy, meta.value.weights)}`)
 })
 
 const groupOptions = computed(() => {
@@ -424,6 +449,14 @@ function factorLabel(factor: OpenAIEvalRankingFactorKey) {
 
 function policyLabel(policy: OpenAIEvalSchedulingPolicy | null | undefined) {
   return t(`admin.modelIntegrity.scheduling.policy.options.${policyKey(policy ?? '')}.name`)
+}
+
+/** A known reason code in the reader's language; an unknown one is shown as sent. */
+function thresholdReasonText(code: string) {
+  const key = thresholdReasonKey(code)
+  return key === 'other'
+    ? t('admin.modelIntegrity.scheduling.board.threshold.other', { code })
+    : t(`admin.modelIntegrity.scheduling.board.threshold.${key}`)
 }
 
 function groupNames(row: OpenAIEvalOverviewAccount) {
@@ -619,6 +652,8 @@ const formatPercent = (value: number) => `${Number((value * 100).toFixed(1))}%`
 .lb-account-name { @apply truncate text-sm font-medium text-gray-900 dark:text-white; }
 .lb-account-sub { @apply mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5 text-[11px] leading-snug text-gray-500 dark:text-gray-400; }
 .lb-group { @apply rounded bg-gray-100 px-1 text-gray-600 dark:bg-dark-700 dark:text-gray-300; }
+/* A soft ordering exception, so it must not read as strongly as .lb-out (excluded). */
+.lb-threshold { @apply rounded bg-amber-100 px-1 font-medium text-amber-900 dark:bg-amber-900/40 dark:text-amber-200; }
 .lb-out { @apply font-medium text-rose-700 dark:text-rose-300; }
 
 /* The one emphatic element: the value the order is actually sorted by. */

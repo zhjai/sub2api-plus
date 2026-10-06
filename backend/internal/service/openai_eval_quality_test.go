@@ -118,7 +118,7 @@ func TestOpenAIEvalQualityReadIsolationFreshnessAndMalformed(t *testing.T) {
 	}
 	SetOpenAIEvalEffectsEnabled(false)
 	_, ok = ReadOpenAIEvalQualityFromAccount(qualityTestAccount(t, quality), "gpt-6.1-sol", "high", now)
-	require.False(t, ok)
+	require.True(t, ok, "routing activation must not hide evidence")
 	require.NotEqual(t, OpenAIEvalQualityExtraKeyFor("a:b", "c"), OpenAIEvalQualityExtraKeyFor("a", "b:c"))
 }
 
@@ -228,9 +228,10 @@ func TestOpenAIEvalQualityRecordRejectsOperationalAndOldEvidence(t *testing.T) {
 		copy.Error = code
 		require.NoError(t, s.recordOpenAIEvalQuality(context.Background(), 1, &copy, counts))
 	}
+	require.Zero(t, accounts.writes)
 	SetOpenAIEvalEffectsEnabled(false)
 	require.NoError(t, s.recordOpenAIEvalQuality(context.Background(), 1, run, counts))
-	require.Zero(t, accounts.writes)
+	require.Equal(t, 1, accounts.writes, "valid evidence is persisted without optional routing effects")
 }
 
 func TestOpenAIEvalQualityRecordIdentityBankAndPartialErrors(t *testing.T) {

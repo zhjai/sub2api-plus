@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import type { OpenAIEvalRankingFactors, OpenAIEvalPolicyWeights } from '@/api/admin/accounts'
 import {
+  POLICY_ORDER,
   PRESET_WEIGHTS,
+  PUBLISHED_PRESET_WEIGHTS,
   RANKING_FACTORS,
   accountFactorSourceKind,
   accountQualityReference,
@@ -17,6 +19,7 @@ import {
   isInactiveStatus,
   isQualityFirst,
   isQualityAssessed,
+  isPresetPolicy,
   isStaleEvaluation,
   mergeRankedAccounts,
   orderingKey,
@@ -43,12 +46,33 @@ function factors(overrides: Partial<OpenAIEvalRankingFactors['quality']> = {}): 
 }
 
 describe('preset weights', () => {
-  it('mirrors the frozen contract, including load at evaluation time', () => {
-    expect(PRESET_WEIGHTS.cost_first).toEqual({ price: 0.6, error_rate: 0.2, ttft: 0.1, load: 0.1, quality: 0 })
-    expect(PRESET_WEIGHTS.stability_first).toEqual({ price: 0.1, error_rate: 0.5, ttft: 0.3, load: 0.1, quality: 0 })
-    expect(PRESET_WEIGHTS.avoid_degradation).toEqual({ price: 0.4, error_rate: 0.35, ttft: 0.15, load: 0.1, quality: 0 })
-    for (const weights of Object.values(PRESET_WEIGHTS)) {
-      expect(RANKING_FACTORS.reduce((sum, factor) => sum + weights[factor], 0)).toBeCloseTo(1, 6)
+  it('publishes a price-only set: it is the price score, not the whole comparison', () => {
+    // The backend returns openAIEvalRankingWeights {Price: 1} for every preset.
+    // Error rate and latency act through the runtime thresholds, never as
+    // weights, so a stale 60/20 or 10/50 split must not reappear here.
+    for (const policy of ['cost_first', 'stability_first', 'avoid_degradation'] as const) {
+      expect(PRESET_WEIGHTS[policy]).toEqual({ price: 1, error_rate: 0, ttft: 0, load: 0, quality: 0 })
+      expect(weightedFactorCount(PRESET_WEIGHTS[policy])).toBe(1)
+    }
+  })
+
+  it('states each policy by the steps it actually compares', () => {
+    expect(POLICY_ORDER.cost_first).toEqual(['within_thresholds', 'price'])
+    expect(POLICY_ORDER.stability_first).toEqual(['within_thresholds', 'price'])
+    // The pass rate is a comparison step ahead of price, never a weight.
+    expect(POLICY_ORDER.avoid_degradation).toEqual(['within_thresholds', 'quality', 'price'])
+    // Custom balance never filters on a threshold: rankingThresholdReasons
+    // returns nil for it, so the weights are the whole order.
+    expect(POLICY_ORDER.custom_balance).toEqual(['weighted_score'])
+    expect(isPresetPolicy('avoid_degradation')).toBe(true)
+    expect(isPresetPolicy('custom_balance')).toBe(false)
+    expect(isPresetPolicy('')).toBe(false)
+  })
+
+  it('never draws a published weight set as a percentage the order does not use', () => {
+    // Every published set is the price-only one, so the copy is order steps.
+    for (const weights of PUBLISHED_PRESET_WEIGHTS) {
+      expect(RANKING_FACTORS.filter(factor => weights[factor] > 0)).toEqual(weights.price > 0 ? ['price'] : [])
     }
   })
 
@@ -73,7 +97,7 @@ describe('preset weights', () => {
 
   it('has no preset for the system default policy and counts only non-zero weights', () => {
     expect(weightsForPolicy('')).toBeNull()
-    expect(weightedFactorCount(PRESET_WEIGHTS.cost_first)).toBe(4)
+    expect(weightedFactorCount(PRESET_WEIGHTS.cost_first)).toBe(1)
   })
 })
 

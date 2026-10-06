@@ -262,8 +262,8 @@ import {
   latestRunFor,
   newRoute,
   normalizeMaxRequestAttempts,
+  redactSecrets,
   resultTone,
-  retriesSamples,
   routeKey,
   scheduleOf,
   totalDailyMaxRequests,
@@ -443,7 +443,8 @@ async function runNow(route: OpenAIEvalRouteConfig, type: EvalTestType, sampleMo
     const request: Parameters<typeof accountsAPI.runOpenAIEval>[0] = { ...target, test_type: type }
     if (type === 'fingerprint') request.sample_mode = sampleMode || 'quick'
     if (type === 'candy') request.sample_count = Math.max(1, Math.trunc(Number(route.candy_schedule.sample_count) || 1))
-    if (retriesSamples(type)) request.max_attempts = maxAttempts.value
+    // State probe reads the same setting: the server clamps it to three chains.
+    request.max_attempts = maxAttempts.value
     const pendingRun = accountsAPI.runOpenAIEval(request)
     const poll = async () => {
       try {
@@ -468,7 +469,8 @@ async function runNow(route: OpenAIEvalRouteConfig, type: EvalTestType, sampleMo
     appStore.showSuccess(t('admin.modelIntegrity.tests.runDone'))
     await Promise.all([loadHistory(), loadTargetRuns()])
   } catch (error) {
-    appStore.showError(extractApiErrorMessage(error, t('admin.modelIntegrity.tests.runFailed')))
+    // Upstream errors can echo credentials; the toast shows the cause with them masked.
+    appStore.showError(redactSecrets(extractApiErrorMessage(error, t('admin.modelIntegrity.tests.runFailed'))))
   } finally {
     if (pollTimer) {
       clearInterval(pollTimer)

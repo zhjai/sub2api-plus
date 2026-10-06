@@ -197,7 +197,7 @@ func TestOpenAIEvalQualityPeriodicRefreshAdoptsRemoteSettings(t *testing.T) {
 	update(false, OpenAIEvalSchedulingPolicyStabilityFirst)
 	result, err = s.refreshOpenAIEvalQuality(context.Background(), false)
 	require.NoError(t, err)
-	require.Zero(t, result.RouteCount)
+	require.Equal(t, 1, result.RouteCount, "remote effects setting must not suppress quality refresh")
 	require.False(t, OpenAIEvalEffectsEnabled())
 	require.Equal(t, OpenAIEvalSchedulingPolicyLegacy, OpenAIEvalSchedulingPolicyForRequest("gpt-6.1-sol", "low"))
 	update(true, OpenAIEvalSchedulingPolicyAvoidDegradation)

@@ -7,7 +7,7 @@
       <span>{{ t('admin.modelIntegrity.scheduling.decisions.actualDispatch') }}</span>
     </p>
     <div class="ledger-toolbar">
-      <select v-model="modelFilter" class="input ledger-select" :aria-label="t('admin.modelIntegrity.scheduling.decisions.filterModel')">
+      <select v-model="modelFilter" class="input ledger-select" :aria-label="t('admin.modelIntegrity.scheduling.decisions.filterModel')" data-testid="requests-model">
         <option value="">{{ t('admin.modelIntegrity.scheduling.decisions.filterModel') }}</option>
         <option v-for="model in models" :key="model" :value="model">{{ model }}</option>
       </select>
@@ -17,10 +17,18 @@
       </label>
     </div>
 
+    <!-- An empty list only claims "no records" after a read for this filter succeeded. -->
+    <p v-if="traces.length === 0 && loading" class="ledger-empty" role="status" data-testid="requests-loading">{{ t('admin.modelIntegrity.scheduling.decisions.loading') }}</p>
+    <p v-else-if="traces.length === 0 && failed" class="ledger-empty" data-testid="requests-unavailable">{{ t('admin.modelIntegrity.scheduling.decisions.unavailable') }}</p>
+    <div v-else-if="traces.length === 0 && groupFilter" class="ledger-empty" data-testid="requests-empty-group">
+      <p class="font-medium text-gray-700 dark:text-gray-300">{{ t('admin.modelIntegrity.scheduling.decisions.emptyGroup', { group: groupFilter, window: retained }) }}</p>
+      <p class="mx-auto mt-1 max-w-[64ch] text-xs leading-relaxed">{{ t('admin.modelIntegrity.scheduling.decisions.emptyGroupDetail') }}</p>
+      <button type="button" class="btn btn-secondary btn-sm mt-3" data-testid="requests-show-all" @click="emit('clear-group')">{{ t('admin.modelIntegrity.scheduling.decisions.showAllGroups') }}</button>
+    </div>
     <!-- Records live in this instance's memory only, so an empty list is not proof of no traffic. -->
-    <div v-if="traces.length === 0" class="ledger-empty" data-testid="requests-empty">
+    <div v-else-if="traces.length === 0" class="ledger-empty" data-testid="requests-empty">
       <p class="font-medium text-gray-700 dark:text-gray-300">{{ t('admin.modelIntegrity.scheduling.decisions.empty') }}</p>
-      <p class="mx-auto mt-1 max-w-[64ch] text-xs leading-relaxed">{{ t('admin.modelIntegrity.scheduling.decisions.emptyInstance', { limit }) }}</p>
+      <p class="mx-auto mt-1 max-w-[64ch] text-xs leading-relaxed">{{ t('admin.modelIntegrity.scheduling.decisions.emptyInstance', { window: retained }) }}</p>
     </div>
     <p v-else-if="visible.length === 0" class="ledger-empty">{{ t('admin.modelIntegrity.scheduling.decisions.noMatch') }}</p>
 
@@ -29,14 +37,21 @@
         <div class="ledger-main">
           <time class="ledger-time" :datetime="trace.at" :title="formatAbsolute(trace.at)">{{ formatClock(trace.at) }}</time>
           <div class="min-w-0 flex-1">
+            <!-- Group and account are the request's own snapshot, never today's names. -->
             <p class="ledger-headline">
-              <span v-if="trace.selected_account_id" class="ledger-chosen">{{ t('admin.modelIntegrity.scheduling.decisions.chosen', { account: accountLabel(trace.selected_account_id) }) }}</span>
-              <span v-else class="ledger-none">{{ t('admin.modelIntegrity.scheduling.decisions.noneChosen') }}</span>
+              <span class="ledger-identity" data-testid="dispatch-identity">
+                <span class="ledger-group" :title="groupHint(trace)" data-testid="dispatch-group">{{ groupText(trace) }}</span> · <span v-if="!trace.selected_account_id" class="ledger-none">{{ t('admin.modelIntegrity.scheduling.decisions.noneChosen') }}</span><span v-else-if="isWaiting(trace)" class="ledger-chosen" :title="selectedHint(trace)" data-testid="dispatch-selected">{{ t('admin.modelIntegrity.scheduling.decisions.waiting', { account: selectedText(trace) }) }}</span><span v-else class="ledger-chosen" :title="selectedHint(trace)" data-testid="dispatch-selected">{{ t('admin.modelIntegrity.scheduling.decisions.chosen', { account: selectedText(trace) }) }}</span>
+              </span>
+              <span v-if="trace.selected_account_id && isWaiting(trace)" class="ledger-slot ledger-slot-waiting" data-testid="dispatch-waiting">{{ t('admin.modelIntegrity.scheduling.decisions.waitingTag') }}</span>
+              <span v-else-if="trace.selected_account_id && trace.acquired === true" class="ledger-slot ledger-slot-acquired" data-testid="dispatch-acquired">{{ t('admin.modelIntegrity.scheduling.decisions.acquired') }}</span>
+              <!-- Slot tracking said no and gave no wait plan: selected, but not shown as served. -->
+              <span v-else-if="trace.selected_account_id && trace.acquired === false" class="ledger-slot ledger-slot-waiting" data-testid="dispatch-not-acquired">{{ t('admin.modelIntegrity.scheduling.decisions.waitingTag') }}</span>
               <span class="ledger-route">
                 {{ trace.requested_model || '—' }}<template v-if="trace.requested_reasoning_effort"> · {{ t('admin.modelIntegrity.scheduling.decisions.effort', { effort: trace.requested_reasoning_effort }) }}</template>
               </span>
             </p>
             <p class="ledger-why">{{ decisionText(trace) }}</p>
+            <p v-if="trace.selected_account_id && isWaiting(trace)" class="ledger-fallback" data-testid="dispatch-waiting-note">{{ t('admin.modelIntegrity.scheduling.decisions.waitingNote') }}</p>
             <p class="ledger-meta">
               <span>{{ t('admin.modelIntegrity.scheduling.decisions.policyUsed', { policy: policyName(trace.scheduling_policy) }) }}</span>
               <span v-if="trace.candidates?.length">{{ t('admin.modelIntegrity.scheduling.decisions.counts', countsOf(trace)) }}</span>
@@ -62,7 +77,7 @@
             </p>
             <details v-if="trace.error" class="ledger-error">
               <summary class="cursor-pointer">{{ t('admin.modelIntegrity.scheduling.decisions.errorLabel') }}</summary>
-              <code class="mt-1 block whitespace-pre-wrap break-all font-mono">{{ trace.error }}</code>
+              <code class="mt-1 block whitespace-pre-wrap break-all font-mono" data-testid="dispatch-error">{{ redactSecrets(trace.error) }}</code>
             </details>
           </div>
           <button
@@ -108,7 +123,10 @@
               </thead>
               <tbody>
                 <tr v-for="candidate in orderCandidates(trace.candidates)" :key="candidate.account_id" :class="candidateRowClass(candidate)" data-testid="candidate-row">
-                  <td class="font-medium text-gray-900 dark:text-gray-100">{{ accountLabel(candidate.account_id) }}</td>
+                  <td class="font-medium text-gray-900 dark:text-gray-100">
+                    {{ accountLabel(candidate.account_id) }}
+                    <span v-if="historicalName(trace, candidate)" class="block text-[11px] font-normal text-gray-500 dark:text-gray-400" data-testid="candidate-historical-name">{{ t('admin.modelIntegrity.scheduling.decisions.historicalName', { name: historicalName(trace, candidate) }) }}</span>
+                  </td>
                   <td class="num">
                     <span v-if="candidate.overview_prior" data-testid="candidate-overview-rank" :title="t('admin.modelIntegrity.scheduling.decisions.overviewPriorHint')">{{ t('admin.modelIntegrity.scheduling.decisions.overviewRank', { rank: candidate.overview_prior.rank }) }}</span>
                     <span v-else-if="candidate.rank != null" data-testid="candidate-rank">{{ candidate.rank }}</span>
@@ -168,7 +186,7 @@ import { computed, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/icons/Icon.vue'
 import type { SchedulerDecisionCandidate, SchedulerDecisionTrace } from '@/api/admin/accounts'
-import { candidateReasonKey, decisionKey, dispatchFactorReading, dispatchQuality, exclusionKey, fallbackReasonKey, neutralQualityContribution, orderCandidates, policyKey, policyQualityEmphasis, accountQualityReference, RANKING_FACTORS, unknownReasonKey, type AccountQualityReference, type DispatchFactor, type DispatchQuality } from '@/views/admin/modelIntegrity/modelIntegrity'
+import { candidateReasonKey, decisionKey, dispatchFactorReading, dispatchQuality, exclusionKey, fallbackReasonKey, neutralQualityContribution, orderCandidates, policyKey, policyQualityEmphasis, accountQualityReference, RANKING_FACTORS, redactSecrets, unknownReasonKey, type AccountQualityReference, type DispatchFactor, type DispatchQuality } from '@/views/admin/modelIntegrity/modelIntegrity'
 
 /** Column order of the measured factors. */
 const DISPATCH_FACTORS: DispatchFactor[] = ['price', 'error_rate', 'ttft', 'load']
@@ -198,17 +216,28 @@ function contributionTitle(candidate: SchedulerDecisionCandidate) {
 
 const props = withDefaults(defineProps<{
   traces: SchedulerDecisionTrace[]
+  /** Today's account names; used for candidates only, never for the request's own selection. */
   accountName: (id: number) => string
-  /** How many records this instance keeps. */
-  limit?: number
-}>(), { limit: 50 })
+  /** How many records this instance keeps in memory. */
+  retained?: number
+  /** A read for the current filter is in flight. */
+  loading?: boolean
+  /** The latest read for the current filter failed. */
+  failed?: boolean
+  /** The selected group filter's name, or null for all groups. */
+  groupFilter?: string | null
+}>(), { retained: 256, loading: false, failed: false, groupFilter: null })
+
+const emit = defineEmits<{ 'clear-group': [] }>()
 
 const { t } = useI18n()
 const modelFilter = ref('')
 const onlyProblems = ref(false)
 const expanded = reactive(new Set<number>())
 
-const models = computed(() => [...new Set(props.traces.map(trace => trace.requested_model).filter((model): model is string => Boolean(model)))].sort())
+// A chosen model stays listed when a group change leaves no record for it, so
+// the filter reads as "no match" instead of silently resetting.
+const models = computed(() => [...new Set([...props.traces.map(trace => trace.requested_model), modelFilter.value].filter((model): model is string => Boolean(model)))].sort())
 const visible = computed(() => props.traces.filter(trace => (!modelFilter.value || trace.requested_model === modelFilter.value) && (!onlyProblems.value || isProblem(trace))))
 
 watch([modelFilter, onlyProblems, () => props.traces], () => expanded.clear())
@@ -332,6 +361,53 @@ function accountLabel(id: number) {
   return name.startsWith('#') ? name : `${name} #${id}`
 }
 
+/**
+ * The group the request was routed in, as recorded then. An older trace
+ * without the name shows its ID or says it was not recorded; today's group
+ * list is never used, since a group may have been renamed since.
+ */
+function groupText(trace: SchedulerDecisionTrace) {
+  const name = trace.group_name?.trim()
+  if (name) return name
+  if (trace.group_id) return t('admin.modelIntegrity.scheduling.decisions.groupId', { id: trace.group_id })
+  return t('admin.modelIntegrity.scheduling.decisions.groupUnknown')
+}
+
+function groupHint(trace: SchedulerDecisionTrace) {
+  return trace.group_name?.trim() ? undefined : t('admin.modelIntegrity.scheduling.decisions.groupNameMissing')
+}
+
+/** The selected account under the name it had when the request was routed. */
+function selectedText(trace: SchedulerDecisionTrace) {
+  const name = trace.selected_account_name?.trim()
+  return name
+    ? `${name} #${trace.selected_account_id}`
+    : t('admin.modelIntegrity.scheduling.decisions.accountId', { id: trace.selected_account_id })
+}
+
+function selectedHint(trace: SchedulerDecisionTrace) {
+  return trace.selected_account_name?.trim() ? undefined : t('admin.modelIntegrity.scheduling.decisions.accountNameMissing')
+}
+
+/**
+ * A plan to wait for the account's slot is not an admission. Older traces carry
+ * none of these fields and keep their plain "selected" wording.
+ */
+function isWaiting(trace: SchedulerDecisionTrace) {
+  if (trace.acquired === true) return false
+  return Boolean(trace.wait_plan) || Boolean(trace.awaiting_admission)
+}
+
+/**
+ * The selected candidate's name at request time, shown only when it differs
+ * from today's name in the candidate column.
+ */
+function historicalName(trace: SchedulerDecisionTrace, candidate: SchedulerDecisionCandidate) {
+  const name = trace.selected_account_name?.trim()
+  if (!name || candidate.account_id !== trace.selected_account_id) return ''
+  return props.accountName(candidate.account_id) === name ? '' : name
+}
+
 function policyName(policy?: string) {
   return t(`admin.modelIntegrity.scheduling.policy.options.${policyKey(policy)}.name`)
 }
@@ -417,7 +493,12 @@ const formatAbsolute = (value: string) => {
 .ledger-main { @apply flex items-start gap-4; }
 .ledger-time { @apply w-[4.75rem] shrink-0 pt-0.5 text-xs tabular-nums text-gray-500 dark:text-gray-400; }
 .ledger-headline { @apply flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm; }
+.ledger-identity { @apply min-w-0 break-words text-gray-400 dark:text-gray-500; }
+.ledger-group { @apply font-medium text-gray-600 dark:text-gray-300; }
 .ledger-chosen { @apply font-semibold text-gray-900 dark:text-white; }
+.ledger-slot { @apply whitespace-nowrap rounded px-1.5 py-0.5 text-xs font-medium; }
+.ledger-slot-waiting { @apply bg-amber-100 text-amber-900 dark:bg-amber-900/40 dark:text-amber-200; }
+.ledger-slot-acquired { @apply bg-gray-100 text-gray-700 dark:bg-dark-700 dark:text-gray-300; }
 .ledger-none { @apply font-semibold text-rose-700 dark:text-rose-300; }
 .ledger-route { @apply text-gray-500 dark:text-gray-400; }
 .ledger-why { @apply mt-1 text-sm text-gray-700 dark:text-gray-300; }

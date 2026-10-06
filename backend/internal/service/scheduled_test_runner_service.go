@@ -120,6 +120,14 @@ func (s *ScheduledTestRunnerService) runScheduled() {
 }
 
 func (s *ScheduledTestRunnerService) runOnePlan(ctx context.Context, plan *ScheduledTestPlan) {
+	ctx = context.WithValue(ctx, openAIEvalAutomaticKey{}, true)
+	if err := s.accountTestSvc.checkOpenAIEvalAutomaticAccount(ctx, &Account{ID: plan.AccountID}); err != nil {
+		logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d skipped: %v", plan.ID, err)
+		if nextRun, scheduleErr := computeNextRun(plan.CronExpression, time.Now()); scheduleErr == nil {
+			_ = s.planRepo.UpdateAfterRun(ctx, plan.ID, time.Now(), nextRun)
+		}
+		return
+	}
 	result, err := s.accountTestSvc.RunTestBackground(ctx, plan.AccountID, plan.ModelID)
 	if err != nil {
 		logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d RunTestBackground error: %v", plan.ID, err)
@@ -149,6 +157,9 @@ func (s *ScheduledTestRunnerService) runOnePlan(ctx context.Context, plan *Sched
 // tryRecoverAccount attempts to recover an account from recoverable runtime state.
 func (s *ScheduledTestRunnerService) tryRecoverAccount(ctx context.Context, accountID int64, planID int64) {
 	if s.rateLimitSvc == nil {
+		return
+	}
+	if s.accountTestSvc.checkOpenAIEvalAutomaticAccount(ctx, &Account{ID: accountID}) != nil {
 		return
 	}
 

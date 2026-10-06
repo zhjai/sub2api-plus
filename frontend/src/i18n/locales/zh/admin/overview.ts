@@ -966,6 +966,14 @@ export default {
           '公开分组费率 0.8，您可以创建一个费率 0.7 的专属分组，手动分配给 VIP 用户，让他们享受更优惠的价格。'
       },
       rateMultiplierHint: '1.0 = 标准费率，0.5 = 半价，2.0 = 双倍',
+      billingRateMode: {
+        label: '计费倍率来源',
+        group: '固定分组倍率',
+        groupHint: '所有请求按本分组的倍率计费；为用户单独设置的分组倍率优先生效。',
+        account: '按实际账号倍率',
+        accountHint: '每次请求按实际处理它的账号倍率计费，分组倍率和用户专属倍率不参与；账号未设置倍率时按 1.0 计费。',
+        rateMultiplierAccountHint: '当前按实际账号倍率计费：此倍率不参与 Token 计费，仅在无法确定处理账号时兜底。'
+      },
       platforms: {
         all: '全部平台',
         anthropic: 'Anthropic',

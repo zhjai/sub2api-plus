@@ -1128,6 +1128,9 @@ func (s *OpenAIGatewayService) isBetterAccount(candidate, current *Account) bool
 
 // SelectAccountWithLoadAwareness selects an account with load-awareness and wait plan.
 func (s *OpenAIGatewayService) SelectAccountWithLoadAwareness(ctx context.Context, groupID *int64, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}) (*AccountSelectionResult, error) {
+	ctx = s.withOpenAIQuotaAutoPauseContext(ctx)
+	ctx = s.withOpenAIGroupPrivacyRequirement(ctx, groupID)
+	ctx = s.withOpenAIProfitControlGate(ctx, groupID)
 	publicModel := OpenAIClientRequestedModelFromContext(ctx)
 	if publicModel == "" {
 		publicModel = requestedModel
@@ -1136,16 +1139,27 @@ func (s *OpenAIGatewayService) SelectAccountWithLoadAwareness(ctx context.Contex
 	if value := RequestedReasoningEffortFromContext(ctx); value != nil {
 		effort = *value
 	}
-	if OpenAIEvalSchedulingPolicyForRequest(publicModel, effort) != "" {
+	priorityReq := OpenAIAccountScheduleRequest{GroupID: groupID, Platform: PlatformOpenAI, ClientRequestedModel: publicModel, RequestedModel: requestedModel,
+		RequestedReasoningEffort: effort, ExcludedIDs: excludedIDs, RequiredTransport: OpenAIUpstreamTransportAny, RequirePrivacySet: s.openAIGroupRequiresPrivacySet(ctx, groupID),
+		accountPriorityIndex: openAIEvalSchedulingPolicy.Load().(*openAIEvalSchedulingPolicySnapshot).AccountPriorities}
+	if len(priorityReq.accountPriorityIndex) > 0 {
+		resolver, ok := s.persistentOpenAIAccountScheduler().(*defaultOpenAIAccountScheduler)
+		if !ok {
+			resolver = &defaultOpenAIAccountScheduler{service: s}
+		}
+		if err := resolver.resolveAccountPriorityRules(ctx, &priorityReq); err != nil {
+			return nil, err
+		}
+	}
+	if OpenAIEvalSchedulingPolicyForRequest(publicModel, effort) != "" || openAIAccountPriorityRulesActive(priorityReq) {
 		selection, _, err := s.SelectAccountWithScheduler(ctx, groupID, "", sessionHash, requestedModel, excludedIDs, OpenAIUpstreamTransportAny, false)
 		return selection, err
 	}
-	ctx = s.withOpenAIQuotaAutoPauseContext(ctx)
-	ctx = s.withOpenAIGroupPrivacyRequirement(ctx, groupID)
-	// 分组利润控制：legacy 公共入口同样装门，保证不经
-	// selectAccountWithScheduler 的调用方也无法绕过利润准入。
-	ctx = s.withOpenAIProfitControlGate(ctx, groupID)
-	return s.selectAccountWithLoadAwareness(ctx, groupID, PlatformOpenAI, sessionHash, requestedModel, excludedIDs, false, "", true)
+	traceStart := time.Now()
+	selection, err := s.selectAccountWithLoadAwareness(ctx, groupID, PlatformOpenAI, sessionHash, requestedModel, excludedIDs, false, "", true)
+	priorityReq.SessionHash = sessionHash
+	s.recordLegacyOpenAIAccountScheduleTrace(ctx, priorityReq, selection, OpenAIAccountScheduleDecision{}, err, traceStart)
+	return selection, err
 }
 
 func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Context, groupID *int64, platform string, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, requiredCapability OpenAIEndpointCapability, useUpstreamTokenCost bool) (*AccountSelectionResult, error) {

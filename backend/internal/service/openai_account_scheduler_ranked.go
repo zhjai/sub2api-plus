@@ -15,14 +15,22 @@ func (s *defaultOpenAIAccountScheduler) explicitRanking(ctx context.Context, req
 	// Mapping getters populate per-account caches; scoring owns those writes.
 	accounts = append([]Account(nil), accounts...)
 	model, effort := openAIClientModelForSchedule(req), normalizeOpenAIAccountRuntimeRoutePart(req.RequestedReasoningEffort, 64)
+	configuredAccounts := accounts
+	if len(req.rankingCandidateAccounts) > 0 {
+		configuredAccounts = req.rankingCandidateAccounts
+	}
 	groupID := int64(0)
 	if req.GroupID != nil {
 		groupID = *req.GroupID
 	}
-	trace := OpenAIEvalRankingTrace{RecordType: "actual_dispatch", Scope: "this_instance", GroupID: req.GroupID, RankingBasis: "live_fallback", SelectionModel: req.RequestedModel, RankingFallbackReason: rankingPtr("snapshot_missing")}
+	trace := OpenAIEvalRankingTrace{RecordType: "actual_dispatch", Scope: "this_instance", GroupID: req.GroupID, RankingBasis: "live_fallback", SelectionModel: model, RankingFallbackReason: rankingPtr("snapshot_missing")}
 	trace.RawRequestedReasoningEffort = req.RequestedReasoningEffort
 	policySnapshot := openAIEvalSchedulingPolicy.Load().(*openAIEvalSchedulingPolicySnapshot)
 	cfg := &OpenAIEvalConfig{EffectsEnabled: policySnapshot.Enabled, SchedulingPolicy: policySnapshot.Default, CustomBalance: policySnapshot.CustomBalance, Policies: policySnapshot.Rules}
+	if policySnapshot.Thresholds.MinErrorSamples > 0 {
+		value := policySnapshot.Thresholds
+		cfg.SchedulingThresholds = &value
+	}
 	latest := map[OpenAIEvalEvidenceKey]OpenAIEvalRun{}
 	var monitoring []openAIRankingMonitorEvidence
 	var monitorErr error
@@ -45,7 +53,7 @@ func (s *defaultOpenAIAccountScheduler) explicitRanking(ctx context.Context, req
 			upstreamModels[accounts[i].ID] = accounts[i].GetMappedModel(req.RequestedModel)
 		}
 		for _, route := range cfg.Accounts {
-			if ids[route.AccountID] != nil && route.RequestedModel == model && route.ReasoningEffort == effort {
+			if ids[route.AccountID] != nil && openAIEvalQualityDimension(route.RequestedModel) == openAIEvalQualityDimension(model) {
 				readConfig.Accounts = append(readConfig.Accounts, route)
 			}
 		}
@@ -60,7 +68,7 @@ func (s *defaultOpenAIAccountScheduler) explicitRanking(ctx context.Context, req
 		gen := r.current
 		readErr := errors.Join(latestErr, monitorErr)
 		if readErr == nil && r.lastError == nil {
-			priors = accountQualityPriors(gen, cfg, groupID, model, effort, accounts, latest, now)
+			priors = accountQualityPriors(gen, cfg, groupID, model, effort, configuredAccounts, latest, now)
 		}
 		if prior, ok := s.overviewPriorLocked(r, gen, cfg, req, accounts, loads, latest, monitoring, readErr, now); ok {
 			trace.RankingBasis, trace.RankingFallbackReason = "overview_prior", nil
@@ -171,7 +179,7 @@ func (s *defaultOpenAIAccountScheduler) explicitRanking(ctx context.Context, req
 		compatible := a.Platform == NormalizeOpenAICompatiblePlatform(req.Platform) && a.IsOpenAICompatible() && a.IsModelSupported(req.RequestedModel)
 		inputs = append(inputs, openAIEvalRankingInput{account: a, factors: f, compatible: compatible, upstream: []string{a.GetMappedModel(req.RequestedModel)}})
 	}
-	return scoreOpenAIEvalRanking(policy, weights, inputs, now, s.service.openAIOAuthSchedulingRateMultiplier(ctx), priors), trace, nil
+	return scoreOpenAIEvalRankingWithThresholds(policy, weights, inputs, now, s.service.openAIOAuthSchedulingRateMultiplier(ctx), openAIEvalSchedulingThresholds(cfg), priors), trace, nil
 }
 
 // Called after live admission filters; the overview never supplies current-model quality.
@@ -181,7 +189,7 @@ func (s *defaultOpenAIAccountScheduler) overviewPriorLocked(r *OpenAIEvalRanking
 	}
 	model, effort := openAIClientModelForSchedule(req), normalizeOpenAIAccountRuntimeRoutePart(req.RequestedReasoningEffort, 64)
 	policy, weights := openAIEvalRankingWeights(cfg, model, effort)
-	if policy == "" || policy != gen.policy || weights != gen.weights || (req.SchedulingPolicy != "" && req.SchedulingPolicy != gen.policy) {
+	if policy == "" || policy != gen.policy || !openAIEvalRankingWeightsEqual(weights, gen.weights) || (req.SchedulingPolicy != "" && policy != gen.policy) {
 		return nil, false
 	}
 	for _, rule := range cfg.Policies {
@@ -189,6 +197,15 @@ func (s *defaultOpenAIAccountScheduler) overviewPriorLocked(r *OpenAIEvalRanking
 			return nil, false
 		}
 	}
+	groupID := int64(0)
+	if req.GroupID != nil {
+		groupID = *req.GroupID
+	}
+	configuredAccounts := accounts
+	if len(req.rankingCandidateAccounts) > 0 {
+		configuredAccounts = req.rankingCandidateAccounts
+	}
+	modelConfigured := openAIEvalModelConfiguredForCandidates(cfg, model, groupID, configuredAccounts)
 	if s.stats != nil {
 		s.stats.rankingMu.RLock()
 		defer s.stats.rankingMu.RUnlock()
@@ -198,11 +215,12 @@ func (s *defaultOpenAIAccountScheduler) overviewPriorLocked(r *OpenAIEvalRanking
 	}
 	byID := make(map[int64]OpenAIEvalAccountOverviewRow, len(gen.overview))
 	for _, row := range gen.overview {
+		if len(row.ThresholdReasons) > 0 {
+			// Cross-model thresholds are overview diagnostics, not evidence
+			// for this cold request. Recompute with current-request factors.
+			return nil, false
+		}
 		byID[row.AccountID] = row
-	}
-	group := int64(0)
-	if req.GroupID != nil {
-		group = *req.GroupID
 	}
 	rows := make([]OpenAIEvalRankedAccount, 0, len(accounts))
 	for i := range accounts {
@@ -216,7 +234,7 @@ func (s *defaultOpenAIAccountScheduler) overviewPriorLocked(r *OpenAIEvalRanking
 		}
 		member := false
 		for _, id := range prior.GroupIDs {
-			if id == group {
+			if id == groupID {
 				member = true
 			}
 		}
@@ -230,6 +248,9 @@ func (s *defaultOpenAIAccountScheduler) overviewPriorLocked(r *OpenAIEvalRanking
 		}
 		q := qualityFromLatestRuns(cfg, a.ID, model, effort, latest, now)
 		if q.Selected > 0 {
+			return nil, false
+		}
+		if modelConfigured {
 			return nil, false
 		}
 		if _, active := ReadOpenAIEvalRouteHealthFromAccount(a, model, effort, now); active {
@@ -248,7 +269,7 @@ func (s *defaultOpenAIAccountScheduler) overviewPriorLocked(r *OpenAIEvalRanking
 		}
 		row := prior.OpenAIEvalRankedAccount
 		row.Factors = emptyOpenAIEvalRankingFactors()
-		row.QualityBasis, row.AccountQualityPrior = "none", nil
+		row.QualityBasis, row.AccountQualityPrior = "aggregate_fallback", nil
 		row.Factors.Price, row.Factors.Load = prior.Factors.Price, prior.Factors.Load
 		row.Contributions, row.QualityTier = OpenAIEvalRankingWeights{}, nil
 		row.UpstreamModels = []string{upstream}
@@ -279,7 +300,8 @@ func (r *OpenAIEvalRankingService) annotateOwner(req OpenAIAccountScheduleReques
 	if req.GroupID != nil {
 		groupID = *req.GroupID
 	}
-	index, ok := gen.byKey[rankingDimensionKey(groupID, openAIClientModelForSchedule(req), req.RequestedReasoningEffort)]
+	effort := normalizeOpenAIAccountRuntimeRoutePart(req.RequestedReasoningEffort, 64)
+	index, ok := gen.byKey[rankingDimensionKey(groupID, openAIClientModelForSchedule(req), effort)]
 	if !ok {
 		return
 	}
@@ -299,17 +321,22 @@ func (r *OpenAIEvalRankingService) annotateOwner(req OpenAIAccountScheduleReques
 
 func rankedScheduleCandidate(row OpenAIEvalRankedAccount) OpenAIAccountScheduleCandidate {
 	q := row.Factors.Quality
+	qualityBasis := row.QualityBasis
+	if qualityBasis == "" {
+		qualityBasis = "none"
+	}
 	candidate := OpenAIAccountScheduleCandidate{AccountID: row.AccountID, Rank: row.Rank, PriorityScore: row.PriorityScore, Factors: rankingPtr(row.Factors), Contributions: rankingPtr(row.Contributions), Eligible: row.Eligible,
-		EvaluatedCount: q.Evaluated, PassCount: q.Pass, SuspectedPassCount: q.SuspectedPass, QualityRatio: q.Ratio, QualityState: q.State, QualityBasis: OpenAIEvalQualityAssessmentBasis, DecisionReason: "explicit_policy_rank"}
+		EvaluatedCount: q.Evaluated, PassCount: q.Pass, SuspectedPassCount: q.SuspectedPass, QualityRatio: q.Ratio, QualityState: q.State, QualityBasis: qualityBasis, DecisionReason: "explicit_policy_rank"}
 	if row.OverviewPrior != nil {
 		candidate.OverviewPrior = row.OverviewPrior
 		candidate.DecisionReason = "overview_prior"
-		candidate.QualityBasis = "unknown_current_model"
+		candidate.QualityBasis = "aggregate_fallback"
 	}
 	if row.AccountQualityPrior != nil {
 		candidate.AccountQualityPrior = cloneAccountQualityPrior(row.AccountQualityPrior)
-		candidate.DecisionReason = "account_prior_tier"
-		candidate.QualityBasis = "account_prior"
+		basis := openAIEvalQualityPriorBasis(row.AccountQualityPrior)
+		candidate.DecisionReason = basis
+		candidate.QualityBasis = basis
 	}
 	if row.PriorityScore != nil {
 		candidate.Score = *row.PriorityScore
@@ -324,6 +351,12 @@ func rankedScheduleCandidate(row OpenAIEvalRankedAccount) OpenAIAccountScheduleC
 }
 
 func (s *defaultOpenAIAccountScheduler) selectByExplicitRanking(ctx context.Context, req OpenAIAccountScheduleRequest, all []Account, eligible []*Account, loads map[int64]*AccountLoadInfo, decision *OpenAIAccountScheduleDecision, filters openAISelectionFilterStats, budget *openAISelectionProbeBudget) (*AccountSelectionResult, int, int, float64, error) {
+	req.rankingCandidateAccounts = make([]Account, 0, len(eligible))
+	for _, account := range eligible {
+		if account != nil {
+			req.rankingCandidateAccounts = append(req.rankingCandidateAccounts, *account)
+		}
+	}
 	rows, trace, err := s.explicitRanking(ctx, req, all, loads)
 	if decision != nil {
 		decision.OpenAIEvalRankingTrace = trace
@@ -352,6 +385,12 @@ func (s *defaultOpenAIAccountScheduler) selectByExplicitRanking(ctx context.Cont
 		if decision != nil {
 			candidate := rankedScheduleCandidate(row)
 			candidate.Eligible = available && row.Rank != nil
+			// A route with no exact quality evidence may still be ordered by an
+			// aggregate/account prior, but the trace must retain that evidence
+			// basis instead of labeling ordinary policy dispatch as the source.
+			if candidate.AccountQualityPrior != nil {
+				candidate.DecisionReason = candidate.QualityBasis
+			}
 			if reason := filters.accountReasons[row.AccountID]; reason != "" {
 				candidate.ExclusionReason = reason
 			}
@@ -359,6 +398,13 @@ func (s *defaultOpenAIAccountScheduler) selectByExplicitRanking(ctx context.Cont
 		}
 	}
 	budget.enableLimit()
+	if openAIAccountPriorityRulesActive(req) && !req.DisableStickyEscape {
+		budget.limit = max(openAIAccountSelectionProbeLimit, min(10000, 2*len(order)))
+		// Rule layers precede the frozen policy order without changing scores.
+		sort.SliceStable(order, func(i, j int) bool {
+			return openAIAccountPriorityLess(req, order[i].account.ID, order[j].account.ID)
+		})
+	}
 	req.rankingDecision = decision
 	result, compactBlocked, err := s.tryAcquireOpenAISelectionOrderWithBudget(ctx, req, order, budget)
 	if err != nil || result != nil {
@@ -381,7 +427,7 @@ func (s *defaultOpenAIAccountScheduler) selectByExplicitRanking(ctx context.Cont
 	if err := ctx.Err(); err != nil {
 		return nil, len(eligible), len(order), 0, err
 	}
-	if budget.acquireExhausted() || (budget.limited && budget.rechecks >= openAIAccountSelectionProbeLimit) {
+	if budget.acquireExhausted() || (budget.limited && budget.rechecks >= budget.probeLimit()) {
 		if decision != nil {
 			decision.ReasonCode = "selection_budget_exhausted"
 			decision.ReasonText = "ranked admission probe budget exhausted"

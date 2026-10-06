@@ -42,7 +42,7 @@ func TestOpenAIAccountPriorSurvivesOrdinaryRequestMetrics(t *testing.T) {
 	for _, row := range rows {
 		require.False(t, row.Factors.Quality.Known)
 		require.Nil(t, row.Factors.Quality.Ratio, "account prior is not an exact-model diagnostic result")
-		require.Equal(t, "account_prior", row.QualityBasis)
+		require.Equal(t, "model_effort_fallback", row.QualityBasis)
 		require.NotNil(t, row.AccountQualityPrior)
 	}
 	ctx := WithRequestedReasoningEffort(context.Background(), "high")
@@ -52,8 +52,8 @@ func TestOpenAIAccountPriorSurvivesOrdinaryRequestMetrics(t *testing.T) {
 	selected.ReleaseFunc()
 	require.Equal(t, "live_fallback", decision.RankingBasis)
 	for _, candidate := range decision.Candidates {
-		require.Equal(t, "account_prior", candidate.QualityBasis)
-		require.Equal(t, "account_prior_tier", candidate.DecisionReason)
+		require.Equal(t, "model_effort_fallback", candidate.QualityBasis)
+		require.Equal(t, "model_effort_fallback", candidate.DecisionReason)
 		require.Nil(t, candidate.QualityRatio)
 		require.Zero(t, candidate.EvaluatedCount)
 	}
@@ -62,6 +62,185 @@ func TestOpenAIAccountPriorSurvivesOrdinaryRequestMetrics(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(1), selected.Account.ID)
 	selected.ReleaseFunc()
+}
+
+func TestOpenAIAccountPriorModelIsolationAndUntestedFallback(t *testing.T) {
+	s, repo, accounts, gateway := rankingHarness(t)
+	repo.config.SchedulingPolicy = OpenAIEvalSchedulingPolicyAvoidDegradation
+	repo.config.Revision++
+	schedule := OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 300}
+	repo.config.Accounts = []OpenAIEvalAccountConfig{
+		{AccountID: 1, RequestedModel: "gpt-6.1-sol", ReasoningEffort: "high", CandySchedule: schedule},
+		{AccountID: 2, RequestedModel: "gpt-6.1-sol", ReasoningEffort: "high", CandySchedule: schedule},
+	}
+	now := time.Now()
+	repo.runs = []OpenAIEvalRun{
+		overviewQualityRun(1, 1, "gpt-6.1-sol", "high", OpenAIEvalTypeCandy, false, now),
+		overviewQualityRun(2, 2, "gpt-6.1-sol", "high", OpenAIEvalTypeCandy, true, now),
+	}
+	_, err := s.EvaluateScheduling(context.Background(), 1)
+	require.NoError(t, err)
+	scheduler := gateway.persistentOpenAIAccountScheduler().(*defaultOpenAIAccountScheduler)
+	rows, _, err := scheduler.explicitRanking(context.Background(), OpenAIAccountScheduleRequest{
+		GroupID: rankingPtr(int64(7)), Platform: PlatformOpenAI, RequestedModel: "gpt-6.1-sol", RequestedReasoningEffort: "high",
+	}, accounts.items, nil)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), rows[0].AccountID)
+	require.Equal(t, "exact", rows[0].QualityBasis)
+
+	// Astra has no configured diagnostics. It must use the aggregate leaderboard
+	// fallback, but the route remains explicitly labeled as a fallback.
+	astraRows, trace, err := scheduler.explicitRanking(context.Background(), OpenAIAccountScheduleRequest{
+		GroupID: rankingPtr(int64(7)), Platform: PlatformOpenAI, RequestedModel: "gpt-6-astra", RequestedReasoningEffort: "high",
+	}, accounts.items, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, astraRows)
+	require.Equal(t, "overview_prior", trace.RankingBasis)
+	for _, row := range astraRows {
+		require.Nil(t, row.Factors.Quality.Ratio)
+		require.NotNil(t, row.OverviewPrior)
+	}
+}
+
+func TestOpenAIAccountPriorDoesNotCrossModelLaunderWithinCandidatePool(t *testing.T) {
+	s, repo, accounts, gateway := rankingHarness(t)
+	repo.config.SchedulingPolicy = OpenAIEvalSchedulingPolicyAvoidDegradation
+	repo.config.Revision++
+	schedule := OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 300}
+	repo.config.Accounts = []OpenAIEvalAccountConfig{
+		{AccountID: 1, RequestedModel: "gpt-6-astra", ReasoningEffort: "medium", CandySchedule: schedule},
+		{AccountID: 2, RequestedModel: "gpt-6.1-sol", ReasoningEffort: "high", CandySchedule: schedule},
+	}
+	now := time.Now()
+	repo.runs = []OpenAIEvalRun{
+		overviewQualityRun(1, 1, "gpt-6-astra", "medium", OpenAIEvalTypeCandy, true, now),
+		overviewQualityRun(2, 2, "gpt-6.1-sol", "high", OpenAIEvalTypeCandy, true, now),
+	}
+	_, err := s.EvaluateScheduling(context.Background(), 1)
+	require.NoError(t, err)
+	scheduler := gateway.persistentOpenAIAccountScheduler().(*defaultOpenAIAccountScheduler)
+	req := OpenAIAccountScheduleRequest{GroupID: rankingPtr(int64(7)), Platform: PlatformOpenAI,
+		RequestedModel: "gpt-6-astra", RequestedReasoningEffort: "high"}
+	rows, _, err := scheduler.explicitRanking(context.Background(), req, accounts.items, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, rows)
+	require.Equal(t, int64(1), rows[0].AccountID, "Astra evidence must beat an unrelated sol result")
+	for _, row := range rows {
+		if row.AccountID == 1 {
+			require.Equal(t, "model_effort_fallback", row.QualityBasis)
+			require.NotNil(t, row.AccountQualityPrior)
+		} else if row.AccountID == 2 {
+			require.Equal(t, "aggregate_fallback", row.QualityBasis)
+			require.NotNil(t, row.AccountQualityPrior)
+		}
+	}
+	ctx := WithRequestedReasoningEffort(context.Background(), "high")
+	selected, decision, err := gateway.SelectAccountWithScheduler(ctx, req.GroupID, "", "", req.RequestedModel, nil, OpenAIUpstreamTransportAny, false)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), selected.Account.ID)
+	selected.ReleaseFunc()
+	for _, candidate := range decision.Candidates {
+		if candidate.AccountID == 2 {
+			require.Equal(t, "aggregate_fallback", candidate.QualityBasis)
+			require.NotNil(t, candidate.AccountQualityPrior)
+		}
+	}
+}
+
+func TestOpenAIAccountPriorActualDispatchUsesRequestedModel(t *testing.T) {
+	for _, requestedModel := range []string{"gpt-6-astra", "gpt-6.1-sol"} {
+		t.Run(requestedModel, func(t *testing.T) {
+			evaluation, repository, accountRepo, gateway := rankingHarness(t)
+			repository.config.SchedulingPolicy = OpenAIEvalSchedulingPolicyAvoidDegradation
+			repository.config.Revision++
+			accountRepo.items[0].RateMultiplier = rankingPtr(0.2)
+			accountRepo.items[1].RateMultiplier = rankingPtr(0.1)
+			schedule := OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 300}
+			repository.config.Accounts = []OpenAIEvalAccountConfig{
+				{AccountID: 1, RequestedModel: "gpt-6-astra", ReasoningEffort: "high", CandySchedule: schedule},
+				{AccountID: 2, RequestedModel: "gpt-6-astra", ReasoningEffort: "high", CandySchedule: schedule},
+				{AccountID: 1, RequestedModel: "gpt-6.1-sol", ReasoningEffort: "high", CandySchedule: schedule},
+				{AccountID: 2, RequestedModel: "gpt-6.1-sol", ReasoningEffort: "high", CandySchedule: schedule},
+			}
+			now := time.Now()
+			repository.runs = []OpenAIEvalRun{
+				overviewQualityRun(1, 1, "gpt-6-astra", "high", OpenAIEvalTypeCandy, true, now),
+				overviewQualityRun(2, 2, "gpt-6-astra", "high", OpenAIEvalTypeCandy, false, now),
+				overviewQualityRun(3, 1, "gpt-6.1-sol", "high", OpenAIEvalTypeCandy, false, now),
+				overviewQualityRun(4, 2, "gpt-6.1-sol", "high", OpenAIEvalTypeCandy, true, now),
+			}
+			_, err := evaluation.EvaluateScheduling(context.Background(), 1)
+			require.NoError(t, err)
+			ctx := WithRequestedReasoningEffort(context.Background(), "high")
+			selection, decision, err := gateway.SelectAccountWithScheduler(ctx, rankingPtr(int64(7)), "", "", requestedModel, nil, OpenAIUpstreamTransportAny, false)
+			require.NoError(t, err)
+			require.NotNil(t, selection)
+			expectedAccountID := int64(1)
+			if requestedModel == "gpt-6.1-sol" {
+				expectedAccountID = 2
+			}
+			require.Equal(t, expectedAccountID, selection.Account.ID)
+			selection.ReleaseFunc()
+			require.Len(t, decision.Candidates, 2)
+			for _, candidate := range decision.Candidates {
+				require.Equal(t, "exact", candidate.QualityBasis)
+				require.Nil(t, candidate.AccountQualityPrior)
+				require.NotNil(t, candidate.QualityRatio)
+				expectedRatio := 0.0
+				if candidate.AccountID == expectedAccountID {
+					expectedRatio = 1.0
+				}
+				require.Equal(t, expectedRatio, *candidate.QualityRatio)
+			}
+		})
+	}
+}
+
+func TestOpenAIAccountPriorActualDispatchKeepsUnavailableModelUnknown(t *testing.T) {
+	for _, condition := range []string{"missing", "stale", "error"} {
+		t.Run(condition, func(t *testing.T) {
+			evaluation, repository, accountRepo, gateway := rankingHarness(t)
+			repository.config.SchedulingPolicy = OpenAIEvalSchedulingPolicyAvoidDegradation
+			repository.config.Revision++
+			accountRepo.items[0].RateMultiplier = rankingPtr(0.1)
+			accountRepo.items[1].RateMultiplier = rankingPtr(0.2)
+			schedule := OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 300}
+			repository.config.Accounts = []OpenAIEvalAccountConfig{
+				{AccountID: 1, RequestedModel: "gpt-6-astra", ReasoningEffort: "high", CandySchedule: schedule},
+				{AccountID: 2, RequestedModel: "gpt-6.1-sol", ReasoningEffort: "high", CandySchedule: schedule},
+			}
+			now := time.Now()
+			repository.runs = []OpenAIEvalRun{overviewQualityRun(1, 2, "gpt-6.1-sol", "high", OpenAIEvalTypeCandy, true, now)}
+			if condition != "missing" {
+				run := overviewQualityRun(2, 1, "gpt-6-astra", "high", OpenAIEvalTypeCandy, true, now.Add(-48*time.Hour))
+				if condition == "error" {
+					run = overviewQualityRun(2, 1, "gpt-6-astra", "high", OpenAIEvalTypeCandy, true, now)
+					run.Status = "error"
+				}
+				repository.runs = append(repository.runs, run)
+			}
+			_, err := evaluation.EvaluateScheduling(context.Background(), 1)
+			require.NoError(t, err)
+			ctx := WithRequestedReasoningEffort(context.Background(), "high")
+			selection, decision, err := gateway.SelectAccountWithScheduler(ctx, rankingPtr(int64(7)), "", "", "gpt-6-astra", nil, OpenAIUpstreamTransportAny, false)
+			require.NoError(t, err)
+			require.NotNil(t, selection)
+			require.Equal(t, int64(2), selection.Account.ID, "an unassessed model uses the account-level leaderboard until model evidence exists")
+			selection.ReleaseFunc()
+			require.Len(t, decision.Candidates, 2)
+			for _, candidate := range decision.Candidates {
+				if candidate.AccountID == 2 {
+					require.Equal(t, "aggregate_fallback", candidate.QualityBasis)
+					require.NotNil(t, candidate.AccountQualityPrior)
+				} else {
+					require.Equal(t, "none", candidate.QualityBasis)
+					require.Nil(t, candidate.QualityRatio)
+					require.Nil(t, candidate.AccountQualityPrior)
+				}
+				require.Nil(t, candidate.OverviewPrior)
+			}
+		})
+	}
 }
 
 func TestOpenAIAccountPriorScorerQualityTiersAndPolicies(t *testing.T) {
@@ -95,14 +274,21 @@ func TestOpenAIAccountPriorScorerQualityTiersAndPolicies(t *testing.T) {
 			}
 		})
 	}
-	// Within one prior tier, current-request runtime factors break the tie.
+	// Within one prior tier, runtime evidence changes the price order only past the sample-backed threshold.
 	priors[2] = cloneAccountQualityPrior(priors[1])
 	inputs[1].factors.Quality = emptyOpenAIEvalRankingFactors().Quality
-	inputs[0].factors.ErrorRate = OpenAIEvalRankingErrorRate{OpenAIEvalFactorMeta: rankingKnown(0, now)}
-	inputs[1].factors.ErrorRate = OpenAIEvalRankingErrorRate{OpenAIEvalFactorMeta: rankingKnown(1, now)}
+	inputs[0].factors.ErrorRate = OpenAIEvalRankingErrorRate{OpenAIEvalFactorMeta: rankingKnown(0, now), Value: rankingPtr(1.), SampleCount: 10}
+	inputs[1].factors.ErrorRate = OpenAIEvalRankingErrorRate{OpenAIEvalFactorMeta: rankingKnown(1, now), Value: rankingPtr(0.), SampleCount: 10}
 	rows = scoreOpenAIEvalRanking(OpenAIEvalSchedulingPolicyAvoidDegradation, OpenAIEvalRankingWeights{ErrorRate: 1}, inputs, now, nil, priors)
 	require.Equal(t, int64(2), rows[0].AccountID)
-	require.Equal(t, *rows[0].QualityTier, *rows[1].QualityTier)
+	var failedRow OpenAIEvalRankedAccount
+	for _, row := range rows {
+		if row.AccountID == 1 {
+			failedRow = row
+		}
+	}
+	require.Contains(t, failedRow.ThresholdReasons, "error_rate_threshold")
+	require.Equal(t, rows[0].AccountQualityPrior.Ratio, failedRow.AccountQualityPrior.Ratio)
 }
 
 func TestOpenAIAccountPriorModelPolicyOverride(t *testing.T) {
@@ -194,7 +380,7 @@ func TestOpenAIAccountPriorEligibilityAndNoLaundering(t *testing.T) {
 				gen.overview[gen.overviewByID[2]].GroupIDs = []int64{0}
 			}
 			priors := accountQualityPriors(gen, cfg, group, "gpt-6.1-sol", "high", accounts.items, latest, now)
-			if condition == "fresh" || condition == "ungrouped" {
+			if condition == "fresh" || condition == "ungrouped" || condition == "configured_missing" || condition == "configured_stale" || condition == "exact_diagnostic" {
 				require.NotNil(t, priors[2])
 				require.Equal(t, 1., priors[2].Ratio)
 			} else {
@@ -217,7 +403,7 @@ func TestOpenAIAccountPriorSnapshotLiveParityAndImmutableDTO(t *testing.T) {
 	require.NoError(t, err)
 	dim := rankingDimension(t, s, 7, "gpt-6.1-sol", "high")
 	require.Equal(t, int64(2), dim.Accounts[0].AccountID)
-	require.Equal(t, "account_prior", dim.Accounts[0].QualityBasis)
+	require.Equal(t, "model_effort_fallback", dim.Accounts[0].QualityBasis)
 	require.False(t, dim.Accounts[0].AccountQualityPrior.ExpiresAt.After(s.ranking.current.deadline))
 	require.False(t, dim.Accounts[0].Factors.Quality.Known)
 	require.False(t, dim.ValidUntil.After(dim.Accounts[0].AccountQualityPrior.ExpiresAt))

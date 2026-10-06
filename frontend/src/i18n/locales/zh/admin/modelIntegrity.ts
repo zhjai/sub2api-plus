@@ -98,7 +98,7 @@ export default {
       maxAttempts: {
         label: '每个样本最多请求',
         unit: '次（含首次）',
-        hint: '适用于糖果题、行为指纹和 ModelTrace 的手动与自动测试，范围 1–10，默认 3。请求失败时自动重试，重试同样计费。状态探针的两次请求相互关联，不重试。'
+        hint: '适用于糖果题、行为指纹和 ModelTrace 的手动与自动测试，范围 1–10，默认 3。请求失败时自动重试，重试同样计费。状态探针读取同一个值，但它的一次尝试是一条全新的「取票 + 续写」链，最多 3 条链、共 6 次请求。'
       },
       targets: '测试对象',
       targetsHint: '每个测试对象为「账号 + 模型 + 推理强度」组合，独立测试。',
@@ -128,7 +128,7 @@ export default {
         },
         state_probe: {
           name: '状态探针',
-          what: '连续发送两次关联请求，检测线路是否在中途切换。结果不计入降智通过率，也不改变 BPS 状态；BPS 自动切换由「调度策略」中的账号探测决定。'
+          what: '发送两次关联请求（先取票、再续写），检测线路是否在中途切换；失败时重新开始一条链，最多 3 条链、共 6 次请求。结果不计入降智通过率，也不改变 BPS 状态；BPS 自动切换由「调度策略」中的账号探测决定。'
         }
       },
       runNow: '立即测试',
@@ -172,7 +172,7 @@ export default {
       },
       perRun: '每次 {count} 次请求',
       perRunRetry: '每次 {count} 次请求，失败重试时最多 {max} 次',
-      perRunNoRetry: '每次 {count} 次请求，不重试',
+      perRunRetryChains: '每次 {count} 次请求为一条链，失败重试时最多 {chains} 条链、共 {max} 次请求',
       perDay: '每天约 {count} 次请求',
       perDayOff: '未开启自动运行',
       nextRun: '下次 {time}',
@@ -233,6 +233,7 @@ export default {
         reinterpreted: '该记录原判定为{status}（规则 {rule}）。上方结果按当前规则 {current} 对同一批已记录输出重新解读，测试并未重新运行。',
         attributionNote: '归因基于回答行为推断，不能证明实际路由。该测试开启自动运行时，最近一次已完成的归因结论会计入降智通过率，手动或自动运行均可。ModelTrace 只要有一条有效输出即可归因，失败的请求仍保留以供排查；行为指纹需全部计划采样均有效才会归因。',
         stateProbeMetric: '两次请求状态码 {mint} / {cont}，{ticket}',
+        stateProbeMetricChains: '共发送 {chains} 条链，最后一条链的状态码 {mint} / {cont}，{ticket}',
         newTicket: '线路已切换',
         sameTicket: '线路未变',
         ticketUnknown: '未能判断线路是否切换',
@@ -274,6 +275,7 @@ export default {
         stateProbe: {
           mint: '首次请求',
           continue: '关联请求',
+          inChain: '第 {chain} 条链的{request}',
           completed: '已完成',
           completedNote: '请求已完成。该测试只比较线路票据，不保存回答内容。',
           notSent: '未发送',
@@ -323,8 +325,27 @@ export default {
         },
         levelAria: '{factor}：{level} / 4',
         qualityMode: {
-          tier: '优先筛选',
+          tier: '优先比较',
           ignored: '不参考'
+        },
+        /**
+         * 各策略的比较步骤，按先后顺序。后一步只在前一步相同时才起作用，
+         * 因此这是有序步骤，不是权重。
+         */
+        order: {
+          within_thresholds: '未超运行阈值的账号优先于其余账号',
+          quality: '降智通过率更高',
+          price: '价格更低',
+          weighted_score: '自定义加权分更高',
+          weighted_tiebreak: '仍相同时，自定义加权分更高',
+          account_order: '仍相同时，按账号 ID 排序',
+          priority: {
+            cost: '价格更低',
+            error_rate: '错误率更低',
+            ttft: '首包更快',
+            load: '并发负载更低',
+            quality: '降智通过率更高'
+          }
         },
         options: {
           legacy: {
@@ -333,19 +354,20 @@ export default {
           },
           cost_first: {
             name: '优先低价',
-            effect: '优先调度计费倍率较低的账号；错误率与首包延迟权重相应降低。'
+            effect: '按价格从低到高排序；真实请求的错误率或首包延迟超过本策略阈值的账号，排到其余账号之后。'
           },
           stability_first: {
             name: '优先稳定',
-            effect: '优先调度请求错误率低、首包延迟短的账号；价格与负载使用较小的固定权重，不参考降智通过率。'
+            effect: '与「优先低价」相同按价格排序，但错误率与首包延迟阈值更严格；完全不参考降智通过率。'
           },
           avoid_degradation: {
             name: '避免降智',
-            effect: '先从降智通过率最高的一档中选择，同一档内按价格与运行稳定性排序；该档没有可用容量时再依次尝试下一档。'
+            effect: '降智通过率分档始终优先，同一档内按价格排序；最高一档没有未超阈值的账号时，再依次尝试下一档。'
           },
           custom_balance: {
             name: '自定义平衡',
-            effect: '按自定义的价格、错误率、首包延迟、负载与降智通过率权重加权排序。'
+            effect: '按自定义的价格、错误率、首包延迟、负载与降智通过率权重排序，不应用运行阈值：超过阈值的账号不会因此后移。真实样本不足时，未知的错误率与首包延迟得分不会高于已测得的成功，排序先依据价格与降智通过率。',
+            effectWithPriorities: '先按你设定的优先因素逐项严格比较，仍相同时再按权重排序；不应用运行阈值。对于优先因素，缺少该项数据的账号排在有数据的账号之后。'
           },
         },
         custom: {
@@ -364,10 +386,57 @@ export default {
             quality: '已勾选测试项中，最近一次结论为通过或疑似通过的项数 ÷ 勾选项数。开启自动运行即为勾选，手动和自动运行的结果都计入。通过率未知时按该权重的中性值计分，这是计分规则，不代表 50% 通过率。'
           },
           legacyFolded: '旧版「稳定性」权重已按 60% 错误率、40% 首包延迟并入，排序结果不变。',
-          zeroTotal: '权重合计须大于 0，请至少为一项设置权重。'
+          zeroTotal: '权重合计须大于 0，请至少为一项设置权重，或添加优先因素。',
+          priorities: {
+            title: '优先顺序',
+            hint: '可选。在权重之前，按顺序逐项严格比较的因素。',
+            empty: '未设置优先因素，账号只按加权分排序。',
+            rules: '第一优先因素决定顺序；只有前面所有优先因素都相同时，后面的优先因素才起作用；仍相同时由加权分决定。同一优先因素下，缺少该项数据的账号排在有数据的账号之后。设置优先因素后，各项权重均可为 0%；全部为 0% 时，所有优先因素都相同的账号按账号 ID 排序。',
+            then: '之后仍相同时，由加权分更高者优先。',
+            thenAccountOrder: '所有权重均为 0%，之后仍相同时按账号 ID 排序。',
+            addLabel: '要添加的因素',
+            add: '添加优先因素',
+            allUsed: '所有因素均已设为优先。',
+            moveUp: '将{factor}上移',
+            moveDown: '将{factor}下移',
+            remove: '从优先顺序中移除{factor}',
+            added: '已将{factor}添加为第 {n} 优先。',
+            moved: '{factor}现为第 {n} 优先。',
+            removed: '已从优先顺序中移除{factor}。',
+            badge: '第 {n} 优先',
+            summary: '优先：{list}；其后按权重：{weights}',
+            summaryAccountOrder: '优先：{list}；权重均为 0%，其后按账号 ID',
+            summaryJoin: '，其次'
+          }
         },
-        avoidNote: '降智通过率按测试项计算：已勾选的糖果题、行为指纹、ModelTrace 中，最近一次已完成测试的结论为通过或疑似通过的项数 ÷ 勾选项数。开启自动运行即为勾选；最新结果无论来自手动还是自动运行都计入，进行中的测试不会替代它。例如勾选两项、通过一项为 50%，勾选三项、通过一项为 33.3%。每项只看最终结论，与采样次数和重试无关。任一勾选项的最新结果缺少有效结论（没有有效输出、运行失败或取消、已过期）时，通过率为未知，既不算通过也不算降智，也不会改用更早的通过结果。「避免降智」先从通过率最高的一档中选择，同一档内按价格与运行稳定性排序；该档没有可用容量时再依次尝试下一档。通过率未知的账号排在所有已评估账号之后。账号停用、模型支持、容量和续写响应的账号绑定仍实时判断。',
+        avoidNote: '降智通过率按测试项计算：已勾选的糖果题、行为指纹、ModelTrace 中，最近一次已完成测试的结论为通过或疑似通过的项数 ÷ 勾选项数。开启自动运行即为勾选；最新结果无论来自手动还是自动运行都计入，进行中的测试不会替代它。例如勾选两项、通过一项为 50%，勾选三项、通过一项为 33.3%。每项只看最终结论，与采样次数和重试无关。任一勾选项的最新结果缺少有效结论（没有有效输出、运行失败或取消、已过期）时，通过率为未知，既不算通过也不算降智，也不会改用更早的通过结果。「避免降智」始终先从通过率最高的一档中选择，同一档内按价格排序；该档没有未超阈值的账号或没有可用容量时，再依次尝试下一档。通过率未知的账号排在所有已评估账号之后。账号停用、模型支持、容量和续写响应的账号绑定仍实时判断。',
         sharedNote: '选用「系统默认」以外的策略后，已发布的顺序会取代账号优先级、系统调度权重和可迁移的会话粘性；只有续写响应等必须绑定的请求仍留在原账号。负载权重仅在「自定义平衡」下可调，其余策略使用固定权重。'
+      },
+      thresholds: {
+        title: '运行阈值',
+        hint: '账号的真实请求错误率或首包延迟超过所用策略的阈值时，会排到两项均未超限的账号之后。账号不会被停用，能否调度仍由归属、分组和容量等条件决定。「系统默认」不使用阈值，「自定义平衡」按自身的优先顺序与权重排序，两者均不在此设置。',
+        columns: {
+          errorRate: '错误率超过',
+          ttft: '首包延迟超过'
+        },
+        units: {
+          seconds: '秒'
+        },
+        inUse: '使用中',
+        fieldAria: '{policy}：{field}',
+        zeroNote: '错误率设为 0% 时，样本数达标后只要出现一次失败，账号就会后移。',
+        samples: {
+          title: '最少真实样本数（所有策略共用）',
+          min_error_samples: '计入错误率前所需的请求数',
+          min_ttft_samples: '计入首包延迟前所需的测量次数',
+          note: '账号样本数未达到时不应用阈值。只统计真实请求，监测探测和估算值不会充当缺少的样本。'
+        },
+        errors: {
+          error_rate: '{policy}：请输入 0 到 100% 之间的错误率。',
+          ttft_seconds: '{policy}：请输入大于 0、不超过 86,400 秒的延迟。',
+          samples: '请输入 1 到 1,000,000 之间的整数。'
+        },
+        invalid: '部分运行阈值超出范围，请修正标出的数值后再保存。'
       },
       quality: {
         title: '调度评估间隔',
@@ -508,11 +577,32 @@ export default {
       },
       decisions: {
         title: '最近调度记录',
-        hint: '每次真实请求选择账号的过程。当前实例仅保留最近 {limit} 条，服务重启后清空。',
+        hint: '每次真实请求选择账号的过程。本实例内存只保留最近 {window} 条，服务重启后清空，其他实例处理的请求不在这里。',
         empty: '本实例暂无请求调度记录。',
-        emptyInstance: '记录只保存在当前服务实例的内存中，最多 {limit} 条，重启后清空；由其他实例处理的请求不会显示在这里。因此空列表不代表没有流量。评估结果见「评估记录」。',
+        emptyInstance: '记录只保存在当前服务实例的内存中，最多 {window} 条，重启后清空；由其他实例处理的请求不会显示在这里。因此空列表不代表没有流量。评估结果见「评估记录」。',
         noMatch: '没有符合筛选条件的记录。',
         filterModel: '全部模型',
+        filterGroup: '全部分组',
+        filterGroupLabel: '按请求分组筛选',
+        scopeAll: '本实例保留最近 {window} 条记录，这里显示其中全部分组最新的 {count} 条。',
+        scopeGroup: '本实例保留最近 {window} 条记录，这里显示其中「{group}」分组最新的 {count} 条。',
+        scopeCapped: '每次最多读取 {limit} 条，更早的记录未列出。',
+        loading: '正在读取请求调度记录…',
+        unavailable: '该筛选的记录未能读取，原因见上方。点击「刷新」重试。',
+        emptyGroup: '本实例保留的最近 {window} 条记录中，没有「{group}」分组的请求。',
+        emptyGroupDetail: '该分组更早的请求可能已被新记录替换，或在服务重启时清空；由其他实例处理的请求不会显示在这里。',
+        showAllGroups: '查看全部分组',
+        groupsUnavailable: '分组列表读取失败，目前只能查看全部分组。刷新页面后重试。',
+        groupId: '分组 #{id}',
+        groupUnknown: '分组未记录',
+        groupNameMissing: '这条记录产生时未保存分组名称',
+        accountId: '账号 #{id}',
+        accountNameMissing: '这条记录产生时未保存账号名称',
+        waiting: '等待 {account} 的并发名额',
+        waitingTag: '未确认获得名额',
+        waitingNote: '记录时请求正在排队等待该账号的并发名额，尚未确认获得名额，不能视为最终处理该请求的账号。',
+        acquired: '已获得并发名额',
+        historicalName: '请求时名称：{name}',
         onlyProblems: '仅显示未选中账号的记录',
         policyUsed: '策略：{policy}',
         actualDispatch: '每一行都是一次真实请求选择账号的过程。评估不会在这里新增记录，评估结果见「评估记录」和上方的账号排行。',
@@ -542,7 +632,7 @@ export default {
         migration: '从 {from}x 倍率账号切换至 {to}x',
         errorLabel: '技术细节',
         columns: {
-          account: '账号',
+          account: '账号（当前名称）',
           rank: '名次',
           verdict: '结果',
           why: '原因',
@@ -558,6 +648,7 @@ export default {
         qualitySplit: '通过 {pass} 项，疑似通过 {suspected} 项',
         qualityContribution: '分数贡献 {value}',
         qualityUnknown: '未知',
+        qualityEvidenceError: '最新评测未计入：',
         qualityHint: '已勾选测试项中，最近一次已完成结论（手动或自动）为通过或疑似通过的项数 ÷ 勾选项数，每项权重相同。任一勾选项的最新结果缺少有效结论时显示未知，不等于 100%。该模型与推理强度没有配置测试项时，本模型通过率仍显示未知，档位由下方的「账号参考」决定：它来自该账号在其他模型或推理强度上的通过率，不是本模型与推理强度的实测通过率。',
         accountReference: '账号参考 {ratio}',
         accountReferenceHint: '该账号其他模型或推理强度的通过率参考：{sources}；评估于 {evaluated}，可用至 {expires}（取诊断有效期与本次评估有效期两者中较早者）。不是本次模型与推理强度的实测通过率。',
@@ -712,9 +803,22 @@ export default {
           quality: '通过率'
         },
         qualityUnknown: '未知',
+        qualityEvidenceError: '最新评测未计入：',
         operationalScore: '运行分 {score}',
         modelsKnown: '{known}/{models} 个模型已知',
         compositeOf: '满分 100',
+        /**
+         * 该账号排在其余账号之后的原因：其真实请求超过当前策略的运行阈值。
+         * 取值见 THRESHOLD_REASONS，未识别的取值按原样显示。
+         */
+        threshold: {
+          label: '超出阈值后移',
+          error_rate_threshold: '错误率',
+          ttft_threshold: '首包延迟',
+          other: '取值：{code}',
+          hint: '该账号的真实请求超过了当前策略的运行阈值，因此排在两项均未超限的账号之后。账号不会被停用，能否调度仍由归属、分组和容量等条件决定。',
+          evidence: '由该账号的真实请求计算，不来自本次评估。'
+        },
         ineligible: '评估时不可用',
         moreGroups: '+{count}',
         coverage: '{models} 个模型有证据，{known} 个通过率已知',
@@ -769,7 +873,9 @@ export default {
           other: '服务端报告了未列出的来源，不视为实测。'
         },
         ordering: {
+          price_asc: '按价格从低到高排序；真实请求超过运行阈值的账号排在最后。',
           score_desc: '按综合分从高到低排列，同分按账号 ID。',
+          priorities_then_score: '按你设定的优先因素依次排序，某项缺少数据的账号排在该项有数据的账号之后；仍相同时按综合分从高到低，再按账号 ID。',
           quality_then_score: '先按通过率从高到低排列，未知排在所有已知之后；通过率相同时按运行分（价格、错误率、首包、负载加权）排列，再按账号 ID。',
           legacy: '按系统调度权重排列，与启用本功能前一致。'
         },
@@ -808,7 +914,8 @@ export default {
         appliedYes: '是',
         appliedNo: '否，评测影响已关闭',
         next: '下次评估 {time}',
-        requestsFailed: '请求调度记录读取失败：{reason}'
+        requestsFailed: '请求调度记录读取失败：{reason}',
+        requestsFailedKept: '下方是该筛选上次成功读取的记录，可能不是最新。'
       },
       rank: {
         title: '账号排序',

@@ -120,29 +120,54 @@ export function runFailureDetail(t: Translate, run: OpenAIEvalRun): string {
 type StateProbeWithSamples = NonNullable<OpenAIEvalRun['outcome']['state_probe']> & { samples?: OpenAIEvalSampleRecord[] }
 
 /**
- * Per-request records shown in the detail dialog. State Probe stores its
- * two linked requests (mint, continue) on the run and inside its outcome;
- * some records only carry the latter.
+ * Per-request records shown in the detail dialog. State Probe stores the
+ * linked requests (mint, continue) of every chain it sent on the run and
+ * inside its outcome; some records only carry the latter.
  */
 export function diagnosticSamples(run: OpenAIEvalRun): OpenAIEvalSampleRecord[] {
   if (run.test_type === 'state_probe' && !run.samples?.length) return (run.outcome.state_probe as StateProbeWithSamples | undefined)?.samples ?? []
   return runSamples(run)
 }
 
-/** "First request" / "Linked request" for State Probe records, null for anything else. */
-export function stateProbeRequestName(t: Translate, sample: OpenAIEvalSampleRecord): string | null {
-  if (sample.probe_id === 'state-probe-mint') return t('admin.modelIntegrity.tests.samples.stateProbe.mint')
-  if (sample.probe_id === 'state-probe-continue') return t('admin.modelIntegrity.tests.samples.stateProbe.continue')
-  return null
+/**
+ * Step and chain of a State Probe record. Retrying servers number each chain
+ * ("state-probe-2-mint"); older ones sent a single unnumbered chain.
+ */
+export function stateProbeRecordStep(sample: OpenAIEvalSampleRecord): { step: 'mint' | 'continue'; chain: number } | null {
+  const match = /^state-probe-(?:(\d+)-)?(mint|continue)$/.exec(sample.probe_id ?? '')
+  if (!match) return null
+  return { step: match[2] as 'mint' | 'continue', chain: match[1] ? Number(match[1]) : 1 }
+}
+
+/** Chains the run actually sent, read from its records when the outcome omits the count. */
+export function stateProbeChainCount(run: OpenAIEvalRun): number {
+  const reported = Number(run.outcome.state_probe?.attempts)
+  if (Number.isFinite(reported) && reported > 0) return reported
+  return Math.max(1, ...diagnosticSamples(run).map(sample => stateProbeRecordStep(sample)?.chain ?? 1))
 }
 
 /**
- * Which of the two linked requests failed, with its upstream status and
- * sanitised message. The probe never retries, so no attempt count is given;
- * a record with zero attempts means nothing was sent (e.g. no OAuth token).
+ * "First request" / "Linked request" for State Probe records, null for
+ * anything else. When the run sent more than one chain, the chain is named
+ * too, so a retried mint is not mistaken for the first one.
+ */
+export function stateProbeRequestName(t: Translate, sample: OpenAIEvalSampleRecord, chains = 1): string | null {
+  const record = stateProbeRecordStep(sample)
+  if (!record) return null
+  const request = t(`admin.modelIntegrity.tests.samples.stateProbe.${record.step}`)
+  return chains > 1 ? t('admin.modelIntegrity.tests.samples.stateProbe.inChain', { chain: record.chain, request }) : request
+}
+
+/**
+ * Which request of the chain failed, with its upstream status and sanitised
+ * message. A failed chain is retried as a whole rather than re-sending the
+ * failed request, so every record shows a single send and its attempt count
+ * says nothing; a record with zero attempts means nothing was sent (e.g. no
+ * OAuth token). The last failed record is the one the verdict reports: an
+ * earlier chain's failure was already superseded by the retry.
  */
 function stateProbeFailureDetail(t: Translate, run: OpenAIEvalRun): string {
-  const sample = diagnosticSamples(run).find(sampleFailed)
+  const sample = diagnosticSamples(run).filter(sampleFailed).at(-1)
   if (!sample) return ''
   const parts: string[] = []
   if (sample.http_status && sample.http_status >= 400) parts.push(t('admin.modelIntegrity.tests.samples.http', { status: sample.http_status }))
@@ -151,6 +176,6 @@ function stateProbeFailureDetail(t: Translate, run: OpenAIEvalRun): string {
   if (!parts.length) return ''
   const error = parts.join(t('admin.modelIntegrity.tests.samples.separator'))
   if (sample.attempts === 0) return t('admin.modelIntegrity.tests.samples.stateProbe.notSentFailure', { error })
-  const request = stateProbeRequestName(t, sample) ?? t('admin.modelIntegrity.tests.samples.errorNoCode')
+  const request = stateProbeRequestName(t, sample, stateProbeChainCount(run)) ?? t('admin.modelIntegrity.tests.samples.errorNoCode')
   return t('admin.modelIntegrity.tests.samples.stateProbe.failure', { request, error })
 }

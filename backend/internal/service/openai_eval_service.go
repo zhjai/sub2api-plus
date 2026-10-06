@@ -67,7 +67,9 @@ func (s *OpenAIEvalService) Initialize(ctx context.Context) error {
 	if err := normalizeOpenAIEvalQualityConfig(config); err != nil {
 		return err
 	}
-	SetOpenAIEvalSchedulingPolicySnapshot(config)
+	if err := SetOpenAIEvalSchedulingPolicySnapshot(config); err != nil && !errors.Is(err, ErrOpenAIEvalQualityRefreshSuperseded) {
+		return err
+	}
 	if s.ranking != nil {
 		s.ranking.mu.Lock()
 		s.ranking.adoptLocked(config)
@@ -96,7 +98,9 @@ func (s *OpenAIEvalService) GetConfig(ctx context.Context) (*OpenAIEvalConfig, e
 			config.MaxRequestAttempts = OpenAIEvalDefaultMaxRequestAttempts
 		}
 		if s.ranking == nil {
-			SetOpenAIEvalSchedulingPolicySnapshot(config)
+			if err := SetOpenAIEvalSchedulingPolicySnapshot(config); err != nil && !errors.Is(err, ErrOpenAIEvalQualityRefreshSuperseded) {
+				return nil, err
+			}
 		}
 		if s.accounts != nil {
 			accountCache := make(map[int64]*Account)
@@ -149,6 +153,25 @@ func (s *OpenAIEvalService) GetConfig(ctx context.Context) (*OpenAIEvalConfig, e
 func (s *OpenAIEvalService) SaveConfig(ctx context.Context, config *OpenAIEvalConfig, actorID int64) error {
 	if config == nil {
 		return errors.New("evaluation config is required")
+	}
+	rules, rulesErr := normalizeOpenAIEvalAccountPriorityRules(config.AccountPriorityRules)
+	if rulesErr != nil {
+		return rulesErr
+	}
+	config.AccountPriorityRules = rules
+	checkedAccounts := make(map[int64]bool)
+	for index, rule := range rules {
+		if (rule.Enabled != nil && !*rule.Enabled) || checkedAccounts[rule.AccountID] {
+			continue
+		}
+		if s.accounts == nil {
+			return errors.New("account lookup is unavailable for account priority rule validation")
+		}
+		account, accountErr := s.accounts.GetByID(ctx, rule.AccountID)
+		if accountErr != nil || account == nil {
+			return fmt.Errorf("account priority rule %d references an unavailable account %d", index, rule.AccountID)
+		}
+		checkedAccounts[rule.AccountID] = true
 	}
 	if err := normalizeOpenAIEvalQualityConfig(config); err != nil {
 		return err
@@ -308,7 +331,9 @@ func (s *OpenAIEvalService) SaveConfig(ctx context.Context, config *OpenAIEvalCo
 		// independent evaluation failed. Its structured status is in the DTO.
 		_, _ = s.ranking.evaluate(ctx, "policy_saved", true)
 	} else {
-		SetOpenAIEvalSchedulingPolicySnapshot(config)
+		if err := SetOpenAIEvalSchedulingPolicySnapshot(config); err != nil && !errors.Is(err, ErrOpenAIEvalQualityRefreshSuperseded) {
+			return err
+		}
 	}
 	return nil
 }
@@ -417,6 +442,12 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 	if source != "manual" && source != "scheduled" {
 		return nil, fmt.Errorf("unsupported evaluation trigger source %q", source)
 	}
+	if source == "scheduled" {
+		ctx = context.WithValue(ctx, openAIEvalAutomaticKey{}, true)
+		if err := s.accountTest.checkOpenAIEvalAutomaticAccount(ctx, &Account{ID: request.AccountID}); err != nil {
+			return nil, err
+		}
+	}
 	if request.TestType == OpenAIEvalTypeFingerprint {
 		if _, err := OpenAIEvalFingerprintSampleCount(request.SampleMode); err != nil {
 			return nil, err
@@ -450,8 +481,11 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 	if maximum < 1 || maximum > 10 {
 		return nil, errors.New("max_attempts must be between 1 and 10")
 	}
-	if request.TestType == OpenAIEvalTypeStateProbe && request.MaxAttempts != nil && maximum != 1 {
-		return nil, errors.New("State Probe retries are unsupported; max_attempts must be 1 for the linked ticket chain")
+	// A state probe is a linked mint/continue pair. Keep its bounded retry
+	// contract at three chains (six physical sends) even if the shared eval
+	// retry setting is higher.
+	if request.TestType == OpenAIEvalTypeStateProbe && maximum > 3 {
+		maximum = 3
 	}
 	leaseKey := openAIEvalRouteKey(request.AccountID, request.RequestedModel, request.ReasoningEffort) + ":" + request.TestType
 	owner, err := newOpenAIEvalLeaseOwner()
@@ -508,7 +542,7 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 	case OpenAIEvalTypeModelTrace:
 		expectedSamples = OpenAIEvalModelTraceRequests
 	case OpenAIEvalTypeStateProbe:
-		expectedSamples = 2
+		expectedSamples = 2 * maximum
 	}
 	run := &OpenAIEvalRun{
 		AccountID: request.AccountID, TestType: request.TestType,
@@ -520,6 +554,11 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 		ExpectedSamples: expectedSamples,
 		Phase:           "sampling",
 		Samples:         make([]OpenAIEvalSampleRecord, 0),
+		DiagnosticOnly:  !target.Account.Schedulable,
+	}
+	run.Protocol = "responses"
+	if !target.Credential.IsOpenAIOAuthLike() && shouldForwardOpenAIResponsesViaRawChatCompletions(target.Account) {
+		run.Protocol = "chat_completions"
 	}
 	runID, err := s.repo.CreateRun(runCtx, run)
 	if err != nil {
@@ -555,6 +594,11 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 		}
 	}
 	finish := func(runErr error) (*OpenAIEvalRun, error) {
+		if s.accounts != nil {
+			if latest, readErr := s.accounts.GetByID(context.WithoutCancel(ctx), target.Account.ID); readErr == nil && latest != nil && !latest.Schedulable {
+				run.DiagnosticOnly = true
+			}
+		}
 		run.FinishedAt = time.Now().UTC()
 		run.DurationMS = run.FinishedAt.Sub(start).Milliseconds()
 		if lostLease.Load() {
@@ -594,20 +638,20 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 		}
 		// Diagnostic quality changes preference only. It must not fabricate
 		// operational health failures or hard-exclude a production route.
-		if shouldRecordOpenAIEvalRouteHealth(request.TestType) {
+		if !run.DiagnosticOnly && shouldRecordOpenAIEvalRouteHealth(request.TestType) {
 			s.recordRouteHealth(finishCtx, target.Account.ID, request.RequestedModel, request.ReasoningEffort, hardFailure, hardFailureCode)
 		}
 		return run, runErr
 	}
 	if request.TestType == OpenAIEvalTypeStateProbe {
-		probe := s.accountTest.RunOpenAIStateProbe(runCtx, target)
+		probe := s.accountTest.RunOpenAIStateProbeAttempts(runCtx, target, maximum)
 		run.RequestCount = probe.RequestCount
 		run.Samples = probe.Samples
 		run.CompletedSamples = len(probe.Samples)
-		run.Outcome = OpenAIEvalOutcome{Status: probe.Verdict, Reason: probe.Failure, SampleCount: probe.RequestCount, ExpectedCount: 2, Confidence: "low", Scheduling: "alert_only", StateProbe: probe}
+		run.Outcome = OpenAIEvalOutcome{Status: probe.Verdict, Reason: probe.Failure, SampleCount: probe.RequestCount, ExpectedCount: expectedSamples, Confidence: "low", Scheduling: "alert_only", StateProbe: probe}
 		run.Status = probe.Verdict
 		completed, finishErr := finish(nil)
-		if finishErr == nil {
+		if finishErr == nil && !completed.DiagnosticOnly {
 			s.applyOpenAIStateProbeBPS(ctx, target, probe, isBPSAccountProbe)
 		}
 		return completed, finishErr
@@ -632,6 +676,9 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 				return finish(ctxErr)
 			}
 			if sampleErr != nil {
+				if record.ErrorCode == "account_scheduling_disabled" {
+					return finish(sampleErr)
+				}
 				markHardFailure(sampleErr)
 				if run.Error == "" {
 					run.Error = record.ErrorCode
@@ -765,7 +812,7 @@ func isHardOpenAIEvalFailure(code string) bool {
 }
 
 func (s *OpenAIEvalService) recordRouteHealth(ctx context.Context, accountID int64, model, effort string, hardFailure bool, failureCode string) {
-	if s == nil || s.accounts == nil || !OpenAIEvalEffectsEnabled() || accountID <= 0 {
+	if s == nil || s.accounts == nil || accountID <= 0 {
 		return
 	}
 	lookupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)

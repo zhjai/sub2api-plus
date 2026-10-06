@@ -135,10 +135,12 @@ type OpenAIEvalRouteHealth struct {
 const OpenAIEvalRouteHealthTTL = 30 * time.Minute
 
 type openAIEvalSchedulingPolicySnapshot struct {
-	Enabled       bool
-	Default       string
-	CustomBalance OpenAIEvalPolicyWeights
-	Rules         []OpenAIEvalSchedulingPolicyRule
+	AccountPriorities map[int64]openAIEvalAccountPriorityIndex
+	Thresholds        OpenAIEvalSchedulingThresholds
+	Enabled           bool
+	Default           string
+	CustomBalance     OpenAIEvalPolicyWeights
+	Rules             []OpenAIEvalSchedulingPolicyRule
 }
 
 var openAIEvalSchedulingPolicy atomic.Value // *openAIEvalSchedulingPolicySnapshot
@@ -158,32 +160,39 @@ func SetOpenAIEvalEffectsEnabled(enabled bool) {
 	snapshot := *openAIEvalSchedulingPolicy.Load().(*openAIEvalSchedulingPolicySnapshot)
 	if snapshot.Enabled != enabled {
 		snapshot.Enabled = enabled
-		cache.clearLocked()
 		openAIEvalSchedulingPolicy.Store(&snapshot)
 	}
 }
 
-func SetOpenAIEvalSchedulingPolicySnapshot(config *OpenAIEvalConfig) {
+func SetOpenAIEvalSchedulingPolicySnapshot(config *OpenAIEvalConfig) error {
 	// The revision guard applies to effects and policy as well as the cache.
 	// A rejected configuration leaves the last accepted settings intact.
-	_ = openAIEvalQualitySnapshots.configure(config)
+	return openAIEvalQualitySnapshots.configure(config)
 }
 
-func newOpenAIEvalSchedulingPolicySnapshot(config *OpenAIEvalConfig) *openAIEvalSchedulingPolicySnapshot {
+func newOpenAIEvalSchedulingPolicySnapshot(config *OpenAIEvalConfig) (*openAIEvalSchedulingPolicySnapshot, error) {
 	snapshot := &openAIEvalSchedulingPolicySnapshot{}
 	if config != nil {
+		snapshot.Thresholds = openAIEvalSchedulingThresholds(config)
 		snapshot.Enabled = config.EffectsEnabled
 		snapshot.Default = config.SchedulingPolicy
+		var priorityErr error
+		snapshot.AccountPriorities, priorityErr = buildOpenAIEvalAccountPriorityIndex(config.AccountPriorityRules)
+		if priorityErr != nil {
+			return nil, fmt.Errorf("build account priority rules: %w", priorityErr)
+		}
 		snapshot.CustomBalance = config.CustomBalance
+		snapshot.CustomBalance.AbsolutePriorities = append([]string(nil), config.CustomBalance.AbsolutePriorities...)
 		snapshot.Rules = append([]OpenAIEvalSchedulingPolicyRule(nil), config.Policies...)
 		for i := range snapshot.Rules {
 			if snapshot.Rules[i].CustomBalance != nil {
 				weights := *snapshot.Rules[i].CustomBalance
+				weights.AbsolutePriorities = append([]string(nil), weights.AbsolutePriorities...)
 				snapshot.Rules[i].CustomBalance = &weights
 			}
 		}
 	}
-	return snapshot
+	return snapshot, nil
 }
 
 func OpenAIEvalSchedulingPolicyForRequest(model, effort string) string {
@@ -285,6 +294,10 @@ func normalizeOpenAIEvalSchedulingPolicy(policy string) (string, error) {
 }
 
 func normalizeOpenAIEvalPolicyWeights(weights OpenAIEvalPolicyWeights) (OpenAIEvalPolicyWeights, error) {
+	absolute, err := normalizeOpenAIEvalAbsolutePriorities(weights.AbsolutePriorities)
+	if err != nil {
+		return OpenAIEvalPolicyWeights{}, err
+	}
 	values := []float64{weights.Cost, weights.Stability, weights.ErrorRate, weights.TTFT, weights.Load, weights.Quality}
 	total := 0.0
 	for _, value := range values {
@@ -297,18 +310,24 @@ func normalizeOpenAIEvalPolicyWeights(weights OpenAIEvalPolicyWeights) (OpenAIEv
 		return OpenAIEvalPolicyWeights{}, errors.New("custom balance weight total must be finite")
 	}
 	if total <= 0 {
+		if len(absolute) > 0 {
+			weights.AbsolutePriorities = absolute
+			return weights, nil
+		}
 		return OpenAIEvalPolicyWeights{}, errors.New("custom balance requires at least one positive weight")
 	}
 	if weights.Stability == 0 && math.Abs(total-1) <= 1e-12 {
+		weights.AbsolutePriorities = absolute
 		return weights, nil
 	}
 	return OpenAIEvalPolicyWeights{
-		Cost:      weights.Cost / total,
-		Stability: 0,
-		ErrorRate: weights.ErrorRate/total + 0.6*(weights.Stability/total),
-		TTFT:      weights.TTFT/total + 0.4*(weights.Stability/total),
-		Load:      weights.Load / total,
-		Quality:   weights.Quality / total,
+		Cost:               weights.Cost / total,
+		Stability:          0,
+		ErrorRate:          weights.ErrorRate/total + 0.6*(weights.Stability/total),
+		TTFT:               weights.TTFT/total + 0.4*(weights.Stability/total),
+		Load:               weights.Load / total,
+		Quality:            weights.Quality / total,
+		AbsolutePriorities: absolute,
 	}, nil
 }
 
@@ -386,6 +405,8 @@ func ReadOpenAIEvalRouteHealthFromAccount(account *Account, model, effort string
 }
 
 type OpenAIEvalRun struct {
+	DiagnosticOnly   bool                     `json:"diagnostic_only,omitempty"`
+	Protocol         string                   `json:"protocol,omitempty"`
 	ID               int64                    `json:"id"`
 	AccountID        int64                    `json:"account_id"`
 	TestType         string                   `json:"test_type"`
@@ -522,27 +543,74 @@ type OpenAIEvalBPSAccountConfig struct {
 }
 
 type OpenAIEvalPolicyWeights struct {
-	Cost      float64 `json:"cost"`
-	Stability float64 `json:"stability"`
-	ErrorRate float64 `json:"error_rate"`
-	TTFT      float64 `json:"ttft"`
-	Load      float64 `json:"load"`
-	Quality   float64 `json:"quality"`
+	Cost               float64  `json:"cost"`
+	Stability          float64  `json:"stability"`
+	ErrorRate          float64  `json:"error_rate"`
+	TTFT               float64  `json:"ttft"`
+	Load               float64  `json:"load"`
+	Quality            float64  `json:"quality"`
+	AbsolutePriorities []string `json:"absolute_priorities,omitempty"`
+}
+
+func openAIEvalPolicyWeightsZero(weights OpenAIEvalPolicyWeights) bool {
+	return weights.Cost == 0 && weights.Stability == 0 && weights.ErrorRate == 0 && weights.TTFT == 0 && weights.Load == 0 && weights.Quality == 0 && len(weights.AbsolutePriorities) == 0
+}
+
+var openAIEvalAbsolutePriorityFactors = map[string]string{
+	"cost": "cost", "price": "cost", "error_rate": "error_rate", "errors": "error_rate",
+	"ttft": "ttft", "latency": "ttft", "load": "load", "quality": "quality",
+}
+
+func normalizeOpenAIEvalAbsolutePriorities(values []string) ([]string, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, raw := range values {
+		key := strings.ToLower(strings.TrimSpace(raw))
+		canonical, ok := openAIEvalAbsolutePriorityFactors[key]
+		if !ok {
+			return nil, fmt.Errorf("unsupported absolute priority %q", raw)
+		}
+		if _, duplicate := seen[canonical]; duplicate {
+			return nil, fmt.Errorf("duplicate absolute priority %q", canonical)
+		}
+		seen[canonical] = struct{}{}
+		out = append(out, canonical)
+	}
+	return out, nil
+}
+
+func openAIEvalHasAbsolutePriority(values []string, factor string) bool {
+	for _, value := range values {
+		if value == factor {
+			return true
+		}
+	}
+	return false
+}
+
+func openAIEvalRankingUsesQuality(policy string, weights OpenAIEvalRankingWeights) bool {
+	return policy == OpenAIEvalSchedulingPolicyAvoidDegradation ||
+		weights.Quality > 0 || openAIEvalHasAbsolutePriority(weights.AbsolutePriorities, "quality")
 }
 
 type OpenAIEvalConfig struct {
-	QualityRefreshIntervalSeconds int `json:"quality_refresh_interval_seconds"`
-	MaxRequestAttempts            int `json:"max_request_attempts"`
+	AccountPriorityRules          []OpenAIEvalAccountPriorityRule `json:"account_priority_rules,omitempty"`
+	QualityRefreshIntervalSeconds int                             `json:"quality_refresh_interval_seconds"`
+	MaxRequestAttempts            int                             `json:"max_request_attempts"`
 	// Revision is optimistic-concurrency metadata.  Zero is accepted for
 	// legacy clients and is upgraded atomically by the repository.
-	Revision         int64                            `json:"revision,omitempty"`
-	EffectsEnabled   bool                             `json:"effects_enabled"`
-	BPSAutoEnabled   bool                             `json:"bps_auto_enabled"`
-	SchedulingPolicy string                           `json:"scheduling_policy,omitempty"`
-	Policies         []OpenAIEvalSchedulingPolicyRule `json:"policies,omitempty"`
-	CustomBalance    OpenAIEvalPolicyWeights          `json:"custom_balance,omitempty"`
-	BPSAccounts      []OpenAIEvalBPSAccountConfig     `json:"bps_accounts,omitempty"`
-	Accounts         []OpenAIEvalAccountConfig        `json:"accounts"`
+	Revision             int64                            `json:"revision,omitempty"`
+	EffectsEnabled       bool                             `json:"effects_enabled"`
+	BPSAutoEnabled       bool                             `json:"bps_auto_enabled"`
+	SchedulingPolicy     string                           `json:"scheduling_policy,omitempty"`
+	Policies             []OpenAIEvalSchedulingPolicyRule `json:"policies,omitempty"`
+	CustomBalance        OpenAIEvalPolicyWeights          `json:"custom_balance,omitempty"`
+	SchedulingThresholds *OpenAIEvalSchedulingThresholds  `json:"scheduling_thresholds,omitempty"`
+	BPSAccounts          []OpenAIEvalBPSAccountConfig     `json:"bps_accounts,omitempty"`
+	Accounts             []OpenAIEvalAccountConfig        `json:"accounts"`
 }
 
 // OpenAIEvalSchedulingPolicyRule scopes a policy to the requested public

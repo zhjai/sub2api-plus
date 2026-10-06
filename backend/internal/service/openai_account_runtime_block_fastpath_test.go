@@ -35,6 +35,42 @@ func (r *oauth429RateLimitRepo) SetModelRateLimit(_ context.Context, _ int64, sc
 	return nil
 }
 
+func TestOpenAIReplayIDRejectionSkipsConfiguredAccountPenalties(t *testing.T) {
+	for _, model := range []string{"", "gpt-6-astra"} {
+		for _, errorBody := range []string{
+			`{"error":{"type":"v_api_biz_error","code":"invalid_request","param":"input[0].id","message":"replay item rejected"}}`,
+			`{"error":{"type":"invalid_request_error","code":"invalid_value","param":"input.455.id","message":"replay item rejected"}}`,
+			`{"error":{"type":"v_api_biz_error","code":"invalid_request","param":"input*****.id","message":"replay item rejected"}}`,
+		} {
+			repo := &modelNotFoundAccountRepoStub{}
+			service := &OpenAIGatewayService{rateLimitService: &RateLimitService{accountRepo: repo}}
+			service.rateLimitService.SetAccountRuntimeBlocker(service)
+			account := openAIModelNotFoundTempAccount()
+			account.Credentials["temp_unschedulable_rules"] = []any{map[string]any{
+				"error_code":       float64(http.StatusBadRequest),
+				"keywords":         []any{"replay item"},
+				"duration_minutes": float64(10),
+			}}
+			shouldDisable := service.handleOpenAIAccountUpstreamError(context.Background(), account, http.StatusBadRequest, http.Header{}, []byte(errorBody), model)
+			require.False(t, shouldDisable, "%s: %s", model, errorBody)
+			require.Zero(t, repo.tempCalls)
+			require.Empty(t, repo.modelRateLimitCalls)
+			require.False(t, service.isOpenAIAccountRuntimeBlocked(account))
+		}
+	}
+	repo := &modelNotFoundAccountRepoStub{}
+	service := &OpenAIGatewayService{rateLimitService: &RateLimitService{accountRepo: repo}}
+	account := openAIModelNotFoundTempAccount()
+	account.Credentials["temp_unschedulable_rules"] = []any{map[string]any{
+		"error_code":       float64(http.StatusBadRequest),
+		"keywords":         []any{"replay item"},
+		"duration_minutes": float64(10),
+	}}
+	shouldDisable := service.handleOpenAIAccountUpstreamError(context.Background(), account, http.StatusBadRequest, http.Header{}, []byte(`{"error":{"type":"invalid_request_error","code":"invalid_value","param":"model","message":"replay item rejected"}}`), "gpt-6-astra")
+	require.True(t, shouldDisable)
+	require.Len(t, repo.modelRateLimitCalls, 1)
+}
+
 func TestOpenAI429FastPath_KeepsOAuthAccountSchedulableDuringRetryWindow(t *testing.T) {
 	repo := &oauth429RateLimitRepo{}
 	rateLimits := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)

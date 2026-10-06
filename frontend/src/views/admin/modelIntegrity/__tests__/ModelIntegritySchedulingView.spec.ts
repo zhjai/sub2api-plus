@@ -185,8 +185,12 @@ beforeEach(() => {
       top_k: 1,
       latency_ms: 1,
       load_skew: 0,
+      group_id: 7,
+      group_name: 'openai-team',
       selected_account_id: 11,
+      selected_account_name: 'oauth-a',
       selected_account_type: 'oauth',
+      acquired: true,
       excluded_account_count: 1,
       previous_response_given: false,
       session_given: false,
@@ -207,13 +211,21 @@ describe('ModelIntegritySchedulingView', () => {
     await wrapper.get('[data-testid="policy-avoid_degradation"]').setValue(true)
     expect(wrapper.text()).toContain('勾选两项、通过一项为 50%，勾选三项、通过一项为 33.3%')
     expect(wrapper.text()).toContain('从通过率最高的一档中选择')
-    expect(wrapper.text()).toContain('该档没有可用容量时再依次尝试下一档')
+    expect(wrapper.text()).toContain('该档没有未超阈值的账号或没有可用容量时，再依次尝试下一档')
+    expect(wrapper.text()).toContain('同一档内按价格排序')
     expect(wrapper.text()).toContain('账号停用、模型支持、容量和续写响应的账号绑定仍实时判断')
     expect(wrapper.text()).not.toMatch(/实际有效回答的样本数/)
     expect(wrapper.text()).not.toMatch(/仅作提醒|不参与账号排序/)
-    // A strict tier is stated, never drawn as a weight price could trade against.
-    expect(wrapper.get('[data-testid="mixer-quality-avoid_degradation"]').text()).toBe('优先筛选')
-    expect(wrapper.get('[data-testid="mixer-quality-stability_first"]').text()).toBe('不参考')
+    // The pass rate is its own comparison step, stated rather than drawn as a
+    // weight price could trade against.
+    expect(wrapper.get('[data-testid="mixer-quality-avoid_degradation"]').text()).toBe('降智通过率更高')
+    // Stability first ignores the pass rate entirely, so its order has no
+    // pass-rate step to show and cannot read as a weight of 0 %.
+    expect(wrapper.find('[data-testid="mixer-quality-stability_first"]').exists()).toBe(false)
+    // The policy cards state the order, never a stale preset percentage.
+    const orderText = wrapper.get('[data-testid="mixer-order"]').text()
+    expect(orderText).toContain('价格更低')
+    expect(orderText).not.toMatch(/%/)
     await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
     await flushPromises()
 
@@ -226,6 +238,154 @@ describe('ModelIntegritySchedulingView', () => {
     // Legacy config without the field gets the 1-hour default.
     expect(payload.quality_refresh_interval_seconds).toBe(3600)
     expect(payload).not.toHaveProperty('quality_refreshed_at')
+  })
+
+  it('describes custom balance as weighted factors, without a threshold step', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    // rankingThresholdReasons returns nil for custom balance, so nothing is
+    // screened out by a threshold: the card must show the weighted order alone.
+    const card = wrapper.findAll('.mixer-option').find(option => (option.find('input').element as HTMLInputElement).value === 'custom_balance')!
+    const steps = card.findAll('.mixer-order-step')
+    expect(steps.map(step => step.find('.mixer-order-text').text())).toEqual(['自定义加权分更高'])
+    expect(card.find('[data-testid="mixer-order"]').text()).not.toContain('未超运行阈值')
+    // One step is not a sequence, so it carries no step number.
+    expect(card.find('.mixer-order-num').exists()).toBe(false)
+    // The factors that decide that score are the ones the page lets admins set.
+    expect(card.text()).toContain('按自定义的价格、错误率、首包延迟、负载与降智通过率权重排序')
+    expect(card.text()).toContain('不应用运行阈值')
+  })
+
+  it('edits an ordered list of absolute priorities and describes the real order on the card', async () => {
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({
+      scheduling_policy: 'custom_balance',
+      // 'price' is a server alias; the editor reads it as the price factor.
+      custom_balance: { cost: 0, error_rate: 0.5, ttft: 0.5, load: 0, quality: 0, absolute_priorities: ['price'] }
+    }))
+    const wrapper = mountView()
+    await flushPromises()
+    const editor = wrapper.get('[data-testid="custom-balance"]')
+    const card = () => wrapper.findAll('.mixer-option').find(option => (option.find('input').element as HTMLInputElement).value === 'custom_balance')!
+    const rows = () => editor.findAll('[data-testid="priority-row"]').map(row => row.find('.priority-name').text())
+
+    expect(rows()).toEqual([expect.stringContaining('价格更低')])
+    // A prioritized factor may weigh 0 %; that is not the all-zero error.
+    expect(editor.find('[data-testid="weights-error"]').exists()).toBe(false)
+    expect(editor.get('[data-testid="weight-rank-cost"]').text()).toBe('第 1 优先')
+    expect(card().findAll('.mixer-order-text').map(step => step.text())).toEqual(['价格更低', '仍相同时，自定义加权分更高'])
+    expect(card().text()).toContain('先按你设定的优先因素逐项严格比较')
+    expect(card().text()).not.toContain('按自定义的价格、错误率、首包延迟、负载与降智通过率权重排序')
+
+    await editor.get('[data-testid="priority-add-select"]').setValue('error_rate')
+    await editor.get('[data-testid="priority-add"]').trigger('click')
+    expect(rows()).toEqual([expect.stringContaining('价格更低'), expect.stringContaining('错误率更低')])
+    expect(editor.get('[data-testid="priority-announce"]').text()).toBe('已将错误率添加为第 2 优先。')
+    // The first row cannot move up and the last cannot move down.
+    expect(editor.get('[data-testid="priority-up-cost"]').attributes('disabled')).toBeDefined()
+    expect(editor.get('[data-testid="priority-down-error_rate"]').attributes('disabled')).toBeDefined()
+    expect(editor.get('[data-testid="priority-up-error_rate"]').attributes('aria-label')).toBe('将错误率上移')
+
+    await editor.get('[data-testid="priority-up-error_rate"]').trigger('click')
+    expect(rows()).toEqual([expect.stringContaining('错误率更低'), expect.stringContaining('价格更低')])
+    expect(card().findAll('.mixer-order-text').map(step => step.text())).toEqual(['错误率更低', '价格更低', '仍相同时，自定义加权分更高'])
+
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
+    expect(payload.custom_balance?.absolute_priorities).toEqual(['error_rate', 'cost'])
+    expect(payload.custom_balance?.cost).toBe(0)
+  })
+
+  it('sends an empty priority list after the last priority is removed, so the server clears it', async () => {
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({
+      scheduling_policy: 'custom_balance',
+      custom_balance: { cost: 0.5, error_rate: 0.5, ttft: 0, load: 0, quality: 0, absolute_priorities: ['quality'] }
+    }))
+    const wrapper = mountView()
+    await flushPromises()
+    const editor = wrapper.get('[data-testid="custom-balance"]')
+    await editor.get('[data-testid="priority-remove-quality"]').trigger('click')
+    expect(editor.find('[data-testid="priority-row"]').exists()).toBe(false)
+    expect(editor.get('[data-testid="priority-empty"]').text()).toBe('未设置优先因素，账号只按加权分排序。')
+
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
+    expect(payload.custom_balance).toHaveProperty('absolute_priorities', [])
+  })
+
+  it('saves a prioritized set whose weights are all zero as it is, and says account order breaks the ties', async () => {
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({
+      scheduling_policy: 'custom_balance',
+      custom_balance: { cost: 1, error_rate: 0, ttft: 0, load: 0, quality: 0, absolute_priorities: ['cost'] }
+    }))
+    const wrapper = mountView()
+    await flushPromises()
+    const editor = wrapper.get('[data-testid="custom-balance"]')
+    const card = () => wrapper.findAll('.mixer-option').find(option => (option.find('input').element as HTMLInputElement).value === 'custom_balance')!
+    await editor.get('[data-testid="weight-cost"]').setValue('0')
+    expect(editor.find('[data-testid="weights-error"]').exists()).toBe(false)
+    expect(editor.get('[data-testid="weight-cost"]').attributes('aria-invalid')).toBeUndefined()
+    expect(editor.get('[data-testid="priority-then"]').text()).toBe('所有权重均为 0%，之后仍相同时按账号 ID 排序。')
+    expect(card().findAll('.mixer-order-text').map(step => step.text())).toEqual(['价格更低', '仍相同时，按账号 ID 排序'])
+
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    expect(api.saveOpenAIEvalConfig).toHaveBeenCalledTimes(1)
+    const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
+    // Never replaced by the defaults.
+    expect(payload.custom_balance).toEqual({ cost: 0, error_rate: 0, ttft: 0, load: 0, quality: 0, stability: 0, absolute_priorities: ['cost'] })
+  })
+
+  it('loads all-zero weights with a priority order without resetting them, and blocks once the last priority is removed', async () => {
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({
+      scheduling_policy: 'cost_first',
+      custom_balance: { cost: 0, error_rate: 0, ttft: 0, load: 0, quality: 0, absolute_priorities: ['quality', 'cost'] },
+      policies: [{ requested_model: 'gpt-5', reasoning_effort: '', policy: 'custom_balance', custom_balance: { cost: 0, error_rate: 0, ttft: 0, load: 0, quality: 0, absolute_priorities: ['error_rate'] } }]
+    }))
+    const wrapper = mountView()
+    await flushPromises()
+    const rule = () => wrapper.get('[data-testid="policy-rule"]')
+    expect(rule().get('[data-testid="rule-weights-summary"]').text()).toBe('优先：错误率；权重均为 0%，其后按账号 ID')
+    expect(rule().get('[data-testid="rule-weights-summary"]').classes()).not.toContain('rule-weights-invalid')
+
+    await rule().get('[data-testid="rule-weights-toggle"]').trigger('click')
+    expect((rule().get('[data-testid="weight-error_rate"]').element as HTMLInputElement).value).toBe('0')
+    await rule().get('[data-testid="priority-remove-error_rate"]').trigger('click')
+    expect(rule().get('[data-testid="weights-error"]').text()).toBe('权重合计须大于 0，请至少为一项设置权重，或添加优先因素。')
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    expect(api.saveOpenAIEvalConfig).not.toHaveBeenCalled()
+
+    // Adding a priority back makes the same zero weights saveable.
+    await rule().get('[data-testid="priority-add-select"]').setValue('ttft')
+    await rule().get('[data-testid="priority-add"]').trigger('click')
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
+    expect(payload.policies?.[0].custom_balance).toEqual({ cost: 0, error_rate: 0, ttft: 0, load: 0, quality: 0, stability: 0, absolute_priorities: ['ttft'] })
+    expect(payload.custom_balance).toEqual({ cost: 0, error_rate: 0, ttft: 0, load: 0, quality: 0, stability: 0, absolute_priorities: ['quality', 'cost'] })
+  })
+
+  it('keeps model-rule priorities separate from the default and saves them in order', async () => {
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({
+      scheduling_policy: 'cost_first',
+      custom_balance: { cost: 0.5, error_rate: 0.5, ttft: 0, load: 0, quality: 0, absolute_priorities: ['quality'] },
+      policies: [{ requested_model: 'gpt-5', reasoning_effort: '', policy: 'custom_balance', custom_balance: { cost: 0, error_rate: 1, ttft: 0, load: 0, quality: 0, absolute_priorities: ['cost', 'error_rate'] } }]
+    }))
+    const wrapper = mountView()
+    await flushPromises()
+    const rule = () => wrapper.get('[data-testid="policy-rule"]')
+    expect(rule().get('[data-testid="rule-weights-summary"]').text()).toBe('优先：价格，其次错误率；其后按权重：价格 0%，错误率 100%，首包延迟 0%，并发负载 0%，降智通过率 0%')
+
+    await rule().get('[data-testid="rule-weights-toggle"]').trigger('click')
+    await rule().get('[data-testid="priority-down-cost"]').trigger('click')
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
+    expect(payload.policies?.[0].custom_balance?.absolute_priorities).toEqual(['error_rate', 'cost'])
+    expect(payload.custom_balance?.absolute_priorities).toEqual(['quality'])
   })
 
   it('adds per-model overrides and blocks duplicates before saving', async () => {
@@ -295,7 +455,8 @@ describe('ModelIntegritySchedulingView', () => {
     await flushPromises()
 
     const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
-    const defaults = { cost: 0.2, error_rate: 0.43, ttft: 0.27, load: 0.1, quality: 0, stability: 0 }
+    // An empty priority list is always sent: the server keeps its stored list when the field is missing.
+    const defaults = { cost: 0.2, error_rate: 0.43, ttft: 0.27, load: 0.1, quality: 0, stability: 0, absolute_priorities: [] }
     expect(payload.custom_balance).toEqual(defaults)
     expect(payload.policies?.[0].custom_balance).toEqual(defaults)
   })
@@ -337,7 +498,7 @@ describe('ModelIntegritySchedulingView', () => {
     const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
     const folded = (weights: typeof global) => ({ ...weights, error_rate: Number((weights.error_rate + weights.stability * 0.6).toFixed(6)), ttft: Number((weights.ttft + weights.stability * 0.4).toFixed(6)), stability: 0, quality: 0 })
     expect(payload.scheduling_policy).toBe('cost_first')
-    expect(payload.custom_balance).toEqual(folded(global))
+    expect(payload.custom_balance).toEqual({ ...folded(global), absolute_priorities: [] })
     expect(payload.policies?.[0]).toMatchObject({ requested_model: 'gpt-5-mini', policy: 'custom_balance', custom_balance: { ...folded(other), error_rate: 0.3 } })
     expect(payload.policies?.[1]).toMatchObject({ requested_model: 'gpt-5', reasoning_effort: 'high', policy: 'custom_balance', custom_balance: { ...folded(global), ttft: 0.4 } })
   })
@@ -380,7 +541,7 @@ describe('ModelIntegritySchedulingView', () => {
     expect((cost.element as HTMLInputElement).value).toBe('100')
     await cost.setValue('0')
     const error = rule().get('[data-testid="weights-error"]')
-    expect(error.text()).toBe('权重合计须大于 0，请至少为一项设置权重。')
+    expect(error.text()).toBe('权重合计须大于 0，请至少为一项设置权重，或添加优先因素。')
     expect(cost.attributes('aria-invalid')).toBe('true')
     expect(cost.attributes('aria-describedby')).toBe(error.attributes('id'))
     expect(rule().get('[data-testid="rule-weights-summary"]').text()).toContain('权重合计须大于 0')
@@ -388,14 +549,14 @@ describe('ModelIntegritySchedulingView', () => {
     await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
     await flushPromises()
     expect(api.saveOpenAIEvalConfig).not.toHaveBeenCalled()
-    expect(store.showError).toHaveBeenCalledWith('权重合计须大于 0，请至少为一项设置权重。')
+    expect(store.showError).toHaveBeenCalledWith('权重合计须大于 0，请至少为一项设置权重，或添加优先因素。')
 
     await rule().get('[data-testid="weight-load"]').setValue('10')
     expect(rule().find('[data-testid="weights-error"]').exists()).toBe(false)
     await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
     await flushPromises()
     const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
-    expect(payload.policies?.[0].custom_balance).toEqual({ cost: 0, stability: 0, error_rate: 0, ttft: 0, load: 0.1, quality: 0 })
+    expect(payload.policies?.[0].custom_balance).toEqual({ cost: 0, stability: 0, error_rate: 0, ttft: 0, load: 0.1, quality: 0, absolute_priorities: [] })
   })
 
   it('restores a locked BPS route through the reset API without touching unsaved config', async () => {
@@ -741,7 +902,7 @@ describe('ModelIntegritySchedulingView integrity pass rate controls', () => {
     await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
     await flushPromises()
     const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
-    expect(payload.custom_balance).toEqual({ cost: 0, error_rate: 0, ttft: 0, load: 0, quality: 1, stability: 0 })
+    expect(payload.custom_balance).toEqual({ cost: 0, error_rate: 0, ttft: 0, load: 0, quality: 1, stability: 0, absolute_priorities: [] })
   })
 
   it('folds a legacy stability weight on load, says so, and saves it without double folding', async () => {
@@ -767,7 +928,7 @@ describe('ModelIntegritySchedulingView integrity pass rate controls', () => {
     await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
     await flushPromises()
     const first = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
-    const folded = { cost: 0.2, error_rate: 0.43, ttft: 0.27, load: 0.1, quality: 0, stability: 0 }
+    const folded = { cost: 0.2, error_rate: 0.43, ttft: 0.27, load: 0.1, quality: 0, stability: 0, absolute_priorities: [] }
     expect(first.custom_balance).toEqual({ ...folded, load: 0.2 })
     expect(first.policies?.[0]).toMatchObject({ requested_model: 'gpt-5', reasoning_effort: 'high', custom_balance: { ...folded, quality: 0.5 } })
     expect(wrapper.find('[data-testid="legacy-stability-folded"]').exists()).toBe(false)
@@ -877,5 +1038,497 @@ describe('ModelIntegritySchedulingView integrity pass rate controls', () => {
     expect(row.get('[data-testid="candidate-quality"]').text()).toContain('100.0%')
     expect(row.get('[data-testid="candidate-quality"]').text()).toContain('3/3 项测试通过')
     expect(row.find('[data-testid="candidate-quality-contribution"]').exists()).toBe(false)
+  })
+
+  it('shows a dispatch error with credentials masked', async () => {
+    const decisions = await api.listSchedulerDecisions()
+    const trace = { ...decisions.items[0], error: 'select failed: Authorization: Bearer abcdef1234567890 (sk-live1234567890abcd)' }
+    api.listSchedulerDecisions.mockResolvedValue({ limit: 50, items: [trace] })
+    const wrapper = await mountOnRequests()
+    const text = wrapper.get('[data-testid="dispatch-error"]').text()
+    expect(text).toContain('select failed')
+    expect(text).toContain('Bearer [redacted]')
+    expect(text).not.toContain('abcdef1234567890')
+    expect(text).not.toContain('sk-live1234567890abcd')
+  })
+})
+
+describe('ModelIntegritySchedulingView runtime thresholds', () => {
+  const configured = {
+    cost_first: { error_rate: 0, ttft_seconds: 12.5 },
+    stability_first: { error_rate: 0.025, ttft_seconds: 6 },
+    avoid_degradation: { error_rate: 0.3, ttft_seconds: 20 },
+    custom_balance: { error_rate: 0.07, ttft_seconds: 30 },
+    min_error_samples: 50,
+    min_ttft_samples: 100
+  }
+  const field = (wrapper: ReturnType<typeof mountView>, id: string) => wrapper.get(`[data-testid="threshold-${id}"]`)
+  const valueOf = (wrapper: ReturnType<typeof mountView>, id: string) => (field(wrapper, id).element as HTMLInputElement).value
+  const save = async (wrapper: ReturnType<typeof mountView>) => {
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+  }
+
+  it('shows the defaults for a legacy config and saves them without marking the page changed', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    expect(valueOf(wrapper, 'cost_first-error_rate')).toBe('20')
+    expect(valueOf(wrapper, 'cost_first-ttft_seconds')).toBe('15')
+    expect(valueOf(wrapper, 'stability_first-error_rate')).toBe('5')
+    expect(valueOf(wrapper, 'stability_first-ttft_seconds')).toBe('8')
+    expect(valueOf(wrapper, 'min_error_samples')).toBe('10')
+    expect(valueOf(wrapper, 'min_ttft_samples')).toBe('20')
+    expect(wrapper.text()).not.toContain('有未保存的更改')
+    expect(wrapper.get('[data-testid="scheduling-thresholds"]').text()).toContain('不会被停用')
+    expect(wrapper.get('[data-testid="scheduling-thresholds"]').text()).toContain('监测探测和估算值不会充当缺少的样本')
+
+    await wrapper.get('[data-testid="policy-cost_first"]').setValue(true)
+    await save(wrapper)
+    const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
+    expect(payload.scheduling_thresholds).toEqual({
+      cost_first: { error_rate: 0.2, ttft_seconds: 15 },
+      stability_first: { error_rate: 0.05, ttft_seconds: 8 },
+      avoid_degradation: { error_rate: 0.2, ttft_seconds: 15 },
+      custom_balance: { error_rate: 0.2, ttft_seconds: 15 },
+      min_error_samples: 10,
+      min_ttft_samples: 20
+    })
+  })
+
+  it('keeps a configured object, including an explicit 0% error rate, through an unrelated save and reload', async () => {
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ scheduling_thresholds: configured }))
+    const wrapper = mountView()
+    await flushPromises()
+
+    expect(valueOf(wrapper, 'cost_first-error_rate')).toBe('0')
+    expect(valueOf(wrapper, 'stability_first-error_rate')).toBe('2.5')
+    // custom_balance is retained for API compatibility but never edited here.
+    expect(wrapper.find('[data-testid="threshold-custom_balance-error_rate"]').exists()).toBe(false)
+    expect(valueOf(wrapper, 'cost_first-ttft_seconds')).toBe('12.5')
+    expect(wrapper.text()).not.toContain('有未保存的更改')
+
+    await wrapper.get('[data-testid="policy-stability_first"]').setValue(true)
+    await save(wrapper)
+    expect((api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig).scheduling_thresholds).toEqual(configured)
+    // The re-read after saving shows the same object, unchanged.
+    expect(valueOf(wrapper, 'cost_first-error_rate')).toBe('0')
+    expect(valueOf(wrapper, 'min_ttft_samples')).toBe('100')
+  })
+
+  it('edits percentages as ratios and saves every threshold and sample count', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    await field(wrapper, 'stability_first-error_rate').setValue('2.5')
+    await field(wrapper, 'stability_first-ttft_seconds').setValue('6')
+    await field(wrapper, 'avoid_degradation-error_rate').setValue('0')
+    await field(wrapper, 'min_error_samples').setValue('1000000')
+    await field(wrapper, 'min_ttft_samples').setValue('1')
+    expect(wrapper.text()).toContain('有未保存的更改')
+    await save(wrapper)
+
+    const thresholds = (api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig).scheduling_thresholds
+    expect(thresholds?.stability_first).toEqual({ error_rate: 0.025, ttft_seconds: 6 })
+    expect(thresholds?.avoid_degradation).toEqual({ error_rate: 0, ttft_seconds: 15 })
+    expect(thresholds?.min_error_samples).toBe(1_000_000)
+    expect(thresholds?.min_ttft_samples).toBe(1)
+  })
+
+  it.each([
+    ['cost_first-error_rate', '100.5'],
+    ['cost_first-error_rate', '-1'],
+    ['stability_first-error_rate', ''],
+    ['stability_first-ttft_seconds', '0'],
+    ['stability_first-ttft_seconds', '86401'],
+    ['avoid_degradation-ttft_seconds', ''],
+    ['min_error_samples', '0'],
+    ['min_ttft_samples', '10.5'],
+    ['min_ttft_samples', '1000001']
+  ])('blocks saving %s = "%s" and keeps every other edit', async (id, value) => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-testid="policy-avoid_degradation"]').setValue(true)
+    await field(wrapper, 'cost_first-ttft_seconds').setValue('9')
+    await field(wrapper, id).setValue(value)
+    expect(field(wrapper, id).attributes('aria-invalid')).toBe('true')
+    const describedBy = field(wrapper, id).attributes('aria-describedby')!
+    expect(wrapper.get(`#${describedBy}`).text()).not.toBe('')
+
+    await save(wrapper)
+    expect(api.saveOpenAIEvalConfig).not.toHaveBeenCalled()
+    expect(store.showError).toHaveBeenCalledWith('部分运行阈值超出范围，请修正标出的数值后再保存。')
+    // Nothing was reset: the typed value, the other edits and the unsaved state all remain.
+    expect(valueOf(wrapper, id)).toBe(value)
+    expect(valueOf(wrapper, 'cost_first-ttft_seconds')).toBe('9')
+    expect((wrapper.get('[data-testid="policy-avoid_degradation"]').element as HTMLInputElement).checked).toBe(true)
+    expect(wrapper.text()).toContain('有未保存的更改')
+  })
+
+  it('accepts the inclusive bounds 0%, 100%, 86,400 seconds and saves once corrected', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    await field(wrapper, 'cost_first-error_rate').setValue('101')
+    await save(wrapper)
+    expect(api.saveOpenAIEvalConfig).not.toHaveBeenCalled()
+
+    await field(wrapper, 'cost_first-error_rate').setValue('100')
+    await field(wrapper, 'stability_first-error_rate').setValue('0')
+    await field(wrapper, 'stability_first-ttft_seconds').setValue('86400')
+    expect(wrapper.findAll('[data-testid="threshold-error"]')).toHaveLength(0)
+    await save(wrapper)
+    const thresholds = (api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig).scheduling_thresholds
+    expect(thresholds?.cost_first.error_rate).toBe(1)
+    expect(thresholds?.stability_first).toEqual({ error_rate: 0, ttft_seconds: 86400 })
+  })
+
+  it('marks the rows the default policy and model rules use', async () => {
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({
+      scheduling_policy: 'cost_first',
+      policies: [{ requested_model: 'gpt-5', reasoning_effort: '', policy: 'avoid_degradation' }]
+    }))
+    const wrapper = mountView()
+    await flushPromises()
+
+    const marked = (policy: string) => wrapper.get(`[data-testid="threshold-row-${policy}"]`).find('[data-testid="threshold-in-use"]').exists()
+    expect(marked('cost_first')).toBe(true)
+    expect(marked('avoid_degradation')).toBe(true)
+    expect(marked('stability_first')).toBe(false)
+
+    await wrapper.get('[data-testid="policy-custom_balance"]').setValue(true)
+    // Custom balance has no threshold row at all: its order comes from its
+    // weights, so no runtime threshold would ever be applied to it. Avoid
+    // degradation stays marked because a model rule still uses it.
+    expect(marked('cost_first')).toBe(false)
+    expect(marked('stability_first')).toBe(false)
+    expect(marked('avoid_degradation')).toBe(true)
+    expect(wrapper.find('[data-testid="threshold-row-custom_balance"]').exists()).toBe(false)
+  })
+
+  it('labels every threshold input with its policy for assistive technology', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    expect(field(wrapper, 'stability_first-error_rate').attributes('aria-label')).toBe('优先稳定：错误率超过')
+    expect(field(wrapper, 'stability_first-ttft_seconds').attributes('aria-label')).toBe('优先稳定：首包延迟超过')
+    expect(wrapper.get('[data-testid="threshold-min_error_samples"]').element.closest('label')?.textContent).toContain('计入错误率前所需的请求数')
+  })
+
+  it('keeps an edited threshold through a conflict and shows the server values after reload', async () => {
+    api.saveOpenAIEvalConfig.mockRejectedValue({ status: 409, message: 'conflict' })
+    const wrapper = mountView()
+    await flushPromises()
+
+    await field(wrapper, 'cost_first-error_rate').setValue('12')
+    await save(wrapper)
+    expect(wrapper.text()).toContain('该配置已在其他页面或由其他管理员修改')
+    expect(valueOf(wrapper, 'cost_first-error_rate')).toBe('12')
+
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ revision: 5, scheduling_thresholds: configured }))
+    const reload = wrapper.findAll('button').find(button => button.text() === zhT('admin.modelIntegrity.common.reload'))!
+    await reload.trigger('click')
+    await flushPromises()
+    expect(valueOf(wrapper, 'cost_first-error_rate')).toBe('0')
+    expect(wrapper.text()).not.toContain('有未保存的更改')
+  })
+
+  it('moves keyboard focus to the first value that blocks saving', async () => {
+    // Focus only sticks to a node that is in the document, so this one mounts attached.
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const wrapper = mount(SchedulingView, {
+      attachTo: host,
+      global: { stubs: { AppLayout: { template: '<div><slot /></div>' }, RouterLink: RouterLinkStub, Teleport: true } }
+    })
+    await flushPromises()
+
+    await field(wrapper, 'stability_first-ttft_seconds').setValue('0')
+    await field(wrapper, 'avoid_degradation-error_rate').setValue('101')
+    await save(wrapper)
+
+    expect(api.saveOpenAIEvalConfig).not.toHaveBeenCalled()
+    // Focus lands on the first invalid field in page order, so the administrator
+    // can correct it without hunting through the matrix.
+    expect(document.activeElement).toBe(field(wrapper, 'stability_first-ttft_seconds').element)
+    wrapper.unmount()
+    host.remove()
+  })
+})
+
+describe('ModelIntegritySchedulingView request records by group', () => {
+  type Page = { limit: number; items: Record<string, unknown>[] }
+
+  /** A read the test resolves itself, so responses can arrive out of order. */
+  function deferred() {
+    let resolve!: (page: Page) => void
+    let reject!: (error: unknown) => void
+    const promise = new Promise<Page>((ok, fail) => { resolve = ok; reject = fail })
+    return { promise, resolve, reject }
+  }
+
+  async function baseTrace(overrides: Record<string, unknown> = {}) {
+    const decisions = await api.listSchedulerDecisions()
+    api.listSchedulerDecisions.mockClear()
+    return { ...decisions.items[0], ...overrides }
+  }
+
+  async function pickGroup(wrapper: Awaited<ReturnType<typeof mountOnRequests>>, id: number | null) {
+    const select = wrapper.get('[data-testid="requests-group"]')
+    const options = select.findAll('option')
+    const index = id === null ? 0 : options.findIndex(option => option.text() === (id === 7 ? 'openai-team' : 'openai-pro'))
+    ;(select.element as HTMLSelectElement).selectedIndex = index
+    await select.trigger('change')
+  }
+
+  beforeEach(() => {
+    groups.getAll.mockResolvedValue([{ id: 7, name: 'openai-team', platform: 'openai' }, { id: 8, name: 'openai-pro', platform: 'openai' }])
+  })
+
+  it('reads all groups by default, the chosen group on change, and the same group on refresh', async () => {
+    const wrapper = await mountOnRequests()
+    expect(api.listSchedulerDecisions).toHaveBeenCalledTimes(1)
+    expect(api.listSchedulerDecisions).toHaveBeenLastCalledWith(50, null)
+    const select = wrapper.get('[data-testid="requests-group"]')
+    expect(select.attributes('aria-label')).toBe('按请求分组筛选')
+    expect(select.findAll('option').map(option => option.text())).toEqual(['全部分组', 'openai-team', 'openai-pro'])
+
+    await pickGroup(wrapper, 8)
+    await flushPromises()
+    expect(api.listSchedulerDecisions).toHaveBeenLastCalledWith(50, 8)
+
+    await wrapper.get('[data-testid="requests-refresh"]').trigger('click')
+    await flushPromises()
+    expect(api.listSchedulerDecisions).toHaveBeenCalledTimes(3)
+    expect(api.listSchedulerDecisions).toHaveBeenLastCalledWith(50, 8)
+
+    await pickGroup(wrapper, null)
+    await flushPromises()
+    expect(api.listSchedulerDecisions).toHaveBeenLastCalledWith(50, null)
+  })
+
+  it('shows only the newest selection when an older read answers last', async () => {
+    const team = await baseTrace({ group_id: 7, group_name: 'openai-team' })
+    const pro = await baseTrace({ group_id: 8, group_name: 'openai-pro' })
+    const wrapper = await mountOnRequests()
+    const slow = deferred()
+    const fast = deferred()
+    api.listSchedulerDecisions.mockReturnValueOnce(slow.promise).mockReturnValueOnce(fast.promise)
+
+    await pickGroup(wrapper, 7)
+    await pickGroup(wrapper, 8)
+    await flushPromises()
+    // Records read for all groups never stand in for the group being loaded.
+    expect(wrapper.find('[data-testid="decision-row"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="requests-loading"]').text()).toContain('正在读取')
+
+    fast.resolve({ limit: 50, items: [pro] })
+    await flushPromises()
+    slow.resolve({ limit: 50, items: [team] })
+    await flushPromises()
+
+    const rows = wrapper.findAll('[data-testid="decision-row"]')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].get('[data-testid="dispatch-group"]').text()).toBe('openai-pro')
+    expect(wrapper.get('[data-testid="requests-scope"]').text()).toContain('「openai-pro」')
+    expect(wrapper.find('[data-testid="requests-loading"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="requests-refresh"]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('ignores an older failure that answers after the newest read', async () => {
+    const pro = await baseTrace({ group_id: 8, group_name: 'openai-pro' })
+    const wrapper = await mountOnRequests()
+    const slow = deferred()
+    api.listSchedulerDecisions.mockReturnValueOnce(slow.promise).mockResolvedValueOnce({ limit: 50, items: [pro] })
+
+    await pickGroup(wrapper, 7)
+    await pickGroup(wrapper, 8)
+    await flushPromises()
+    slow.reject({ message: 'stale failure' })
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="requests-error"]').exists()).toBe(false)
+    expect(wrapper.findAll('[data-testid="decision-row"]')).toHaveLength(1)
+  })
+
+  it('never presents all-group records as the group when its read fails', async () => {
+    const wrapper = await mountOnRequests()
+    expect(wrapper.findAll('[data-testid="decision-row"]')).toHaveLength(1)
+    api.listSchedulerDecisions.mockRejectedValueOnce({ message: 'ledger down' })
+
+    await pickGroup(wrapper, 7)
+    await flushPromises()
+
+    expect(api.listSchedulerDecisions).toHaveBeenLastCalledWith(50, 7)
+    expect(wrapper.find('[data-testid="decision-row"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="requests-error"]').text()).toContain('ledger down')
+    expect(wrapper.find('[data-testid="requests-kept"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="requests-unavailable"]').exists()).toBe(true)
+    // A failed read is not an empty result.
+    expect(wrapper.find('[data-testid="requests-empty-group"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="requests-empty"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="requests-scope"]').exists()).toBe(false)
+  })
+
+  it('keeps records from the same group when its refresh fails, and says so', async () => {
+    const team = await baseTrace({ group_id: 7, group_name: 'openai-team' })
+    const wrapper = await mountOnRequests()
+    api.listSchedulerDecisions.mockResolvedValueOnce({ limit: 50, items: [team] })
+    await pickGroup(wrapper, 7)
+    await flushPromises()
+
+    api.listSchedulerDecisions.mockRejectedValueOnce({ message: 'ledger down' })
+    await wrapper.get('[data-testid="requests-refresh"]').trigger('click')
+    await flushPromises()
+
+    expect(api.listSchedulerDecisions).toHaveBeenLastCalledWith(50, 7)
+    expect(wrapper.findAll('[data-testid="decision-row"]')).toHaveLength(1)
+    expect(wrapper.get('[data-testid="requests-error"]').text()).toContain('ledger down')
+    expect(wrapper.get('[data-testid="requests-kept"]').text()).toContain('上次成功读取')
+  })
+
+  it('names the group and account as recorded at request time, not as renamed since', async () => {
+    // Today account 11 is "oauth-a" and group 7 is "openai-team".
+    const renamed = await baseTrace({ group_id: 7, group_name: 'legacy-team', selected_account_name: 'old-name' })
+    api.listSchedulerDecisions.mockResolvedValue({ limit: 50, items: [renamed] })
+    const wrapper = await mountOnRequests()
+
+    const row = wrapper.get('[data-testid="decision-row"]')
+    expect(row.get('[data-testid="dispatch-identity"]').text()).toBe('legacy-team · 选中 old-name #11')
+    expect(row.get('[data-testid="dispatch-identity"]').text()).not.toMatch(/oauth-a|openai-team/)
+
+    await row.get('.ledger-toggle').trigger('click')
+    expect(wrapper.get('.cand-table thead').text()).toContain('账号（当前名称）')
+    const selected = wrapper.findAll('[data-testid="candidate-row"]')[0]
+    expect(selected.text()).toContain('oauth-a #11')
+    expect(selected.get('[data-testid="candidate-historical-name"]').text()).toBe('请求时名称：old-name')
+  })
+
+  it('falls back to the recorded ID, never to the current name, for traces without snapshots', async () => {
+    const withId = await baseTrace({ group_id: 7, group_name: undefined, selected_account_name: undefined })
+    const noGroup = await baseTrace({ group_id: null, group_name: '', selected_account_name: '  ' })
+    api.listSchedulerDecisions.mockResolvedValue({ limit: 50, items: [withId, noGroup] })
+    const wrapper = await mountOnRequests()
+
+    const identities = wrapper.findAll('[data-testid="dispatch-identity"]')
+    expect(identities[0].text()).toBe('分组 #7 · 选中 账号 #11')
+    expect(identities[1].text()).toBe('分组未记录 · 选中 账号 #11')
+    for (const identity of identities) expect(identity.text()).not.toMatch(/oauth-a|openai-team/)
+    expect(identities[0].get('[data-testid="dispatch-group"]').attributes('title')).toContain('未保存分组名称')
+    expect(identities[0].get('[data-testid="dispatch-selected"]').attributes('title')).toContain('未保存账号名称')
+
+    await wrapper.findAll('[data-testid="decision-row"]')[0].get('.ledger-toggle').trigger('click')
+    expect(wrapper.find('[data-testid="candidate-historical-name"]').exists()).toBe(false)
+  })
+
+  it('states the retained window apart from the per-read limit', async () => {
+    const wrapper = await mountOnRequests()
+    const panel = wrapper.get('[data-testid="records-requests"]')
+    expect(panel.text()).toContain('本实例内存只保留最近 256 条，服务重启后清空')
+    expect(wrapper.get('[data-testid="requests-scope"]').text()).toBe('本实例保留最近 256 条记录，这里显示其中全部分组最新的 1 条。')
+    expect(panel.text()).not.toContain('最近 50 条')
+
+    const trace = await baseTrace()
+    api.listSchedulerDecisions.mockResolvedValueOnce({ limit: 50, items: Array.from({ length: 50 }, (_, index) => ({ ...trace, at: `2026-10-01T08:00:${String(index).padStart(2, '0')}Z` })) })
+    await wrapper.get('[data-testid="requests-refresh"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="requests-scope"]').text()).toContain('全部分组最新的 50 条。每次最多读取 50 条，更早的记录未列出。')
+  })
+
+  it('explains an empty group within the retained window and offers all groups', async () => {
+    const wrapper = await mountOnRequests()
+    api.listSchedulerDecisions.mockResolvedValueOnce({ limit: 50, items: [] })
+    await pickGroup(wrapper, 8)
+    await flushPromises()
+
+    const empty = wrapper.get('[data-testid="requests-empty-group"]')
+    expect(empty.text()).toContain('本实例保留的最近 256 条记录中，没有「openai-pro」分组的请求')
+    expect(empty.text()).toContain('重启时清空')
+    expect(wrapper.find('[data-testid="requests-empty"]').exists()).toBe(false)
+
+    await empty.get('[data-testid="requests-show-all"]').trigger('click')
+    await flushPromises()
+    expect(api.listSchedulerDecisions).toHaveBeenLastCalledWith(50, null)
+    expect((wrapper.get('[data-testid="requests-group"]').element as HTMLSelectElement).selectedIndex).toBe(0)
+    expect(wrapper.findAll('[data-testid="decision-row"]')).toHaveLength(1)
+  })
+
+  it('keeps the model filter working within a group', async () => {
+    const team = await baseTrace({ group_id: 7, group_name: 'openai-team' })
+    const mini = { ...team, requested_model: 'gpt-5-mini' }
+    const wrapper = await mountOnRequests()
+    api.listSchedulerDecisions.mockResolvedValueOnce({ limit: 50, items: [team, mini] })
+    await pickGroup(wrapper, 7)
+    await flushPromises()
+    await wrapper.get('[data-testid="requests-model"]').setValue('gpt-5-mini')
+    const rows = wrapper.findAll('[data-testid="decision-row"]')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].text()).toContain('gpt-5-mini')
+  })
+
+  it('tells a planned wait apart from an acquired slot', async () => {
+    const acquired = await baseTrace({ acquired: true })
+    const planned = await baseTrace({ acquired: false, wait_plan: true })
+    const queued = await baseTrace({ acquired: undefined, awaiting_admission: true })
+    const legacy = await baseTrace({ acquired: undefined })
+    api.listSchedulerDecisions.mockResolvedValue({ limit: 50, items: [acquired, planned, queued, legacy] })
+    const wrapper = await mountOnRequests()
+    const rows = wrapper.findAll('[data-testid="decision-row"]')
+
+    expect(rows[0].get('[data-testid="dispatch-identity"]').text()).toBe('openai-team · 选中 oauth-a #11')
+    expect(rows[0].get('[data-testid="dispatch-acquired"]').text()).toBe('已获得并发名额')
+    expect(rows[0].find('[data-testid="dispatch-waiting"]').exists()).toBe(false)
+
+    for (const row of [rows[1], rows[2]]) {
+      expect(row.get('[data-testid="dispatch-identity"]').text()).toBe('openai-team · 等待 oauth-a #11 的并发名额')
+      expect(row.get('[data-testid="dispatch-identity"]').text()).not.toContain('选中')
+      expect(row.get('[data-testid="dispatch-waiting"]').text()).toBe('未确认获得名额')
+      expect(row.get('[data-testid="dispatch-waiting-note"]').text()).toContain('尚未确认获得名额')
+      expect(row.find('[data-testid="dispatch-acquired"]').exists()).toBe(false)
+    }
+
+    // Older traces predate slot tracking: plain wording, no claim either way.
+    expect(rows[3].get('[data-testid="dispatch-identity"]').text()).toBe('openai-team · 选中 oauth-a #11')
+    expect(rows[3].find('[data-testid="dispatch-acquired"]').exists()).toBe(false)
+    expect(rows[3].find('[data-testid="dispatch-waiting"]').exists()).toBe(false)
+  })
+
+  it('does not show an unacquired selection without a wait plan as served', async () => {
+    const unacquired = await baseTrace({ acquired: false, wait_plan: false, awaiting_admission: false })
+    api.listSchedulerDecisions.mockResolvedValue({ limit: 50, items: [unacquired] })
+    const wrapper = await mountOnRequests()
+    const row = wrapper.get('[data-testid="decision-row"]')
+
+    expect(row.get('[data-testid="dispatch-identity"]').text()).toBe('openai-team · 选中 oauth-a #11')
+    expect(row.get('[data-testid="dispatch-not-acquired"]').text()).toBe('未确认获得名额')
+    expect(row.find('[data-testid="dispatch-acquired"]').exists()).toBe(false)
+  })
+
+  it('reads records without waiting for the group list, and says when that list fails', async () => {
+    let failGroups!: (error: unknown) => void
+    groups.getAll.mockReturnValueOnce(new Promise((_, fail) => { failGroups = fail }))
+    const wrapper = mountView()
+    await flushPromises()
+    expect(api.listSchedulerDecisions).toHaveBeenCalledTimes(1)
+    expect(api.listSchedulerDecisions).toHaveBeenLastCalledWith(50, null)
+
+    failGroups({ message: 'groups down' })
+    await flushPromises()
+    await wrapper.get('[data-testid="records-tab-requests"]').trigger('click')
+    expect(wrapper.get('[data-testid="requests-groups-failed"]').text()).toContain('分组列表读取失败')
+    expect(wrapper.get('[data-testid="requests-group"]').findAll('option').map(option => option.text())).toEqual(['全部分组'])
+    expect(wrapper.findAll('[data-testid="decision-row"]')).toHaveLength(1)
+    expect(wrapper.find('[data-testid="requests-error"]').exists()).toBe(false)
+  })
+
+  it('does not add request records when an evaluation runs', async () => {
+    const wrapper = await mountOnRequests()
+    expect(api.listSchedulerDecisions).toHaveBeenCalledTimes(1)
+    await wrapper.get('[data-testid="evaluate-now"]').trigger('click')
+    await flushPromises()
+    expect(api.evaluateOpenAIEvalRanking).toHaveBeenCalledTimes(1)
+    expect(api.listSchedulerDecisions).toHaveBeenCalledTimes(1)
+    expect(wrapper.findAll('[data-testid="decision-row"]')).toHaveLength(1)
   })
 })

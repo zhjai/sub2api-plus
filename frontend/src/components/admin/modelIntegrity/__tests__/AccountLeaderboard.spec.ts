@@ -353,4 +353,58 @@ describe('AccountLeaderboard', () => {
     await flushPromises()
     expect(stale.get('[data-testid="board-stale"]').text()).toContain('版本 4')
   })
+
+  it('marks an account whose own requests exceeded a runtime threshold, without excluding it', async () => {
+    api.getOpenAIEvalAccountOverview.mockResolvedValueOnce(page({
+      accounts: [
+        account(11, 2, { threshold_reasons: ['error_rate_threshold', 'ttft_threshold'] }),
+        account(12, 1)
+      ]
+    }))
+    const wrapper = mountBoard()
+    await flushPromises()
+
+    const badged = wrapper.get('[data-testid="board-row"]')
+    const badges = badged.findAll('[data-testid="board-threshold"]')
+    expect(badges).toHaveLength(2)
+    // The badge names the measured value, in the reader's language.
+    expect(badges[0].attributes('data-reason')).toBe('error_rate_threshold')
+    expect(badges[0].text()).toContain('错误率')
+    expect(badges[1].text()).toContain('首包延迟')
+    // It is a soft ordering exception: the row is still eligible and ranked.
+    expect(badged.find('[data-testid="board-ineligible"]').exists()).toBe(false)
+    expect(badged.get('[data-testid="board-rank"]').text()).toBe('2')
+
+    await badged.get('[data-testid="board-toggle"]').trigger('click')
+    expect(wrapper.get('[data-testid="board-threshold-detail"]').text()).toContain('不会被停用')
+    // The evidence note appears only because a badge is on screen.
+    expect(wrapper.get('[data-testid="board-threshold-note"]').text()).toContain('真实请求')
+  })
+
+  it('shows an unrecognised threshold code as sent, and no badge for a clean row', async () => {
+    api.getOpenAIEvalAccountOverview.mockResolvedValueOnce(page({
+      accounts: [account(11, 1, { threshold_reasons: ['future_threshold'] }), account(12, 2)]
+    }))
+    const wrapper = mountBoard()
+    await flushPromises()
+
+    const rows = wrapper.findAll('[data-testid="board-row"]')
+    expect(rows[0].get('[data-testid="board-threshold"]').text()).toContain('future_threshold')
+    expect(rows[1].find('[data-testid="board-threshold"]').exists()).toBe(false)
+  })
+
+  it('describes the order the policy actually applies, not the raw ordering field', async () => {
+    // The server still labels cost first 'score_desc', but it sorts by price
+    // after the threshold tier, so the note must say so.
+    api.getOpenAIEvalAccountOverview.mockResolvedValueOnce(page({ policy: 'cost_first', ordering: 'score_desc' }))
+    const wrapper = mountBoard()
+    await flushPromises()
+    expect(wrapper.get('[data-testid="board-ordering"]').text()).toContain('按价格从低到高排序')
+
+    // Avoid degradation is quality first, and its ordering field already says so.
+    api.getOpenAIEvalAccountOverview.mockResolvedValueOnce(page({ policy: 'avoid_degradation', ordering: 'quality_then_score' }))
+    const quality = mountBoard()
+    await flushPromises()
+    expect(quality.get('[data-testid="board-ordering"]').text()).toContain('先按通过率从高到低排列')
+  })
 })

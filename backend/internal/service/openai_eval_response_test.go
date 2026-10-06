@@ -244,6 +244,7 @@ func evalRunHarness(t *testing.T, respond func(*http.Request, int) (*http.Respon
 	t.Helper()
 	a := newCodexModelsAPIKeyTestAccount("https://eval.example/v1")
 	a.ID = 995
+	a.Schedulable = true
 	a.Credentials["api_key"] = "eval-key"
 	a.Extra = map[string]any{"openai_responses_supported": true}
 	accounts := &openAIAccountTestRepo{mockAccountRepoForGemini: mockAccountRepoForGemini{accountsByID: map[int64]*Account{a.ID: a}}}
@@ -404,9 +405,6 @@ func TestEvalSettingsValidationAndStateProbeEligibility(t *testing.T) {
 		_, err := svc.Run(t.Context(), OpenAIEvalRunRequest{AccountID: a.ID, RequestedModel: "gpt-5.4", TestType: OpenAIEvalTypeCandy, MaxAttempts: &maximum}, 1, "manual")
 		require.ErrorContains(t, err, "max_attempts")
 	}
-	three := 3
-	_, err := svc.Run(t.Context(), OpenAIEvalRunRequest{AccountID: a.ID, RequestedModel: "gpt-5.4", TestType: OpenAIEvalTypeStateProbe, MaxAttempts: &three}, 1, "manual")
-	require.ErrorContains(t, err, "retries are unsupported")
 	a.Type = AccountTypeAPIKey
 	config := &OpenAIEvalConfig{Accounts: []OpenAIEvalAccountConfig{{AccountID: a.ID, RequestedModel: "gpt-5.4", ReasoningEffort: "high", BPSMode: OpenAIEvalBPSModeAuto}}}
 	require.NoError(t, svc.SaveConfig(t.Context(), config, 1), "retained legacy BPS flags must not gate an unrelated route")
@@ -450,15 +448,15 @@ func TestEvalCancellationDuringRetryDelay(t *testing.T) {
 	require.EqualValues(t, 1, upstream.calls.Load())
 }
 
-func TestEvalStateProbeRejectionKeepsDetailsAndNeverRetries(t *testing.T) {
+func TestEvalStateProbeSingleAttemptKeepsDetails(t *testing.T) {
 	upstream := &evalTransportStub{respond: func(*http.Request, int) (*http.Response, error) {
 		return newJSONResponse(429, `{"error":{"code":"rate_limit_exceeded","message":"retry later eval-mock-secret"}}`), nil
 	}}
 	svc, target := evalOAuthHarness(upstream)
-	result := svc.RunOpenAIStateProbe(t.Context(), target)
+	result := svc.RunOpenAIStateProbeAttempts(t.Context(), target, 1)
 	require.EqualValues(t, 1, upstream.calls.Load())
 	require.Equal(t, 1, result.RequestCount)
-	require.Equal(t, "unsupported_linked_ticket_chain", result.RetryPolicy)
+	require.Equal(t, "fresh_linked_ticket_chain", result.RetryPolicy)
 	require.Equal(t, "rate_limited", result.Failure)
 	require.Len(t, result.Samples, 1)
 	require.Equal(t, "rate_limit_exceeded", result.Samples[0].ErrorCode)

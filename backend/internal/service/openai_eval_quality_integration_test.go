@@ -53,7 +53,7 @@ func (r *qualityRunRepository) FinishRun(ctx context.Context, id int64, run *Ope
 	return r.openAIEvalRepoFake.FinishRun(ctx, id, run)
 }
 
-func TestOpenAIEvalQualityIntegrationPersistsOnlyCompletedAutomaticEvidence(t *testing.T) {
+func TestOpenAIEvalQualityIntegrationPersistsCompletedManualAndAutomaticEvidence(t *testing.T) {
 	for _, source := range []string{"scheduled", "scheduled_pass", "manual", "finish_failed", "upstream_failed"} {
 		t.Run(source, func(t *testing.T) {
 			enableQualityEffects(t)
@@ -91,7 +91,7 @@ func TestOpenAIEvalQualityIntegrationPersistsOnlyCompletedAutomaticEvidence(t *t
 				require.NoError(t, err)
 			}
 			quality, found := ReadOpenAIEvalQualityFromAccount(accounts.accountsByID[995], "gpt-5.4", "high", time.Now())
-			if source != "scheduled" && source != "scheduled_pass" {
+			if source != "scheduled" && source != "scheduled_pass" && source != "manual" {
 				require.False(t, found)
 				if source == "upstream_failed" {
 					marker, present := readOpenAIEvalQualityRecord(accounts.accountsByID[995], "gpt-5.4", "high", OpenAIEvalTypeCandy)

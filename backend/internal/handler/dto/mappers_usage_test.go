@@ -195,6 +195,7 @@ func TestUsageLogFromService_KeepsUserBillingAndIPWithoutAdminCostFields(t *test
 
 	userJSON, err := json.Marshal(userDTO)
 	require.NoError(t, err)
+	require.NotContains(t, string(userJSON), "account_id")
 	require.NotContains(t, string(userJSON), "account_rate_multiplier")
 	require.NotContains(t, string(userJSON), "account_stats_cost")
 	require.NotContains(t, string(userJSON), "account_cost")

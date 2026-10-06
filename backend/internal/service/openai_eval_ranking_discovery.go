@@ -454,7 +454,7 @@ func (r *OpenAIEvalRankingService) build(ctx context.Context, cfg *OpenAIEvalCon
 						priorAccounts = append(priorAccounts, *account)
 					}
 					priors := accountQualityPriors(gen, cfg, scope.group.ID, model, effort, priorAccounts, latest, now)
-					dim.Accounts = scoreOpenAIEvalRanking(policy, weights, inputs, now, oauthRate, priors)
+					dim.Accounts = scoreOpenAIEvalRankingWithThresholds(policy, weights, inputs, now, oauthRate, openAIEvalSchedulingThresholds(cfg), priors)
 					eligible := 0
 					for _, a := range dim.Accounts {
 						if a.Eligible {
@@ -487,7 +487,7 @@ func (r *OpenAIEvalRankingService) build(ctx context.Context, cfg *OpenAIEvalCon
 							if q.Known {
 								qualityRoutes[(openAIEvalQualityRoute{AccountID: a.AccountID, Model: model, Effort: effort}).key()] = true
 							}
-							if q.Known && (policy == OpenAIEvalSchedulingPolicyAvoidDegradation || weights.Quality > 0) && q.ExpiresAt != nil && q.ExpiresAt.Before(*dim.ValidUntil) {
+							if q.Known && openAIEvalRankingUsesQuality(policy, weights) && q.ExpiresAt != nil && q.ExpiresAt.Before(*dim.ValidUntil) {
 								dim.ValidUntil = q.ExpiresAt
 							}
 							if expiry := rankingFactorExpiry(a.Factors, weights, policy); expiry != nil && expiry.Before(*dim.ValidUntil) {

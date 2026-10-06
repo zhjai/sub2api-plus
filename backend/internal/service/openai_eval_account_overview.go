@@ -287,9 +287,13 @@ func buildAccountOverview(gen *openAIRankingGeneration, cfg *OpenAIEvalConfig, s
 		row.UnknownQualityModelCount = row.ModelCount - row.QualityModelCount
 		row.Factors = macroRankingFactors(modelFactors)
 		row.Factors.Price, row.Factors.Load = base.Factors.Price, base.Factors.Load
+		for _, m := range row.Models {
+			row.ThresholdReasons = append(row.ThresholdReasons, rankingThresholdReasons(gen.policy, openAIEvalSchedulingThresholds(cfg), m.Factors)...)
+		}
+		row.ThresholdReasons = dedupeAndSortModelIDs(row.ThresholdReasons)
 		row.UpstreamModels = dedupeAndSortModelIDs(row.UpstreamModels)
 		f, w := row.Factors, gen.weights
-		row.Contributions = OpenAIEvalRankingWeights{100 * w.Price * f.Price.Score, 100 * w.ErrorRate * f.ErrorRate.Score, 100 * w.TTFT * f.TTFT.Score, 100 * w.Load * f.Load.Score, 100 * w.Quality * f.Quality.Score}
+		row.Contributions = OpenAIEvalRankingWeights{Price: 100 * w.Price * f.Price.Score, ErrorRate: 100 * w.ErrorRate * f.ErrorRate.Score, TTFT: 100 * w.TTFT * f.TTFT.Score, Load: 100 * w.Load * f.Load.Score, Quality: 100 * w.Quality * f.Quality.Score}
 		c := row.Contributions
 		score := c.Price + c.ErrorRate + c.TTFT + c.Load + c.Quality
 		row.Priority = OpenAIEvalAccountPriority{QualityKnown: f.Quality.Known, QualityRatio: f.Quality.Ratio, OperationalScore: score}
@@ -299,16 +303,7 @@ func buildAccountOverview(gen *openAIRankingGeneration, cfg *OpenAIEvalConfig, s
 		gen.overview = append(gen.overview, row)
 	}
 	sort.Slice(gen.overview, func(i, j int) bool {
-		a, b := gen.overview[i], gen.overview[j]
-		if gen.policy == OpenAIEvalSchedulingPolicyAvoidDegradation {
-			if cmp := compareRankingQuality(a.Factors.Quality, b.Factors.Quality); cmp != 0 {
-				return cmp > 0
-			}
-		}
-		if a.Priority.OperationalScore != b.Priority.OperationalScore {
-			return a.Priority.OperationalScore > b.Priority.OperationalScore
-		}
-		return a.AccountID < b.AccountID
+		return rankingPolicyLess(gen.policy, gen.overview[i].OpenAIEvalRankedAccount, gen.overview[j].OpenAIEvalRankedAccount)
 	})
 	tier := 0
 	gen.overviewByID = make(map[int64]int, len(gen.overview))

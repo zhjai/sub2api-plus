@@ -50,6 +50,7 @@ export interface SchedulerDecisionTrace {
   record_type?: 'actual_dispatch' | string
   scope?: string
   group_id?: number | null
+  group_name?: string
   /** The published evaluation generation this dispatch resolved against, if any. */
   evaluation_id?: string | null
   config_revision?: number
@@ -70,7 +71,14 @@ export interface SchedulerDecisionTrace {
   latency_ms: number
   load_skew: number
   selected_account_id: number
+  selected_account_name?: string
   selected_account_type: string
+  /** True once the selected account's concurrency slot was actually acquired. */
+  acquired?: boolean
+  /** The request was only planned to wait for the selected account's slot. */
+  wait_plan?: boolean
+  /** Still queued for admission when the trace was written; not a confirmed slot. */
+  awaiting_admission?: boolean
   selected_rate_multiplier?: number
   route_migration_active?: boolean
   migration_from_rate_multiplier?: number
@@ -102,7 +110,7 @@ export interface SchedulerDecisionCandidate {
   priority_score?: number | null
   /** Per-factor normalized scores and contributions behind priority_score. */
   factors?: OpenAIEvalRankingFactors
-  contributions?: OpenAIEvalRankingWeights
+  contributions?: OpenAIEvalRankingFactorWeights
   /**
    * Selected automatic test types (Candy / Fingerprint / ModelTrace) with a
    * fresh final verdict. Each type counts once, whatever its sample count.
@@ -198,6 +206,12 @@ export interface OpenAIEvalPolicyWeights {
   load: number
   /** Weight of the evaluated integrity pass rate; older servers omit it (0). */
   quality?: number
+  /**
+   * Factors compared strictly, in order, before the weighted score. The
+   * server canonicalizes cost/error_rate/ttft/load/quality and keeps its
+   * stored list when the field is missing, so saves always send it.
+   */
+  absolute_priorities?: string[]
 }
 
 export type OpenAIEvalBPSMode = 'auto' | 'force_on' | 'force_off'
@@ -210,6 +224,28 @@ export interface OpenAIEvalSchedulingPolicyRule {
   custom_balance?: OpenAIEvalPolicyWeights
 }
 
+/**
+ * Runtime limits of one ranking policy. An account whose real requests exceed
+ * either one is moved behind the accounts within both; it is never disabled.
+ */
+export interface OpenAIEvalPolicyThreshold {
+  /** Ratio 0–1 inclusive. 0 is a real setting: any failure counts. */
+  error_rate: number
+  /** Finite, above 0 and at most 86400. */
+  ttft_seconds: number
+}
+
+export interface OpenAIEvalSchedulingThresholds {
+  cost_first: OpenAIEvalPolicyThreshold
+  stability_first: OpenAIEvalPolicyThreshold
+  avoid_degradation: OpenAIEvalPolicyThreshold
+  custom_balance: OpenAIEvalPolicyThreshold
+  /** Real requests (1–1,000,000) an account needs before its error rate is judged. */
+  min_error_samples: number
+  /** Real first-token measurements (1–1,000,000) needed before latency is judged. */
+  min_ttft_samples: number
+}
+
 export interface OpenAIEvalConfig {
   /** Optimistic-concurrency token; the server rejects stale saves with 409. */
   revision?: number
@@ -218,6 +254,12 @@ export interface OpenAIEvalConfig {
   scheduling_policy?: OpenAIEvalSchedulingPolicy
   policies?: OpenAIEvalSchedulingPolicyRule[]
   custom_balance?: OpenAIEvalPolicyWeights
+  /**
+   * Per-policy runtime thresholds and the shared minimum sample counts.
+   * Legacy servers omit it and the UI uses the defaults; a configured object
+   * is sent back as loaded by every save, including one from the tests page.
+   */
+  scheduling_thresholds?: OpenAIEvalSchedulingThresholds
   /**
    * BPS is decided per OAuth account, independent of the account/model/effort
    * test targets in `accounts`. Older servers omit the field.
@@ -396,6 +438,12 @@ export interface OpenAIStateProbeResult {
   new_ticket: boolean
   reported_model?: string
   latency_ms: number
+  /** Mint/continue chains sent; older servers omit it (one chain). */
+  attempts?: number
+  /** Chain ceiling after the server's cap of three. */
+  max_attempts?: number
+  retry_policy?: string
+  last_failure_step?: string
 }
 
 export interface OpenAIEvalModelTraceResult {
@@ -433,12 +481,19 @@ export interface OpenAIEvalModelCatalog {
 // ---------------------------------------------------------------------------
 
 /** Relative weight of each factor. The five values sum to 1. */
-export interface OpenAIEvalRankingWeights {
+/** The five numeric ranking factors: published weights and per-factor contributions. */
+export interface OpenAIEvalRankingFactorWeights {
   price: number
   error_rate: number
   ttft: number
   load: number
   quality: number
+}
+
+/** A policy's published weights, plus the strict order custom balance compares first. */
+export interface OpenAIEvalRankingWeights extends OpenAIEvalRankingFactorWeights {
+  /** Custom balance only: factors compared strictly, in order, before the score. */
+  absolute_priorities?: string[]
 }
 
 /**
@@ -476,6 +531,8 @@ export interface OpenAIEvalRankingFactors {
     /** present only when selected > 0 and evaluated equals selected. */
     ratio: number | null
     expires_at: string | null
+    evidence_error_code?: string
+    evidence_error_message?: string
   }
   /**
    * Matched channel probes, diagnostic only. latency_ms is a full round trip,
@@ -505,6 +562,15 @@ export interface OpenAIEvalRankingExclusion {
 export interface OpenAIEvalRankedAccount {
   account_id: number
   account_name: string
+  /**
+   * Runtime thresholds of the policy in force that this account's own real
+   * requests exceeded, as computed at evaluation time: 'error_rate_threshold',
+   * 'ttft_threshold', or a code a newer server adds. It is a soft ordering
+   * exception — the account moves behind the accounts within both thresholds —
+   * and never an exclusion. Absent for the system default policy, which uses
+   * no thresholds, and for custom balance, which is ordered by its weights.
+   */
+  threshold_reasons?: string[]
   /** Position in the full candidate order; null when the account cannot serve the model. */
   rank: number | null
   /** 0-100 weighted total. */
@@ -516,7 +582,7 @@ export interface OpenAIEvalRankedAccount {
   exclusion_reasons?: OpenAIEvalRankingExclusion[]
   upstream_models: string[]
   factors: OpenAIEvalRankingFactors
-  contributions: OpenAIEvalRankingWeights
+  contributions: OpenAIEvalRankingFactorWeights
   /** 'account_prior' marks a tier ordered by a separate account-wide reference. */
   quality_basis?: OpenAIEvalQualityBasis | string
   /** Present with quality_basis 'account_prior'; see OpenAIEvalAccountQualityPrior. */
@@ -655,7 +721,8 @@ export interface OpenAIEvalRankingQuery {
 // or a rank. Every number is computed by the server.
 // ---------------------------------------------------------------------------
 
-export type OpenAIEvalRankingFactorKey = keyof OpenAIEvalRankingWeights
+/** Numeric factors only; absolute_priorities is ordering metadata, not a factor. */
+export type OpenAIEvalRankingFactorKey = keyof OpenAIEvalRankingFactorWeights
 
 /** How an account is placed by the default policy; the parts behind priority_score. */
 export interface OpenAIEvalAccountPriority {
@@ -862,10 +929,11 @@ export async function resetOpenAIBPSState(request: { account_id: number; request
   return data
 }
 
-export async function listSchedulerDecisions(limit = 50): Promise<{ items: SchedulerDecisionTrace[]; limit: number }> {
+export async function listSchedulerDecisions(limit = 50, groupId?: number | null): Promise<{ items: SchedulerDecisionTrace[]; limit: number }> {
   const { data } = await apiClient.get<{ items: SchedulerDecisionTrace[]; limit: number }>(
     '/admin/accounts/scheduler-decisions',
-    { params: { limit } }
+    // group_id is a positive integer; anything else reads all groups.
+    { params: { limit, ...(groupId != null && Number.isInteger(groupId) && groupId > 0 ? { group_id: groupId } : {}) } }
   )
   return data
 }

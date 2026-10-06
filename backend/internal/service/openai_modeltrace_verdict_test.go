@@ -57,6 +57,23 @@ func TestModelTraceCurrentVerdictHistoryQualityAndRanking(t *testing.T) {
 	}
 }
 
+func TestDiagnosticOnlyRunCannotContributeQuality(t *testing.T) {
+	now := time.Now().UTC()
+	model := "gpt-6.1-sol"
+	schedule := OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 3600}
+	cfg := &OpenAIEvalConfig{Accounts: []OpenAIEvalAccountConfig{{AccountID: 17, RequestedModel: model, ReasoningEffort: "high", CandySchedule: schedule}}}
+	key := OpenAIEvalEvidenceKey{17, model, "high", OpenAIEvalTypeCandy}
+	run := OpenAIEvalRun{ID: 4, AccountID: 17, RequestedModel: model, ReasoningEffort: "high", TestType: OpenAIEvalTypeCandy,
+		Status: "pass", TriggerSource: "manual", DataVersion: OpenAIEvalQualityDataVersion, FinishedAt: now,
+		DiagnosticOnly: true, Samples: []OpenAIEvalSampleRecord{{Valid: true, Answer: "21"}}}
+	quality := qualityFromLatestRuns(cfg, 17, model, "high", map[OpenAIEvalEvidenceKey]OpenAIEvalRun{key: run}, now)
+	require.False(t, quality.Known)
+	run.DiagnosticOnly = false
+	quality = qualityFromLatestRuns(cfg, 17, model, "high", map[OpenAIEvalEvidenceKey]OpenAIEvalRun{key: run}, now)
+	require.True(t, quality.Known)
+	require.Equal(t, 1, quality.Pass)
+}
+
 func TestModelTraceExactVerdictStillVotesOncePerSelectedType(t *testing.T) {
 	now := time.Now().UTC()
 	model := "gpt-6.1-sol"

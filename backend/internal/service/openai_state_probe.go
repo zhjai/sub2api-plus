@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -28,17 +30,23 @@ type OpenAIStateProbeResult struct {
 	ReportedModel        string                   `json:"reported_model,omitempty"`
 	LatencyMS            int64                    `json:"latency_ms"`
 	RetryPolicy          string                   `json:"retry_policy"`
+	Attempts             int                      `json:"attempts"`
+	MaxAttempts          int                      `json:"max_attempts"`
+	LastFailureStep      string                   `json:"last_failure_step,omitempty"`
 	Samples              []OpenAIEvalSampleRecord `json:"samples,omitempty"`
 }
 
 type openAIStateProbeShot struct {
-	status   int
-	ticket   string
-	cookies  string
-	model    string
-	terminal bool
-	failure  string
-	record   OpenAIEvalSampleRecord
+	admissionErr error
+	status       int
+	ticket       string
+	cookies      string
+	model        string
+	terminal     bool
+	failure      string
+	record       OpenAIEvalSampleRecord
+	retryable    bool
+	retryAfter   time.Duration
 }
 
 func isOpenAIStateProbeTarget(target *OpenAIEvalTarget) bool {
@@ -50,8 +58,18 @@ func isOpenAIStateProbeTarget(target *OpenAIEvalTarget) bool {
 }
 
 func (s *AccountTestService) RunOpenAIStateProbe(ctx context.Context, target *OpenAIEvalTarget) *OpenAIStateProbeResult {
+	return s.RunOpenAIStateProbeAttempts(ctx, target, OpenAIEvalDefaultMaxRequestAttempts)
+}
+
+func (s *AccountTestService) RunOpenAIStateProbeAttempts(ctx context.Context, target *OpenAIEvalTarget, maximum int) *OpenAIStateProbeResult {
 	start := time.Now()
-	result := &OpenAIStateProbeResult{Version: openAIStateProbeVersion, Verdict: "inconclusive", RetryPolicy: "unsupported_linked_ticket_chain"}
+	// A probe attempt is a fresh mint/continue chain. Keep the total request
+	// budget bounded at three chains (six sends), even when an older caller
+	// supplies a larger value.
+	maximum = max(1, min(maximum, 3))
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	result := &OpenAIStateProbeResult{Version: openAIStateProbeVersion, Verdict: "inconclusive", RetryPolicy: "fresh_linked_ticket_chain", MaxAttempts: maximum}
 	defer func() { result.LatencyMS = time.Since(start).Milliseconds() }()
 	if s == nil || target == nil || target.Account == nil || target.Credential == nil || s.openaiGatewayService == nil || s.httpUpstream == nil {
 		result.Failure = "unavailable"
@@ -72,48 +90,78 @@ func (s *AccountTestService) RunOpenAIStateProbe(ctx context.Context, target *Op
 		result.Samples = []OpenAIEvalSampleRecord{{ProbeID: "state-probe-mint", ErrorCode: result.Failure, ErrorMessage: sanitizeOpenAIEvalText(message, openAIEvalErrorLimit, openAIEvalCredentialSecrets(credential)...)}}
 		return result
 	}
-	mint := s.openAIStateProbeShot(ctx, account, credential, token, target.UpstreamModel, "", "")
-	mint.record.ProbeID = "state-probe-mint"
-	result.Samples = append(result.Samples, mint.record)
-	result.RequestCount += mint.record.Attempts
-	result.MintStatus = mint.status
-	result.TicketLength = len(mint.ticket)
-	if mint.failure != "" {
-		result.Failure = mint.failure
-		return result
-	}
-	if mint.ticket == "" {
-		result.Failure = "missing_ticket"
-		return result
-	}
-	continued := s.openAIStateProbeShot(ctx, account, credential, token, target.UpstreamModel, mint.ticket, mint.cookies)
-	continued.record.ProbeID = "state-probe-continue"
-	result.Samples = append(result.Samples, continued.record)
-	result.RequestCount += continued.record.Attempts
-	result.ContinueStatus = continued.status
-	result.ContinueTicketLength = len(continued.ticket)
-	result.ReportedModel = continued.model
-	if result.ReportedModel == "" {
+	for attempt := 1; attempt <= maximum; attempt++ {
+		if ctx.Err() != nil {
+			result.Failure = "cancelled"
+			break
+		}
+		result.Attempts = attempt
+		result.ContinueStatus, result.ContinueTicketLength = 0, 0
+		result.NewTicket = false
+		session := uuid.NewString()
+		mint := s.openAIStateProbeShot(ctx, account, credential, token, target.UpstreamModel, "", "", session)
+		mint.record.ProbeID = fmt.Sprintf("state-probe-%d-mint", attempt)
+		result.Samples = append(result.Samples, mint.record)
+		result.RequestCount += mint.record.Attempts
+		result.MintStatus, result.TicketLength = mint.status, len(mint.ticket)
 		result.ReportedModel = mint.model
-	}
-	if continued.failure != "" {
-		result.Failure = continued.failure
-		return result
-	}
-	if continued.ticket == "" {
-		result.Failure = "missing_ticket"
-		return result
-	}
-	result.NewTicket = continued.ticket != "" && continued.ticket != mint.ticket
-	if result.NewTicket {
-		result.Verdict = "degraded"
-	} else {
-		result.Verdict = "healthy"
+		failed := mint
+		result.LastFailureStep = "mint"
+		if mint.failure == "" {
+			continued := s.openAIStateProbeShot(ctx, account, credential, token, target.UpstreamModel, mint.ticket, mint.cookies, session)
+			continued.record.ProbeID = fmt.Sprintf("state-probe-%d-continue", attempt)
+			result.Samples = append(result.Samples, continued.record)
+			result.RequestCount += continued.record.Attempts
+			result.ContinueStatus, result.ContinueTicketLength = continued.status, len(continued.ticket)
+			if continued.model != "" {
+				result.ReportedModel = continued.model
+			}
+			failed = continued
+			result.LastFailureStep = "continue"
+			if continued.failure == "" {
+				result.Failure, result.LastFailureStep = "", ""
+				result.NewTicket = continued.ticket != mint.ticket
+				result.Verdict = "healthy"
+				if result.NewTicket {
+					result.Verdict = "degraded"
+				}
+				return result
+			}
+		}
+		result.Failure = failed.failure
+		if !failed.retryable || attempt == maximum {
+			break
+		}
+		delay := time.Duration(attempt) * 100 * time.Millisecond
+		if failed.retryAfter > delay {
+			delay = failed.retryAfter
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			result.Failure = "cancelled"
+			return result
+		case <-timer.C:
+		}
 	}
 	return result
 }
 
-func (s *AccountTestService) openAIStateProbeShot(ctx context.Context, account, credential *Account, token, model, ticket, cookies string) (out openAIStateProbeShot) {
+func (s *AccountTestService) openAIStateProbeShot(ctx context.Context, account, credential *Account, token, model, ticket, cookies string, sessions ...string) (out openAIStateProbeShot) {
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		out = s.openAIStateProbeSingleSend(ctx, account, credential, token, model, ticket, cookies, sessions...)
+		if retry, err := waitOpenAIEvalAdmission(ctx, deadline, out.admissionErr); retry {
+			continue
+		} else if err != nil {
+			out.failure, out.record.ErrorCode, out.record.ErrorMessage = safeOpenAIEvalErrorCode(err), safeOpenAIEvalErrorCode(err), err.Error()
+		}
+		return out
+	}
+}
+
+func (s *AccountTestService) openAIStateProbeSingleSend(ctx context.Context, account, credential *Account, token, model, ticket, cookies string, sessions ...string) (out openAIStateProbeShot) {
 	secrets := append(openAIEvalCredentialSecrets(credential), token, ticket, cookies)
 	defer func() {
 		out.model = sanitizeOpenAIEvalText(out.model, 160, secrets...)
@@ -131,6 +179,13 @@ func (s *AccountTestService) openAIStateProbeShot(ctx context.Context, account, 
 		out.record.Valid = out.failure == ""
 		out.record.HTTPStatus = out.status
 	}()
+	release, err := s.acquireOpenAIEvalAccountSlot(ctx, account)
+	if err != nil {
+		out.failure = safeOpenAIEvalErrorCode(err)
+		out.record.ErrorMessage = err.Error()
+		return out
+	}
+	defer release()
 	shotCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	payload := map[string]any{
@@ -151,7 +206,11 @@ func (s *AccountTestService) openAIStateProbeShot(ctx context.Context, account, 
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("OpenAI-Beta", "responses=experimental")
 	enforceCodexAcceptLanguage(req.Header)
-	req.Header.Set("session_id", uuid.NewString())
+	session := uuid.NewString()
+	if len(sessions) > 0 {
+		session = sessions[0]
+	}
+	req.Header.Set("session_id", session)
 	setOpenAIChatGPTAccountHeaders(req.Header, credential)
 	enforceCodexIdentityHeadersWithUA(req.Header, credential.GetOpenAIUserAgent())
 	credential.ApplyHeaderOverrides(req.Header)
@@ -179,11 +238,19 @@ func (s *AccountTestService) openAIStateProbeShot(ctx context.Context, account, 
 	out.record.Attempts = 1
 	resp, err := s.doOpenAIEvalUpstream(req, proxy, account, credential)
 	if err != nil {
+		var admission *AccountRPMError
+		if errors.As(err, &admission) {
+			out.admissionErr = err
+			out.record.Attempts = 0
+			out.failure = "account_rpm_admission"
+			return out
+		}
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
 		}
 		out.failure = "network_error"
 		failure := openAIEvalIOError(shotCtx, err, 0)
+		out.retryable = failure.Retryable
 		if !failure.Attempted {
 			out.record.Attempts = 0
 			out.failure = failure.Code
@@ -199,6 +266,9 @@ func (s *AccountTestService) openAIStateProbeShot(ctx context.Context, account, 
 	stopClose := context.AfterFunc(shotCtx, func() { _ = resp.Body.Close() })
 	defer stopClose()
 	out.status = resp.StatusCode
+	if reset := parseRetryAfterResetTime(resp.Header, time.Now()); reset != nil {
+		out.retryAfter = time.Until(*reset)
+	}
 	if resp.StatusCode != http.StatusOK {
 		switch resp.StatusCode {
 		case http.StatusTooManyRequests:
@@ -210,6 +280,7 @@ func (s *AccountTestService) openAIStateProbeShot(ctx context.Context, account, 
 		}
 		_, responseErr := readOpenAIEvalResponse(shotCtx, resp, true, false)
 		if responseErr != nil {
+			out.retryable = openAIStateProbeRetryable(responseErr)
 			out.record.ErrorCode = safeOpenAIEvalErrorCode(responseErr)
 			out.record.ErrorMessage = responseErr.Error()
 		}
@@ -232,6 +303,7 @@ func (s *AccountTestService) openAIStateProbeShot(ctx context.Context, account, 
 		out.model = response.Model
 	}
 	if responseErr != nil {
+		out.retryable = openAIStateProbeRetryable(responseErr)
 		out.failure = "stream_error"
 		out.record.ErrorCode = safeOpenAIEvalErrorCode(responseErr)
 		out.record.ErrorMessage = responseErr.Error()
@@ -243,9 +315,15 @@ func (s *AccountTestService) openAIStateProbeShot(ctx context.Context, account, 
 	}
 	if out.failure == "" && out.terminal && out.ticket == "" {
 		out.failure = "missing_ticket"
+		out.retryable = true
 	}
 	if out.failure == "" && !out.terminal {
 		out.failure = "missing_terminal"
 	}
 	return out
+}
+
+func openAIStateProbeRetryable(err error) bool {
+	var failure *OpenAIEvalRequestError
+	return errors.As(err, &failure) && failure.Retryable
 }

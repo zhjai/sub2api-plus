@@ -35,6 +35,17 @@ func (s *AccountTestService) doOpenAIAccountTestUpstream(
 	account *Account,
 	useTLSFallback bool,
 ) (*http.Response, error) {
+	if err := s.checkOpenAIEvalAutomaticAccount(request.Context(), account); err != nil {
+		if request.Body != nil {
+			_ = request.Body.Close()
+		}
+		return nil, err
+	}
+	if automatic, _ := request.Context().Value(openAIEvalAutomaticKey{}).(bool); automatic {
+		// PluginManager rejects only a selected plugin without the single-send
+		// contract, leaving unbound accounts on the guarded HTTP fallback.
+		request = request.WithContext(WithHTTPUpstreamSingleSend(request.Context()))
+	}
 	if s.pluginManager != nil {
 		response, handled, err := s.pluginManager.RoundTripOpenAIOAuth(request.Context(), request, proxyURL, account)
 		if handled {
@@ -42,13 +53,12 @@ func (s *AccountTestService) doOpenAIAccountTestUpstream(
 		}
 	}
 	if useTLSFallback {
-		return s.httpUpstream.DoWithTLS(
+		return s.doAccountTestUpstreamTLS(
 			request,
 			proxyURL,
-			account.ID,
-			account.Concurrency,
+			account,
 			s.tlsFPProfileService.ResolveTLSProfile(account),
 		)
 	}
-	return s.httpUpstream.Do(request, proxyURL, account.ID, account.Concurrency)
+	return s.doAccountTestUpstream(request, proxyURL, account, nil)
 }

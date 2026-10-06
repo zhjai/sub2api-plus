@@ -52,7 +52,7 @@ func r13EvalProductionUpstream(t *testing.T, target string, cert *x509.Certifica
 		tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, ServerName: "example.com"}
 	}
 	a := &service.Account{ID: 91, Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey, Concurrency: 1,
-		Credentials: map[string]any{"api_key": "synthetic", "base_url": target}, Extra: map[string]any{"rpm_limit": 1}}
+		Credentials: map[string]any{"api_key": "synthetic", "base_url": target}, Extra: map[string]any{"rpm_limit": 0}}
 	svc := service.NewAccountTestService(nil, nil, nil, nil, nil, up, cfg, &service.TLSFingerprintProfileService{})
 	svc.SetOpenAIGatewayService(&service.OpenAIGatewayService{})
 	return up, svc, &service.OpenAIEvalTarget{Account: a, Credential: a, RequestedModel: "gpt-6-astra", UpstreamModel: "gpt-6-astra"}
@@ -219,7 +219,7 @@ func TestR13EvalHTTP2PhysicalMaximumAndLinkedStateProbe(t *testing.T) {
 				if linked {
 					target.Account.Type = service.AccountTypeOAuth
 					target.Account.Credentials["access_token"] = "synthetic"
-					probe := svc.RunOpenAIStateProbe(t.Context(), target)
+					probe := svc.RunOpenAIStateProbeAttempts(t.Context(), target, 1)
 					require.NotEmpty(t, probe.Failure)
 					require.Equal(t, 2, probe.RequestCount)
 					require.EqualValues(t, 2, sends.Load())
@@ -284,11 +284,7 @@ func TestR13SingleSendCONNECTAndTLSFingerprint(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, 200, resp.StatusCode)
 			require.NoError(t, resp.Body.Close())
-			if eval {
-				require.Zero(t, admissions.Load(), "internal single-send does not charge RPM")
-			} else {
-				require.EqualValues(t, 1, admissions.Load())
-			}
+			require.EqualValues(t, 1, admissions.Load(), "each physical send admits exactly once, including evaluation single-send")
 		}
 		return
 	}

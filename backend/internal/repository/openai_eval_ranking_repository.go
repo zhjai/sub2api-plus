@@ -30,6 +30,9 @@ func (r *openAIEvalRepository) LatestCompletedRuns(ctx context.Context, keys []s
 		  WHERE account_id=k.account_id AND lower(btrim(requested_model))=lower(btrim(k.requested_model))
 		    AND lower(btrim(reasoning_effort))=lower(btrim(k.reasoning_effort)) AND test_type=k.test_type
 		    AND trigger_source IN ('manual', 'scheduled') AND finished_at IS NOT NULL AND status <> 'running'
+		    -- Diagnostic-only runs are retained for audit, but must not hide the
+		    -- latest real quality evidence from ranking or route selection.
+		    AND NOT (outcome @> '{"diagnostic_only": true}'::jsonb)
 		  ORDER BY finished_at DESC, id DESC LIMIT 1
 		) r ON true`, payload)
 	if err != nil {
@@ -45,7 +48,7 @@ func (r *openAIEvalRepository) LatestCompletedRuns(ctx context.Context, keys []s
 			return nil, err
 		}
 		// Malformed latest diagnostics stay unknown, never uncover an older pass.
-		if json.Unmarshal(outcome, &run.Outcome) != nil || json.Unmarshal(samples, &run.Samples) != nil {
+		if unmarshalOpenAIEvalRunOutcome(outcome, &run) != nil || json.Unmarshal(samples, &run.Samples) != nil {
 			run.Status = "insufficient"
 		}
 		result = append(result, run)

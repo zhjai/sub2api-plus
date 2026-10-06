@@ -1172,7 +1172,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			}
 			if retryBody, reason, changed, retryErr := normalizeOpenAIResponsesRejectedFieldRetryBody(resp.StatusCode, body, respBody); retryErr != nil {
 				return nil, fmt.Errorf("normalize rejected Responses field retry body: %w", retryErr)
-			} else if changed && rejectedFieldRetryState.Allow(retryBody) {
+			} else if changed && !IsResponseCommitted(c) && !openAIStreamClientOutputStarted(c, false) && ctx.Err() == nil && rejectedFieldRetryState.AllowNormalization(retryBody, reason) {
 				body = retryBody
 				requestView = newOpenAIRequestView(body)
 				reqBody = nil

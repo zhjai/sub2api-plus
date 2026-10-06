@@ -21,6 +21,9 @@ type Group struct {
 	Description    string
 	Platform       string
 	RateMultiplier float64
+	// BillingRateMode is "group" for the historical fixed group multiplier or
+	// "account" to bill with the account that completed the request.
+	BillingRateMode string
 	// 高峰时段倍率：peak_rate_enabled 为 true 且当前时刻处于 [PeakStart, PeakEnd) 时，
 	// token 计费倍率额外乘以 PeakRateMultiplier。详见 PeakMultiplierAt。
 	PeakRateEnabled    bool
@@ -139,6 +142,22 @@ type Group struct {
 	AccountCount            int64
 	ActiveAccountCount      int64
 	RateLimitedAccountCount int64
+}
+
+const (
+	GroupBillingRateModeGroup   = "group"
+	GroupBillingRateModeAccount = "account"
+)
+
+func NormalizeGroupBillingRateMode(mode string) string {
+	if strings.EqualFold(strings.TrimSpace(mode), GroupBillingRateModeAccount) {
+		return GroupBillingRateModeAccount
+	}
+	return GroupBillingRateModeGroup
+}
+
+func (g *Group) UsesAccountBillingRate() bool {
+	return g != nil && NormalizeGroupBillingRateMode(g.BillingRateMode) == GroupBillingRateModeAccount
 }
 
 // IsGroupBindableInSimpleMode is the shared policy for groups that may be

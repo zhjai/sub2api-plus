@@ -118,6 +118,20 @@ func (_u *GroupUpdate) AddRateMultiplier(v float64) *GroupUpdate {
 	return _u
 }
 
+// SetBillingRateMode sets the "billing_rate_mode" field.
+func (_u *GroupUpdate) SetBillingRateMode(v string) *GroupUpdate {
+	_u.mutation.SetBillingRateMode(v)
+	return _u
+}
+
+// SetNillableBillingRateMode sets the "billing_rate_mode" field if the given value is not nil.
+func (_u *GroupUpdate) SetNillableBillingRateMode(v *string) *GroupUpdate {
+	if v != nil {
+		_u.SetBillingRateMode(*v)
+	}
+	return _u
+}
+
 // SetPeakRateEnabled sets the "peak_rate_enabled" field.
 func (_u *GroupUpdate) SetPeakRateEnabled(v bool) *GroupUpdate {
 	_u.mutation.SetPeakRateEnabled(v)
@@ -1488,6 +1502,11 @@ func (_u *GroupUpdate) check() error {
 			return &ValidationError{Name: "name", err: fmt.Errorf(`ent: validator failed for field "Group.name": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.BillingRateMode(); ok {
+		if err := group.BillingRateModeValidator(v); err != nil {
+			return &ValidationError{Name: "billing_rate_mode", err: fmt.Errorf(`ent: validator failed for field "Group.billing_rate_mode": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.PeakStart(); ok {
 		if err := group.PeakStartValidator(v); err != nil {
 			return &ValidationError{Name: "peak_start", err: fmt.Errorf(`ent: validator failed for field "Group.peak_start": %w`, err)}
@@ -1586,6 +1605,9 @@ func (_u *GroupUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.AddedRateMultiplier(); ok {
 		_spec.AddField(group.FieldRateMultiplier, field.TypeFloat64, value)
+	}
+	if value, ok := _u.mutation.BillingRateMode(); ok {
+		_spec.SetField(group.FieldBillingRateMode, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.PeakRateEnabled(); ok {
 		_spec.SetField(group.FieldPeakRateEnabled, field.TypeBool, value)
@@ -2309,6 +2331,20 @@ func (_u *GroupUpdateOne) SetNillableRateMultiplier(v *float64) *GroupUpdateOne 
 // AddRateMultiplier adds value to the "rate_multiplier" field.
 func (_u *GroupUpdateOne) AddRateMultiplier(v float64) *GroupUpdateOne {
 	_u.mutation.AddRateMultiplier(v)
+	return _u
+}
+
+// SetBillingRateMode sets the "billing_rate_mode" field.
+func (_u *GroupUpdateOne) SetBillingRateMode(v string) *GroupUpdateOne {
+	_u.mutation.SetBillingRateMode(v)
+	return _u
+}
+
+// SetNillableBillingRateMode sets the "billing_rate_mode" field if the given value is not nil.
+func (_u *GroupUpdateOne) SetNillableBillingRateMode(v *string) *GroupUpdateOne {
+	if v != nil {
+		_u.SetBillingRateMode(*v)
+	}
 	return _u
 }
 
@@ -3695,6 +3731,11 @@ func (_u *GroupUpdateOne) check() error {
 			return &ValidationError{Name: "name", err: fmt.Errorf(`ent: validator failed for field "Group.name": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.BillingRateMode(); ok {
+		if err := group.BillingRateModeValidator(v); err != nil {
+			return &ValidationError{Name: "billing_rate_mode", err: fmt.Errorf(`ent: validator failed for field "Group.billing_rate_mode": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.PeakStart(); ok {
 		if err := group.PeakStartValidator(v); err != nil {
 			return &ValidationError{Name: "peak_start", err: fmt.Errorf(`ent: validator failed for field "Group.peak_start": %w`, err)}
@@ -3810,6 +3851,9 @@ func (_u *GroupUpdateOne) sqlSave(ctx context.Context) (_node *Group, err error)
 	}
 	if value, ok := _u.mutation.AddedRateMultiplier(); ok {
 		_spec.AddField(group.FieldRateMultiplier, field.TypeFloat64, value)
+	}
+	if value, ok := _u.mutation.BillingRateMode(); ok {
+		_spec.SetField(group.FieldBillingRateMode, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.PeakRateEnabled(); ok {
 		_spec.SetField(group.FieldPeakRateEnabled, field.TypeBool, value)

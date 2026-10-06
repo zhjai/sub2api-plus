@@ -106,6 +106,20 @@ func (_c *GroupCreate) SetNillableRateMultiplier(v *float64) *GroupCreate {
 	return _c
 }
 
+// SetBillingRateMode sets the "billing_rate_mode" field.
+func (_c *GroupCreate) SetBillingRateMode(v string) *GroupCreate {
+	_c.mutation.SetBillingRateMode(v)
+	return _c
+}
+
+// SetNillableBillingRateMode sets the "billing_rate_mode" field if the given value is not nil.
+func (_c *GroupCreate) SetNillableBillingRateMode(v *string) *GroupCreate {
+	if v != nil {
+		_c.SetBillingRateMode(*v)
+	}
+	return _c
+}
+
 // SetPeakRateEnabled sets the "peak_rate_enabled" field.
 func (_c *GroupCreate) SetPeakRateEnabled(v bool) *GroupCreate {
 	_c.mutation.SetPeakRateEnabled(v)
@@ -1051,6 +1065,10 @@ func (_c *GroupCreate) defaults() error {
 		v := group.DefaultRateMultiplier
 		_c.mutation.SetRateMultiplier(v)
 	}
+	if _, ok := _c.mutation.BillingRateMode(); !ok {
+		v := group.DefaultBillingRateMode
+		_c.mutation.SetBillingRateMode(v)
+	}
 	if _, ok := _c.mutation.PeakRateEnabled(); !ok {
 		v := group.DefaultPeakRateEnabled
 		_c.mutation.SetPeakRateEnabled(v)
@@ -1232,6 +1250,14 @@ func (_c *GroupCreate) check() error {
 	}
 	if _, ok := _c.mutation.RateMultiplier(); !ok {
 		return &ValidationError{Name: "rate_multiplier", err: errors.New(`ent: missing required field "Group.rate_multiplier"`)}
+	}
+	if _, ok := _c.mutation.BillingRateMode(); !ok {
+		return &ValidationError{Name: "billing_rate_mode", err: errors.New(`ent: missing required field "Group.billing_rate_mode"`)}
+	}
+	if v, ok := _c.mutation.BillingRateMode(); ok {
+		if err := group.BillingRateModeValidator(v); err != nil {
+			return &ValidationError{Name: "billing_rate_mode", err: fmt.Errorf(`ent: validator failed for field "Group.billing_rate_mode": %w`, err)}
+		}
 	}
 	if _, ok := _c.mutation.PeakRateEnabled(); !ok {
 		return &ValidationError{Name: "peak_rate_enabled", err: errors.New(`ent: missing required field "Group.peak_rate_enabled"`)}
@@ -1468,6 +1494,10 @@ func (_c *GroupCreate) createSpec() (*Group, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.RateMultiplier(); ok {
 		_spec.SetField(group.FieldRateMultiplier, field.TypeFloat64, value)
 		_node.RateMultiplier = value
+	}
+	if value, ok := _c.mutation.BillingRateMode(); ok {
+		_spec.SetField(group.FieldBillingRateMode, field.TypeString, value)
+		_node.BillingRateMode = value
 	}
 	if value, ok := _c.mutation.PeakRateEnabled(); ok {
 		_spec.SetField(group.FieldPeakRateEnabled, field.TypeBool, value)
@@ -1940,6 +1970,18 @@ func (u *GroupUpsert) UpdateRateMultiplier() *GroupUpsert {
 // AddRateMultiplier adds v to the "rate_multiplier" field.
 func (u *GroupUpsert) AddRateMultiplier(v float64) *GroupUpsert {
 	u.Add(group.FieldRateMultiplier, v)
+	return u
+}
+
+// SetBillingRateMode sets the "billing_rate_mode" field.
+func (u *GroupUpsert) SetBillingRateMode(v string) *GroupUpsert {
+	u.Set(group.FieldBillingRateMode, v)
+	return u
+}
+
+// UpdateBillingRateMode sets the "billing_rate_mode" field to the value that was provided on create.
+func (u *GroupUpsert) UpdateBillingRateMode() *GroupUpsert {
+	u.SetExcluded(group.FieldBillingRateMode)
 	return u
 }
 
@@ -3057,6 +3099,20 @@ func (u *GroupUpsertOne) AddRateMultiplier(v float64) *GroupUpsertOne {
 func (u *GroupUpsertOne) UpdateRateMultiplier() *GroupUpsertOne {
 	return u.Update(func(s *GroupUpsert) {
 		s.UpdateRateMultiplier()
+	})
+}
+
+// SetBillingRateMode sets the "billing_rate_mode" field.
+func (u *GroupUpsertOne) SetBillingRateMode(v string) *GroupUpsertOne {
+	return u.Update(func(s *GroupUpsert) {
+		s.SetBillingRateMode(v)
+	})
+}
+
+// UpdateBillingRateMode sets the "billing_rate_mode" field to the value that was provided on create.
+func (u *GroupUpsertOne) UpdateBillingRateMode() *GroupUpsertOne {
+	return u.Update(func(s *GroupUpsert) {
+		s.UpdateBillingRateMode()
 	})
 }
 
@@ -4503,6 +4559,20 @@ func (u *GroupUpsertBulk) AddRateMultiplier(v float64) *GroupUpsertBulk {
 func (u *GroupUpsertBulk) UpdateRateMultiplier() *GroupUpsertBulk {
 	return u.Update(func(s *GroupUpsert) {
 		s.UpdateRateMultiplier()
+	})
+}
+
+// SetBillingRateMode sets the "billing_rate_mode" field.
+func (u *GroupUpsertBulk) SetBillingRateMode(v string) *GroupUpsertBulk {
+	return u.Update(func(s *GroupUpsert) {
+		s.SetBillingRateMode(v)
+	})
+}
+
+// UpdateBillingRateMode sets the "billing_rate_mode" field to the value that was provided on create.
+func (u *GroupUpsertBulk) UpdateBillingRateMode() *GroupUpsertBulk {
+	return u.Update(func(s *GroupUpsert) {
+		s.UpdateBillingRateMode()
 	})
 }
 

@@ -23,7 +23,21 @@ func accountRPMDispatchRequest(req *http.Request, cache GatewayCache, repo accou
 		}
 		return nil, err
 	}
-	admit := func(ctx context.Context) error { return admitAccountRPM(ctx, cache, repo, account) }
+	admit := func(ctx context.Context) error {
+		if automatic, _ := ctx.Value(openAIEvalAutomaticKey{}).(bool); automatic {
+			if repo == nil || account == nil {
+				return &OpenAIEvalRequestError{Code: "account_lookup_unavailable", Message: "automatic test account lookup is unavailable"}
+			}
+			latest, err := repo.GetByID(ctx, account.ID)
+			if err != nil || latest == nil {
+				return &OpenAIEvalRequestError{Code: "account_lookup_unavailable", Message: "automatic test account lookup failed"}
+			}
+			if !latest.Schedulable {
+				return &OpenAIEvalRequestError{Code: "account_scheduling_disabled", Message: "automatic test skipped: account scheduling is disabled"}
+			}
+		}
+		return admitAccountRPM(ctx, cache, repo, account)
+	}
 	policy := accountRPMHTTPPolicy{
 		admit: admit,
 		limited: func(ctx context.Context) (bool, error) {

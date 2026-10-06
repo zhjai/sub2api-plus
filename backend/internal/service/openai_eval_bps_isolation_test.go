@@ -32,7 +32,7 @@ func TestOpenAIEvalStateProbeBPSIsolation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			initialState := OpenAIBPSAccountState{DegradedStreak: 2, UpdatedAt: time.Now().UTC().Add(-time.Hour)}
 			account := &Account{
-				ID: 61, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
+				ID: 61, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1, Schedulable: true,
 				Credentials: map[string]any{"access_token": "probe-token"},
 				Extra:       map[string]any{OpenAIBPSAccountStateExtraKey(): initialState},
 			}
@@ -78,7 +78,7 @@ func TestOpenAIEvalStateProbeBPSIsolation(t *testing.T) {
 			require.Equal(t, tc.wantModel, run.UpstreamModel)
 			require.Empty(t, run.ReasoningEffort)
 			require.Len(t, upstream.requests, 2)
-			require.Equal(t, "unsupported_linked_ticket_chain", run.Outcome.StateProbe.RetryPolicy)
+			require.Equal(t, "fresh_linked_ticket_chain", run.Outcome.StateProbe.RetryPolicy)
 			require.Len(t, run.Samples, 2)
 			for _, req := range upstream.requests {
 				var body struct {
@@ -137,4 +137,48 @@ func TestOpenAIBPSRoutingIgnoresLegacyEvaluationTargets(t *testing.T) {
 			require.True(t, svc.isOpenAIBPSForwardEligible(t.Context(), account, "gpt-6-astra"), "removing evaluation targets must not disable independent account BPS")
 		})
 	}
+}
+
+func TestOpenAIEvalDisabledAccountProbeDoesNotMutateBPSState(t *testing.T) {
+	initial := OpenAIBPSAccountState{DegradedStreak: 2, UpdatedAt: time.Now().UTC().Add(-time.Hour)}
+	account := &Account{ID: 62, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Schedulable: false,
+		Extra: map[string]any{OpenAIBPSAccountStateExtraKey(): initial}}
+	accounts := &openAIAccountTestRepo{mockAccountRepoForGemini: mockAccountRepoForGemini{accountsByID: map[int64]*Account{account.ID: account}}}
+	repo := &openAIEvalRepoFake{config: &OpenAIEvalConfig{
+		BPSAutoEnabled: true,
+		BPSAccounts:    []OpenAIEvalBPSAccountConfig{{AccountID: account.ID, Mode: OpenAIEvalBPSModeAuto, FailureThreshold: 3, RecoveryThreshold: 2}},
+	}}
+	svc := NewOpenAIEvalService(repo, accounts, &AccountTestService{})
+	svc.applyOpenAIStateProbeBPS(t.Context(), &OpenAIEvalTarget{Account: account, RequestedModel: "gpt-6-astra"},
+		&OpenAIStateProbeResult{Verdict: "degraded"}, true)
+	require.Nil(t, accounts.updatedExtra)
+	require.Equal(t, initial, readOpenAIBPSAccountState(account))
+}
+
+func TestOpenAIEvalAccountDisabledDuringAutomaticProbeRemainsDiagnostic(t *testing.T) {
+	newCodexModelsOAuthCacheServer(t, `{"models":[{"slug":"gpt-6-astra"}]}`)
+	initial := OpenAIBPSAccountState{DegradedStreak: 2, UpdatedAt: time.Now().UTC().Add(-time.Hour)}
+	account := &Account{ID: 63, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Schedulable: true, Concurrency: 1,
+		Credentials: map[string]any{"access_token": "probe-token"},
+		Extra:       map[string]any{OpenAIBPSAccountStateExtraKey(): initial}}
+	accounts := &openAIAccountTestRepo{mockAccountRepoForGemini: mockAccountRepoForGemini{accountsByID: map[int64]*Account{account.ID: account}}}
+	repo := &openAIEvalRepoFake{config: &OpenAIEvalConfig{BPSAutoEnabled: true,
+		BPSAccounts: []OpenAIEvalBPSAccountConfig{{AccountID: account.ID, ProbeModel: "gpt-6-astra", Mode: OpenAIEvalBPSModeAuto, FailureThreshold: 3, RecoveryThreshold: 2}}}}
+	upstream := &evalTransportStub{respond: func(_ *http.Request, call int) (*http.Response, error) {
+		ticket := "ticket-a"
+		if call == 2 {
+			account.Schedulable = false
+			ticket = "ticket-b"
+		}
+		return stateProbeResponse(ticket, "data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-6-astra\"}}\n\n", http.StatusOK), nil
+	}}
+	accountTest := &AccountTestService{accountRepo: accounts, httpUpstream: upstream,
+		openaiGatewayService: &OpenAIGatewayService{}, tlsFPProfileService: &TLSFingerprintProfileService{}}
+	svc := NewOpenAIEvalService(repo, accounts, accountTest)
+	run, err := svc.Run(t.Context(), OpenAIEvalRunRequest{AccountID: account.ID, RequestedModel: "gpt-6-astra",
+		TestType: OpenAIEvalTypeStateProbe, ReasoningEffort: OpenAIEvalBPSAccountEffort}, 0, "scheduled")
+	require.NoError(t, err)
+	require.True(t, run.DiagnosticOnly)
+	require.Nil(t, accounts.updatedExtra)
+	require.Equal(t, initial, readOpenAIBPSAccountState(account))
 }

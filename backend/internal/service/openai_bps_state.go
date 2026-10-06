@@ -252,6 +252,13 @@ func (s *OpenAIEvalService) applyOpenAIStateProbeBPS(ctx context.Context, target
 	if s == nil || s.repo == nil || s.accounts == nil || target == nil || target.Account == nil || probe == nil || !isBPSAccountProbe {
 		return
 	}
+	// A scheduled probe may finish after an administrator disables the account.
+	// Keep the result auditable, but do not let that stale diagnostic mutate the
+	// independent BPS routing state of a disabled account.
+	latest, accountErr := s.accounts.GetByID(ctx, target.Account.ID)
+	if accountErr != nil || latest == nil || !latest.Schedulable {
+		return
+	}
 	config, err := s.repo.GetConfig(ctx)
 	if err != nil || config == nil || !config.BPSAutoEnabled {
 		return

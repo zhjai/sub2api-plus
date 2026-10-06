@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const OpenAIEvalRankingAlgorithmVersion = "evidence-account-macro-v4-modeltrace-target"
+const OpenAIEvalRankingAlgorithmVersion = "evidence-account-macro-v5-runtime-thresholds"
 
 var (
 	ErrOpenAIEvalRankingSuperseded      = errors.New("EVALUATION_SUPERSEDED")
@@ -16,11 +16,12 @@ var (
 )
 
 type OpenAIEvalRankingWeights struct {
-	Price     float64 `json:"price"`
-	ErrorRate float64 `json:"error_rate"`
-	TTFT      float64 `json:"ttft"`
-	Load      float64 `json:"load"`
-	Quality   float64 `json:"quality"`
+	Price              float64  `json:"price"`
+	ErrorRate          float64  `json:"error_rate"`
+	TTFT               float64  `json:"ttft"`
+	Load               float64  `json:"load"`
+	Quality            float64  `json:"quality"`
+	AbsolutePriorities []string `json:"absolute_priorities,omitempty"`
 }
 
 type OpenAIEvalFactorMeta struct {
@@ -64,7 +65,12 @@ type OpenAIEvalRankingQuality struct {
 	Evaluated     int        `json:"evaluated"`
 	Ratio         *float64   `json:"ratio"`
 	ExpiresAt     *time.Time `json:"expires_at"`
-	macroRatio    *big.Rat
+	// EvidenceErrorCode/Message explain why the latest selected test could not
+	// contribute a quality score. They are sanitized diagnostic data only; an
+	// unknown result must never be treated as a pass.
+	EvidenceErrorCode    string `json:"evidence_error_code,omitempty"`
+	EvidenceErrorMessage string `json:"evidence_error_message,omitempty"`
+	macroRatio           *big.Rat
 }
 type OpenAIEvalRankingMonitor struct {
 	MonitorID     int64     `json:"monitor_id"`
@@ -89,6 +95,7 @@ type OpenAIEvalRankingExclusion struct {
 	ObservedAt time.Time `json:"observed_at"`
 }
 type OpenAIEvalRankedAccount struct {
+	ThresholdReasons    []string                       `json:"threshold_reasons,omitempty"`
 	QualityBasis        string                         `json:"quality_basis,omitempty"`
 	AccountQualityPrior *OpenAIEvalAccountQualityPrior `json:"account_quality_prior,omitempty"`
 	OverviewPrior       *OpenAIEvalOverviewPrior       `json:"overview_prior,omitempty"`
@@ -212,6 +219,7 @@ type OpenAIEvalOverviewPrior struct {
 // An account-wide preference is not evidence about the requested model/effort.
 type OpenAIEvalAccountQualityPrior struct {
 	Ratio        float64   `json:"ratio"`
+	Basis        string    `json:"basis,omitempty"`
 	EvaluationID string    `json:"evaluation_id"`
 	EvaluatedAt  time.Time `json:"evaluated_at"`
 	ExpiresAt    time.Time `json:"expires_at"`

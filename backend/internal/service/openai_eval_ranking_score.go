@@ -23,11 +23,11 @@ func openAIEvalRankingWeights(config *OpenAIEvalConfig, model, effort string) (s
 	policy := OpenAIEvalSchedulingPolicyFor(config, model, effort)
 	switch policy {
 	case OpenAIEvalSchedulingPolicyCostFirst:
-		return policy, OpenAIEvalRankingWeights{.6, .2, .1, .1, 0}
+		return policy, OpenAIEvalRankingWeights{Price: 1}
 	case OpenAIEvalSchedulingPolicyStabilityFirst:
-		return policy, OpenAIEvalRankingWeights{.1, .5, .3, .1, 0}
+		return policy, OpenAIEvalRankingWeights{Price: 1}
 	case OpenAIEvalSchedulingPolicyAvoidDegradation:
-		return policy, OpenAIEvalRankingWeights{.4, .35, .15, .1, 0}
+		return policy, OpenAIEvalRankingWeights{Price: 1}
 	case OpenAIEvalSchedulingPolicyCustomBalance:
 		weights := config.CustomBalance
 		for _, rule := range config.Policies {
@@ -46,12 +46,24 @@ func openAIEvalRankingWeights(config *OpenAIEvalConfig, model, effort string) (s
 		}
 		weights, err := normalizeOpenAIEvalPolicyWeights(weights)
 		if err != nil {
-			return policy, OpenAIEvalRankingWeights{.2, .2, .2, .2, .2}
+			return policy, OpenAIEvalRankingWeights{Price: .2, ErrorRate: .2, TTFT: .2, Load: .2, Quality: .2}
 		}
-		return policy, OpenAIEvalRankingWeights{weights.Cost, weights.ErrorRate + weights.Stability*.6, weights.TTFT + weights.Stability*.4, weights.Load, weights.Quality}
+		return policy, OpenAIEvalRankingWeights{Price: weights.Cost, ErrorRate: weights.ErrorRate + weights.Stability*.6, TTFT: weights.TTFT + weights.Stability*.4, Load: weights.Load, Quality: weights.Quality, AbsolutePriorities: append([]string(nil), weights.AbsolutePriorities...)}
 	default:
 		return "", OpenAIEvalRankingWeights{}
 	}
+}
+
+func openAIEvalRankingWeightsEqual(a, b OpenAIEvalRankingWeights) bool {
+	if a.Price != b.Price || a.ErrorRate != b.ErrorRate || a.TTFT != b.TTFT || a.Load != b.Load || a.Quality != b.Quality || len(a.AbsolutePriorities) != len(b.AbsolutePriorities) {
+		return false
+	}
+	for i := range a.AbsolutePriorities {
+		if a.AbsolutePriorities[i] != b.AbsolutePriorities[i] {
+			return false
+		}
+	}
+	return true
 }
 
 type openAIEvalRankingInput struct {
@@ -74,6 +86,11 @@ func emptyOpenAIEvalRankingFactors() OpenAIEvalRankingFactors {
 
 // Both evaluation and request fallback use this pure scorer over one input pool.
 func scoreOpenAIEvalRanking(policy string, weights OpenAIEvalRankingWeights, inputs []openAIEvalRankingInput, now time.Time, oauthRate *float64, priorSets ...map[int64]*OpenAIEvalAccountQualityPrior) []OpenAIEvalRankedAccount {
+	return scoreOpenAIEvalRankingWithThresholds(policy, weights, inputs, now, oauthRate, defaultOpenAIEvalSchedulingThresholds(), priorSets...)
+}
+
+func scoreOpenAIEvalRankingWithThresholds(policy string, weights OpenAIEvalRankingWeights, inputs []openAIEvalRankingInput, now time.Time, oauthRate *float64, thresholds OpenAIEvalSchedulingThresholds, priorSets ...map[int64]*OpenAIEvalAccountQualityPrior) []OpenAIEvalRankedAccount {
+	inputs = append([]openAIEvalRankingInput(nil), inputs...)
 	pool := make([]*Account, 0, len(inputs))
 	minTTFT, maxTTFT := math.Inf(1), math.Inf(-1)
 	for _, input := range inputs {
@@ -87,6 +104,22 @@ func scoreOpenAIEvalRanking(policy string, weights OpenAIEvalRankingWeights, inp
 		}
 	}
 	prices := openAIUpstreamCostFactors(pool, now, oauthRate)
+	// Missing runtime evidence uses the same neutral score across the pool;
+	// never renormalize weights per account or invent successful samples.
+	if policy == OpenAIEvalSchedulingPolicyCustomBalance {
+		for i := range inputs {
+			f := &inputs[i].factors
+			if !f.ErrorRate.Known {
+				f.ErrorRate.Score = .5
+			}
+			if !f.TTFT.Known {
+				f.TTFT.Score = .5
+			}
+			if !f.Quality.Known {
+				f.Quality.Score = 0
+			}
+		}
+	}
 	rows := make([]OpenAIEvalRankedAccount, 0, len(inputs))
 	for _, input := range inputs {
 		row := OpenAIEvalRankedAccount{AccountID: input.account.ID, AccountName: input.account.Name,
@@ -94,10 +127,10 @@ func scoreOpenAIEvalRanking(policy string, weights OpenAIEvalRankingWeights, inp
 		row.QualityBasis = "none"
 		if rankingQualityFraction(row.Factors.Quality) != nil {
 			row.QualityBasis = "exact"
-		} else if policy == OpenAIEvalSchedulingPolicyAvoidDegradation && row.Factors.Quality.Selected == 0 && len(priorSets) > 0 {
+		} else if openAIEvalRankingUsesQuality(policy, weights) && row.Factors.Quality.Selected == 0 && len(priorSets) > 0 {
 			if prior := priorSets[0][row.AccountID]; prior != nil && now.Before(prior.ExpiresAt) {
 				row.AccountQualityPrior = cloneAccountQualityPrior(prior)
-				row.QualityBasis = "account_prior"
+				row.QualityBasis = openAIEvalQualityPriorBasis(prior)
 			}
 		}
 		if row.ExclusionReasons == nil {
@@ -129,27 +162,21 @@ func scoreOpenAIEvalRanking(policy string, weights OpenAIEvalRankingWeights, inp
 			}
 		}
 		if input.compatible && policy != "" {
-			row.Contributions = OpenAIEvalRankingWeights{100 * weights.Price * f.Price.Score, 100 * weights.ErrorRate * f.ErrorRate.Score,
-				100 * weights.TTFT * f.TTFT.Score, 100 * weights.Load * f.Load.Score, 100 * weights.Quality * f.Quality.Score}
+			row.Contributions = OpenAIEvalRankingWeights{Price: 100 * weights.Price * f.Price.Score, ErrorRate: 100 * weights.ErrorRate * f.ErrorRate.Score,
+				TTFT: 100 * weights.TTFT * f.TTFT.Score, Load: 100 * weights.Load * f.Load.Score, Quality: 100 * weights.Quality * f.Quality.Score, AbsolutePriorities: append([]string(nil), weights.AbsolutePriorities...)}
 			c := row.Contributions
 			row.PriorityScore = rankingPtr(c.Price + c.ErrorRate + c.TTFT + c.Load + c.Quality)
 		}
+		row.ThresholdReasons = rankingThresholdReasons(policy, thresholds, row.Factors)
 		rows = append(rows, row)
 	}
 	sort.Slice(rows, func(i, j int) bool {
-		a, b := rows[i], rows[j]
-		if (a.PriorityScore == nil) != (b.PriorityScore == nil) {
-			return a.PriorityScore != nil
-		}
-		if a.PriorityScore != nil && policy == OpenAIEvalSchedulingPolicyAvoidDegradation {
-			if compared := compareRankingEffectiveQuality(a, b); compared != 0 {
-				return compared > 0
+		if policy == OpenAIEvalSchedulingPolicyCustomBalance {
+			if cmp := compareAbsoluteRankingPriorities(weights.AbsolutePriorities, rows[i], rows[j]); cmp != 0 {
+				return cmp > 0
 			}
 		}
-		if a.PriorityScore != nil && *a.PriorityScore != *b.PriorityScore {
-			return *a.PriorityScore > *b.PriorityScore
-		}
-		return a.AccountID < b.AccountID
+		return rankingPolicyLess(policy, rows[i], rows[j])
 	})
 	tier := 0
 	for i := range rows {
@@ -165,6 +192,47 @@ func scoreOpenAIEvalRanking(policy string, weights OpenAIEvalRankingWeights, inp
 		}
 	}
 	return rows
+}
+
+func compareAbsoluteRankingPriorities(priorities []string, a, b OpenAIEvalRankedAccount) int {
+	for _, priority := range priorities {
+		var left, right float64
+		var leftKnown, rightKnown bool
+		switch priority {
+		case "cost":
+			left, right = a.Factors.Price.Score, b.Factors.Price.Score
+			leftKnown, rightKnown = a.Factors.Price.Known, b.Factors.Price.Known
+		case "error_rate":
+			left, right = a.Factors.ErrorRate.Score, b.Factors.ErrorRate.Score
+			leftKnown, rightKnown = a.Factors.ErrorRate.Known, b.Factors.ErrorRate.Known
+		case "ttft":
+			left, right = a.Factors.TTFT.Score, b.Factors.TTFT.Score
+			leftKnown, rightKnown = a.Factors.TTFT.Known, b.Factors.TTFT.Known
+		case "load":
+			left, right = a.Factors.Load.Score, b.Factors.Load.Score
+			leftKnown, rightKnown = a.Factors.Load.Known, b.Factors.Load.Known
+		case "quality":
+			if cmp := compareRankingEffectiveQuality(a, b); cmp != 0 {
+				return cmp
+			}
+			continue
+		default:
+			continue
+		}
+		if leftKnown != rightKnown {
+			if leftKnown {
+				return 1
+			}
+			return -1
+		}
+		if leftKnown && left != right {
+			if left > right {
+				return 1
+			}
+			return -1
+		}
+	}
+	return 0
 }
 
 func compareRankingEffectiveQuality(a, b OpenAIEvalRankedAccount) int {
@@ -232,19 +300,19 @@ func rankingFactorExpiry(f OpenAIEvalRankingFactors, weights OpenAIEvalRankingWe
 			}
 		}
 	}
-	if weights.ErrorRate > 0 && f.ErrorRate.Known {
+	if (weights.ErrorRate > 0 || policy != "") && f.ErrorRate.Known {
 		include(f.ErrorRate.ObservedAt, time.Duration(f.ErrorRate.WindowSeconds)*time.Second)
 	}
-	if weights.TTFT > 0 && f.TTFT.Known {
+	if (weights.TTFT > 0 || policy != "") && f.TTFT.Known {
 		include(f.TTFT.ObservedAt, openAIRankingMetricTTL)
 	}
-	if (weights.Quality > 0 || policy == OpenAIEvalSchedulingPolicyAvoidDegradation) && f.Quality.Known && f.Quality.ExpiresAt != nil {
+	if openAIEvalRankingUsesQuality(policy, weights) && f.Quality.Known && f.Quality.ExpiresAt != nil {
 		if until == nil || f.Quality.ExpiresAt.Before(*until) {
 			until = f.Quality.ExpiresAt
 		}
 	}
 	// Each matched probe may age out before the latest probe timestamp does.
-	if weights.ErrorRate > 0 && f.ErrorRate.Source != nil && *f.ErrorRate.Source == "v1_matched_probe" {
+	if (weights.ErrorRate > 0 || openAIEvalHasAbsolutePriority(weights.AbsolutePriorities, "error_rate")) && f.ErrorRate.Source != nil && *f.ErrorRate.Source == "v1_matched_probe" {
 		if f.monitorExpiresAt != nil && (until == nil || f.monitorExpiresAt.Before(*until)) {
 			until = f.monitorExpiresAt
 		}
@@ -254,6 +322,29 @@ func rankingFactorExpiry(f OpenAIEvalRankingFactors, weights OpenAIEvalRankingWe
 
 func qualityFromLatestRuns(config *OpenAIEvalConfig, accountID int64, model, effort string, latest map[OpenAIEvalEvidenceKey]OpenAIEvalRun, now time.Time) OpenAIEvalRankingQuality {
 	q := emptyOpenAIEvalRankingFactors().Quality
+	recordEvidenceError := func(run OpenAIEvalRun) {
+		if q.EvidenceErrorCode != "" || q.EvidenceErrorMessage != "" {
+			return
+		}
+		code, message := run.Error, ""
+		for _, sample := range run.Samples {
+			if code == "" && sample.ErrorCode != "" {
+				code = sample.ErrorCode
+			}
+			if message == "" && sample.ErrorMessage != "" {
+				message = sample.ErrorMessage
+			}
+			if code != "" && message != "" {
+				break
+			}
+		}
+		if code != "" {
+			q.EvidenceErrorCode = sanitizeOpenAIEvalText(code, 160)
+		}
+		if message != "" {
+			q.EvidenceErrorMessage = sanitizeOpenAIEvalText(message, openAIEvalErrorLimit)
+		}
+	}
 	for _, testType := range openAIEvalQualityTestTypes {
 		interval, selected := openAIEvalQualityTestInterval(config, accountID, model, effort, testType)
 		if !selected {
@@ -261,26 +352,34 @@ func qualityFromLatestRuns(config *OpenAIEvalConfig, accountID int64, model, eff
 		}
 		q.Selected++
 		run, found := latest[OpenAIEvalEvidenceKey{accountID, openAIEvalQualityDimension(model), openAIEvalQualityDimension(effort), testType}]
-		if !found {
+		if !found || run.DiagnosticOnly {
+			if found {
+				recordEvidenceError(run)
+			}
 			continue
 		}
 		expires := run.FinishedAt.Add(openAIEvalQualityFreshness(interval, openAIEvalQualityRefreshSeconds(config)))
 		if !expires.After(now) {
 			q.State = "stale"
+			recordEvidenceError(run)
 			continue
 		}
 		if run.DataVersion != OpenAIEvalQualityDataVersion || run.FinishedAt.After(now) || run.FinishedAt.IsZero() || !openAIEvalQualityRunSourceSupported(run.TriggerSource) || run.ID <= 0 {
+			recordEvidenceError(run)
 			continue
 		}
 		normalizeOpenAIEvalAttributionRun(&run)
 		counts := openAIEvalQualityCountsFromRun(&run)
 		if !counts.valid() || counts.EvaluatedCount > openAIEvalQualityMaxSamples(testType) {
+			recordEvidenceError(run)
 			continue
 		}
 		if testType == OpenAIEvalTypeFingerprint && run.BaselineVersion != OpenAIEvalQualityBaselineVersion {
+			recordEvidenceError(run)
 			continue
 		}
 		if testType == OpenAIEvalTypeModelTrace && (run.Outcome.ModelTrace == nil || run.Outcome.ModelTrace.BankRevision != OpenAIEvalQualityModelTraceBankRevision) {
+			recordEvidenceError(run)
 			continue
 		}
 		status := run.Status
@@ -292,6 +391,7 @@ func qualityFromLatestRuns(config *OpenAIEvalConfig, accountID int64, model, eff
 		}
 		aggregate := OpenAIEvalQualityAggregate{OpenAIEvalQualityCounts: counts, TestType: testType, OutcomeStatus: status, AttributionRuleVersion: openAIEvalQualityAttributionRuleVersion(testType)}
 		if _, ok := aggregate.diagnosticStatus(); !ok {
+			recordEvidenceError(run)
 			continue
 		}
 		q.Evaluated++

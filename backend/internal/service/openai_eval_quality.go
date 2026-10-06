@@ -224,7 +224,7 @@ func ReadOpenAIEvalQualityFromAccount(account *Account, model, effort string, no
 }
 
 func readOpenAIEvalQualityEvidence(account *Account, model, effort, testType string, now time.Time) (OpenAIEvalQualityAggregate, bool) {
-	if !OpenAIEvalEffectsEnabled() || account == nil || account.Extra == nil {
+	if account == nil || account.Extra == nil {
 		return OpenAIEvalQualityAggregate{}, false
 	}
 	raw, exists := account.Extra[OpenAIEvalQualityExtraKeyFor(model, effort, testType)]
@@ -246,7 +246,7 @@ func readOpenAIEvalQualityEvidence(account *Account, model, effort, testType str
 // supplies counts from final logical samples, never run.RequestCount.
 // Manual and automatic results share the selected route's quality contract.
 func (s *OpenAIEvalService) recordOpenAIEvalQuality(ctx context.Context, runID int64, run *OpenAIEvalRun, counts OpenAIEvalQualityCounts) error {
-	if s == nil || s.accounts == nil || s.repo == nil || !OpenAIEvalEffectsEnabled() || run == nil || !openAIEvalQualityRunSourceSupported(run.TriggerSource) {
+	if s == nil || s.accounts == nil || s.repo == nil || run == nil || run.DiagnosticOnly || !openAIEvalQualityRunSourceSupported(run.TriggerSource) {
 		return nil
 	}
 	copy := *run
@@ -292,7 +292,7 @@ func (s *OpenAIEvalService) recordOpenAIEvalQuality(ctx context.Context, runID i
 		return err
 	}
 	interval, automatic := openAIEvalQualityTestInterval(config, run.AccountID, run.RequestedModel, run.ReasoningEffort, run.TestType)
-	if !automatic || config == nil || !config.EffectsEnabled {
+	if !automatic || config == nil {
 		return nil
 	}
 	freshness := openAIEvalQualityFreshness(interval, openAIEvalQualityRefreshSeconds(config))
@@ -320,7 +320,7 @@ func (s *OpenAIEvalService) recordOpenAIEvalQuality(ctx context.Context, runID i
 // Persist an ordered marker instead of deleting the key: an older finishing
 // attempt must not restore a stale pass after the unknown outcome.
 func (s *OpenAIEvalService) recordOpenAIEvalQualityResult(ctx context.Context, runID int64, run *OpenAIEvalRun) error {
-	if s == nil || s.accounts == nil || s.repo == nil || !OpenAIEvalEffectsEnabled() || run == nil || !openAIEvalQualityRunSourceSupported(run.TriggerSource) || run.TestType == OpenAIEvalTypeStateProbe {
+	if s == nil || s.accounts == nil || s.repo == nil || run == nil || run.DiagnosticOnly || !openAIEvalQualityRunSourceSupported(run.TriggerSource) || run.TestType == OpenAIEvalTypeStateProbe {
 		return nil
 	}
 	counts := openAIEvalQualityCountsFromRun(run)
@@ -338,7 +338,7 @@ func (s *OpenAIEvalService) recordOpenAIEvalQualityResult(ctx context.Context, r
 		return err
 	}
 	interval, automatic := openAIEvalQualityTestInterval(config, run.AccountID, run.RequestedModel, run.ReasoningEffort, run.TestType)
-	if !automatic || config == nil || !config.EffectsEnabled {
+	if !automatic || config == nil {
 		return nil
 	}
 	return s.persistOpenAIEvalQuality(ctx, OpenAIEvalQualityAggregate{
@@ -387,9 +387,6 @@ func (s *OpenAIEvalService) persistOpenAIEvalQuality(ctx context.Context, qualit
 		if previous.EvaluatedAt.After(quality.EvaluatedAt) || (previous.EvaluatedAt.Equal(quality.EvaluatedAt) && (previous.RunID > runID || (previous.RunID == runID && previous.AttributionRuleVersion == quality.AttributionRuleVersion))) {
 			return nil
 		}
-	}
-	if !OpenAIEvalEffectsEnabled() {
-		return nil
 	}
 	payload, err := json.Marshal(quality)
 	if err != nil {

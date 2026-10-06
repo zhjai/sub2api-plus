@@ -386,6 +386,37 @@ func TestInflightEstimate_AccountLevelMappingFallsBackLikeBilling(t *testing.T) 
 	require.InDelta(t, best, est, 1e-12, "estimate = max over candidate account-mapped billing models")
 }
 
+func TestInflightEstimate_AccountBillingUsesMaximumEligibleAccountRate(t *testing.T) {
+	groupID := int64(32)
+	svc := newInflightEstimateGateway(t, nil)
+	lowRate, highRate := 0.25, 1.5
+	snap := &inflightSnapshotCacheStub{byBucket: map[string][]Account{
+		inflightBucketKey(groupID, PlatformAnthropic): {
+			{ID: 1, Platform: PlatformAnthropic, RateMultiplier: &lowRate},
+			{ID: 2, Platform: PlatformAnthropic, RateMultiplier: &highRate},
+		},
+	}}
+	attachInflightSnapshot(svc, snap)
+	apiKey := &APIKey{
+		User:    &User{ID: 1},
+		GroupID: &groupID,
+		Group:   &Group{ID: groupID, Platform: PlatformAnthropic, RateMultiplier: 2, BillingRateMode: GroupBillingRateModeAccount},
+	}
+	ctx := context.Background()
+
+	estimate, priced := svc.EstimateInflightReservation(ctx, apiKey, InflightEstimateRequest{
+		Model: "claude-sonnet-4-5", BodyBytes: 4000, MaxTokens: 1000,
+	})
+	require.True(t, priced)
+
+	base, _ := EstimateInflightReservationCost(svc.billingService, svc.cfg.Billing.InflightReservation, "claude-sonnet-4-5", 4000, 1000, highRate)
+	groupRate, _ := EstimateInflightReservationCost(svc.billingService, svc.cfg.Billing.InflightReservation, "claude-sonnet-4-5", 4000, 1000, 2)
+	require.InDelta(t, base, estimate, 1e-12,
+		"admission must reserve against the highest eligible selected-account rate")
+	require.NotEqual(t, groupRate, estimate,
+		"account billing mode must not fall back to the group multiplier")
+}
+
 type inflightSnapshotCacheStub struct {
 	SchedulerCache
 	mu       sync.Mutex

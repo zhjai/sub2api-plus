@@ -98,6 +98,10 @@ func mergeOpenAIEvalConfigOmittedFields(incoming, current *service.OpenAIEvalCon
 	if _, ok := fields["max_request_attempts"]; !ok {
 		incoming.MaxRequestAttempts = current.MaxRequestAttempts
 	}
+	if _, ok := fields["scheduling_thresholds"]; !ok && current.SchedulingThresholds != nil {
+		value := *current.SchedulingThresholds
+		incoming.SchedulingThresholds = &value
+	}
 	if _, ok := fields["revision"]; !ok {
 		incoming.Revision = current.Revision
 	}
@@ -162,6 +166,9 @@ func mergeOpenAIEvalQualityWeight(incoming *service.OpenAIEvalPolicyWeights, cur
 	}
 	if _, present := fields["quality"]; !present {
 		incoming.Quality = current.Quality
+	}
+	if _, present := fields["absolute_priorities"]; !present {
+		incoming.AbsolutePriorities = append([]string(nil), current.AbsolutePriorities...)
 	}
 }
 

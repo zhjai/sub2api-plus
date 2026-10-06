@@ -205,7 +205,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	acquireCtx, acquireCancel := context.WithTimeout(ctx, s.openAIWSAcquireTimeout())
 	defer acquireCancel()
 
-	lease, err := s.getOpenAIWSConnPool().Acquire(acquireCtx, openAIWSAcquireRequest{
+	acquireReq := openAIWSAcquireRequest{
 		Account: account,
 		WSURL:   wsURL,
 		Headers: wsHeaders,
@@ -223,7 +223,8 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 			}
 			return ""
 		}(),
-	})
+	}
+	lease, err := s.getOpenAIWSConnPool().Acquire(acquireCtx, acquireReq)
 	if err != nil {
 		var agentDialErr *openAIWSDialError
 		if s.isAgentIdentityAccount(ctx, account) && errors.As(err, &agentDialErr) && isAgentIdentityTaskInvalidWSDialError(agentDialErr) && agentTaskRecoveryTried != nil && !*agentTaskRecoveryTried {
@@ -379,6 +380,8 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	responseID := ""
 	var finalResponse []byte
 	wroteDownstream := false
+	replayIDRetryState := openAIResponsesRejectedFieldRetryStateForRequest(c, payloadAsJSONBytes(payload))
+	replayIDBootstrapOnly := true
 	needModelReplace := originalModel != mappedModel
 	var mappedModelBytes []byte
 	if needModelReplace && mappedModel != "" {
@@ -622,6 +625,9 @@ readLoop:
 		if eventType == "" {
 			continue
 		}
+		if eventType != "response.created" && eventType != "response.in_progress" && eventType != "error" {
+			replayIDBootstrapOnly = false
+		}
 		responseModelObserver.ObserveOpenAI(message, eventType)
 		if responseModel, mismatch := openAIPreCommitResponseModelMismatch(message, mappedModel); account.IsOpenAIOpaqueUpstream() && mismatch && !wroteDownstream && !clientDisconnected {
 			lease.MarkBroken()
@@ -684,6 +690,106 @@ readLoop:
 		}
 
 		if eventType == "error" {
+			status := openAIWSRejectedFieldRetryHTTPStatus(message)
+			if replayIDBootstrapOnly && !wroteDownstream && !clientDisconnected && ctx.Err() == nil && isOpenAIReplayItemIDRejection(status, message) {
+				requestBody := payloadAsJSONBytes(payload)
+				retryBody, retryReason, changed, retryErr := normalizeOpenAIResponsesRejectedFieldRetryBody(status, requestBody, message)
+				if retryErr != nil {
+					return nil, fmt.Errorf("normalize websocket v2 replay ID retry: %w", retryErr)
+				}
+				if changed && replayIDRetryState.AllowNormalization(retryBody, retryReason) {
+					// Forward's reconnect loop reuses reqBody. Keep the approved
+					// input repair there too, so a transient reacquire failure does
+					// not restore the rejected ID on the next connection.
+					var repairedPayload map[string]any
+					if err := decodeOpenAIJSONUseNumber(retryBody, &repairedPayload); err != nil {
+						return nil, fmt.Errorf("decode websocket v2 replay ID retry: %w", err)
+					}
+					reqBody["input"] = repairedPayload["input"]
+					payload["input"] = repairedPayload["input"]
+					payloadBytes = len(retryBody)
+					// Discard the rejected connection, including any delayed terminal
+					// frames belonging to its original request.
+					lease.MarkBroken()
+					lease.Release()
+					if stateStore != nil && sessionHash != "" {
+						stateStore.DeleteSessionTurnState(groupID, sessionHash)
+					}
+					if c != nil {
+						c.Writer.Header().Del(openAIWSTurnStateHeader)
+					}
+					retryAcquireReq := cloneOpenAIWSAcquireRequest(acquireReq)
+					retryAcquireReq.Headers.Del(openAIWSTurnStateHeader)
+					retryAcquireReq.PreferredConnID = ""
+					retryAcquireReq.PreferredConnBound = false
+					retryAcquireReq.ForcePreferredConn = false
+					retryAcquireReq.ForceNewConn = true
+					retryAcquireCtx, retryAcquireCancel := context.WithTimeout(ctx, s.openAIWSAcquireTimeout())
+					retryLease, acquireErr := s.getOpenAIWSConnPool().Acquire(retryAcquireCtx, retryAcquireReq)
+					retryAcquireCancel()
+					if acquireErr != nil {
+						// Keep the repair reacquire on the same dial-failure path as
+						// the initial lease. This preserves transient health signals,
+						// 429 persistence and the normal failover classification.
+						s.handleOpenAIWSDialTransientFailure(ctx, account, mappedModel, acquireErr)
+						dialStatus, dialClass, dialCloseStatus, dialCloseReason, dialRespServer, dialRespVia, dialRespCFRay, dialRespReqID := summarizeOpenAIWSDialError(acquireErr)
+						logOpenAIWSModeInfo(
+							"replay_id_reacquire_fail account_id=%d transport=%s reason=%s dial_status=%d dial_class=%s dial_close_status=%s dial_close_reason=%s dial_resp_server=%s dial_resp_via=%s dial_resp_cf_ray=%s dial_resp_x_request_id=%s cause=%s force_new_conn=%v",
+							account.ID,
+							normalizeOpenAIWSLogValue(string(decision.Transport)),
+							normalizeOpenAIWSLogValue(classifyOpenAIWSAcquireError(acquireErr)),
+							dialStatus,
+							dialClass,
+							dialCloseStatus,
+							truncateOpenAIWSLogValue(dialCloseReason, openAIWSHeaderValueMaxLen),
+							dialRespServer,
+							dialRespVia,
+							dialRespCFRay,
+							dialRespReqID,
+							truncateOpenAIWSLogValue(acquireErr.Error(), openAIWSLogValueMaxLen),
+							true,
+						)
+						var dialErr *openAIWSDialError
+						if errors.As(acquireErr, &dialErr) && dialErr != nil && dialErr.StatusCode == http.StatusTooManyRequests {
+							s.persistOpenAIWSRateLimitSignal(ctx, account, dialErr.ResponseHeaders, nil, "rate_limit_exceeded", "rate_limit_error", strings.TrimSpace(acquireErr.Error()), mappedModel)
+						}
+						return nil, wrapOpenAIWSFallback(classifyOpenAIWSAcquireError(acquireErr), acquireErr)
+					}
+					lease = retryLease
+					connID = strings.TrimSpace(lease.ConnID())
+					if c != nil {
+						SetOpsLatencyMs(c, OpsOpenAIWSConnPickMsKey, lease.ConnPickDuration().Milliseconds())
+						SetOpsLatencyMs(c, OpsOpenAIWSQueueWaitMsKey, lease.QueueWaitDuration().Milliseconds())
+						c.Set(OpsOpenAIWSConnReusedKey, lease.Reused())
+						if connID != "" {
+							c.Set(OpsOpenAIWSConnIDKey, connID)
+						}
+					}
+					retryTurnState := strings.TrimSpace(lease.HandshakeHeader(openAIWSTurnStateHeader))
+					if retryTurnState != "" {
+						if stateStore != nil && sessionHash != "" {
+							stateStore.BindSessionTurnState(groupID, sessionHash, retryTurnState, s.openAIWSSessionStickyTTL())
+						}
+						if c != nil {
+							c.Header(http.CanonicalHeaderKey(openAIWSTurnStateHeader), retryTurnState)
+						}
+						logOpenAIWSModeDebug("replay_id_reacquire_handshake account_id=%d conn_id=%s has_turn_state=true turn_state_len=%d", account.ID, connID, len(retryTurnState))
+					}
+					if err := s.admitAccountRPM(ctx, account); err != nil {
+						return nil, err
+					}
+					if err := lease.WriteJSONWithContextTimeout(ctx, json.RawMessage(retryBody), s.openAIWSWriteTimeout()); err != nil {
+						lease.MarkBroken()
+						return nil, fmt.Errorf("write websocket v2 replay ID retry: %w", err)
+					}
+					bufferedStreamEvents = bufferedStreamEvents[:0]
+					pendingJSONDocuments = nil
+					responseID = ""
+					responseModelObserver = &upstreamResponseModelObserver{}
+					logOpenAIWSModeInfo("ws_v2_rejected_field_retry account_id=%d conn_id=%s reason=%s", account.ID, connID, retryReason)
+					continue readLoop
+				}
+			}
 			s.handleOpenAIWSErrorEventTransientFailure(ctx, account, mappedModel, lease.HandshakeHeaders(), message)
 			errCodeRaw, errTypeRaw, errMsgRaw := parseOpenAIWSErrorEventFields(message)
 			s.persistOpenAIWSRateLimitSignal(ctx, account, lease.HandshakeHeaders(), message, errCodeRaw, errTypeRaw, errMsgRaw, mappedModel)
@@ -742,12 +848,16 @@ readLoop:
 				emitStreamMessage(message, true)
 			}
 			if !reqStream {
-				c.JSON(statusCode, gin.H{
-					"error": gin.H{
-						"type":    "upstream_error",
-						"message": errMsg,
-					},
-				})
+				if isOpenAIReplayItemIDRejection(statusCode, message) {
+					writeOpenAIUpstreamClientError(c, statusCode, message, errMsg)
+				} else {
+					c.JSON(statusCode, gin.H{
+						"error": gin.H{
+							"type":    "upstream_error",
+							"message": errMsg,
+						},
+					})
+				}
 			}
 			return nil, fmt.Errorf("openai ws error event: %s", errMsg)
 		}

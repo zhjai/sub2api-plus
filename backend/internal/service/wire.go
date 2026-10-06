@@ -305,6 +305,7 @@ func ProvideOpenAIEvalService(
 		// be read during startup; the admin endpoint can retry the read later.
 		SetOpenAIEvalEffectsEnabled(false)
 		SetOpenAIEvalSchedulingPolicySnapshot(nil)
+		logger.L().Warn("Model integrity initialization failed; scheduling policy disabled until configuration can be loaded", zap.String("diagnostic_code", "EVALUATION_CONFIG_UNAVAILABLE"))
 	}
 	cancel()
 	return service

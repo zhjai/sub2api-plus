@@ -154,6 +154,10 @@ func newOpenAIEvalRequestError(code, message string, status int) *OpenAIEvalRequ
 }
 
 func openAIEvalIOError(ctx context.Context, err error, status int) *OpenAIEvalRequestError {
+	var admission *OpenAIEvalRequestError
+	if errors.As(err, &admission) {
+		return admission
+	}
 	var unsupported *HTTPUpstreamSingleSendUnsupportedError
 	if errors.As(err, &unsupported) {
 		return &OpenAIEvalRequestError{Code: "single_send_unsupported", Message: unsupported.Error()}
@@ -471,7 +475,7 @@ func (s *AccountTestService) RunOpenAIEvalSampleAttempts(ctx context.Context, ta
 			record.HTTPStatus = failure.HTTPStatus
 		}
 		record.AttemptErrors = append(record.AttemptErrors, OpenAIEvalAttemptError{Attempt: record.Attempts, Code: record.ErrorCode, Message: record.ErrorMessage, HTTPStatus: record.HTTPStatus})
-		if failure == nil || !failure.Retryable || ctx.Err() != nil || attempt+1 == maximum {
+		if failure == nil || !failure.Attempted || !failure.Retryable || ctx.Err() != nil || attempt+1 == maximum {
 			break
 		}
 		timer := time.NewTimer(time.Duration(attempt+1) * 100 * time.Millisecond)

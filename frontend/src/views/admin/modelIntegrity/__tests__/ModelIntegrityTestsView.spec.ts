@@ -304,6 +304,25 @@ describe('ModelIntegrityTestsView', () => {
     wrapper.unmount()
   })
 
+  it('names why a manual run failed, with credentials masked', async () => {
+    api.runOpenAIEval.mockRejectedValue({ message: 'upstream 401: Bearer abcdef1234567890 rejected for sk-live1234567890abcd' })
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-testid="run-candy"]').trigger('click')
+    await flushPromises()
+
+    const shown = store.showError.mock.calls.at(-1)?.[0] as string
+    expect(shown).toContain('upstream 401')
+    expect(shown).toContain('Bearer [redacted]')
+    expect(shown).toContain('sk-[redacted]')
+    expect(shown).not.toContain('abcdef1234567890')
+    // The run is no longer shown as in progress, so it can be started again.
+    expect(wrapper.find('[data-testid="test-progress"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="run-candy"]').attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+  })
+
   it('asks for the fingerprint sample size before a manual run and does not change the schedule', async () => {
     api.runOpenAIEval.mockResolvedValue({
       id: 2, account_id: 12, test_type: 'fingerprint', requested_model: 'gpt-5', reasoning_effort: 'high', status: 'consistent',
@@ -509,6 +528,28 @@ describe('ModelIntegrityTestsView target editing', () => {
     await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
     await flushPromises()
     expect((api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig).accounts[0].reasoning_effort).toBe('')
+    wrapper.unmount()
+  })
+
+  it('sends the configured scheduling thresholds back unchanged with a test-only edit', async () => {
+    const thresholds = {
+      cost_first: { error_rate: 0, ttft_seconds: 12.5 },
+      stability_first: { error_rate: 0.025, ttft_seconds: 6 },
+      avoid_degradation: { error_rate: 0.3, ttft_seconds: 20 },
+      custom_balance: { error_rate: 0.07, ttft_seconds: 30 },
+      min_error_samples: 50,
+      min_ttft_samples: 100
+    }
+    api.getOpenAIEvalConfig.mockResolvedValue({ ...editableConfig(), scheduling_thresholds: thresholds })
+    const wrapper = mountView()
+    await flushPromises()
+
+    await openEdit(wrapper)
+    await choose('[data-testid="edit-effort"]', '')
+    await apply()
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    expect((api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig).scheduling_thresholds).toEqual(thresholds)
     wrapper.unmount()
   })
 
@@ -750,7 +791,7 @@ describe('ModelIntegrityTestsView retries and per-sample diagnostics', () => {
     await flushPromises()
     const input = wrapper.get<HTMLInputElement>('[data-testid="max-attempts"]')
     expect(input.element.value).toBe('3')
-    // Candy 5 samples × 3 attempts; State Probe never retries.
+    // Candy 5 samples × 3 attempts; State Probe 3 chains of 2 linked requests.
     expect(wrapper.get('[data-testid="test-candy"] [data-testid="per-run"]').text()).toBe('每次 5 次请求，失败重试时最多 15 次')
     expect(wrapper.get('[data-testid="budget"]').text()).toContain('失败重试时最多约 360 次')
     expect(wrapper.text()).not.toContain('有未保存的更改')
@@ -768,7 +809,7 @@ describe('ModelIntegrityTestsView retries and per-sample diagnostics', () => {
     wrapper.unmount()
   })
 
-  it('reads a saved attempts value and sends it with manual runs except State Probe', async () => {
+  it('reads a saved attempts value and sends it with manual runs, State Probe included', async () => {
     const config = serverConfig()
     config.max_request_attempts = 5
     config.accounts[0].direct_oauth_eligible = true
@@ -777,7 +818,8 @@ describe('ModelIntegrityTestsView retries and per-sample diagnostics', () => {
     const wrapper = mountView()
     await flushPromises()
     expect(wrapper.get<HTMLInputElement>('[data-testid="max-attempts"]').element.value).toBe('5')
-    expect(wrapper.get('[data-testid="test-state_probe"] [data-testid="per-run"]').text()).toBe('每次 2 次请求，不重试')
+    // Five attempts would be five chains, but the server caps a probe at three.
+    expect(wrapper.get('[data-testid="test-state_probe"] [data-testid="per-run"]').text()).toBe('每次 2 次请求为一条链，失败重试时最多 3 条链、共 6 次请求')
 
     await wrapper.get('[data-testid="run-modeltrace"]').trigger('click')
     await flushPromises()
@@ -785,7 +827,25 @@ describe('ModelIntegrityTestsView retries and per-sample diagnostics', () => {
     await flushPromises()
     const calls = api.runOpenAIEval.mock.calls.map(call => call[0])
     expect(calls[0]).toEqual({ account_id: 12, requested_model: 'gpt-5', reasoning_effort: 'high', test_type: 'modeltrace', max_attempts: 5 })
-    expect(calls[1]).toEqual({ account_id: 12, requested_model: 'gpt-5', reasoning_effort: 'high', test_type: 'state_probe' })
+    // The probe reads the same setting; the server clamps it to three chains.
+    expect(calls[1]).toEqual({ account_id: 12, requested_model: 'gpt-5', reasoning_effort: 'high', test_type: 'state_probe', max_attempts: 5 })
+    wrapper.unmount()
+  })
+
+  it('omits the retry budget for a probe set to a single chain', async () => {
+    const config = serverConfig()
+    config.max_request_attempts = 1
+    config.accounts[0].direct_oauth_eligible = true
+    api.getOpenAIEvalConfig.mockResolvedValue(config)
+    const wrapper = mountView()
+    await flushPromises()
+
+    // One attempt is one chain, so there is no retry to announce — but the run
+    // still sends its two linked requests, and the page must not claim more.
+    const perRun = wrapper.get('[data-testid="test-state_probe"] [data-testid="per-run"]').text()
+    expect(perRun).toBe('每次 2 次请求')
+    expect(perRun).not.toContain('条链')
+    expect(perRun).not.toContain('6')
     wrapper.unmount()
   })
 
@@ -1159,7 +1219,7 @@ describe('ModelIntegrityTestsView State Probe diagnostics', () => {
     expect(explanation).toContain('首次请求失败：HTTP 503，Service Unavailable: capacity busy')
     expect(explanation).toContain('Bearer [redacted]')
     expect(explanation).not.toContain('abc.def-ghi')
-    // The linked requests never retry, so no attempt count is reported.
+    // Each record is one send of a chain that restarts on failure, so no attempt count is reported.
     expect(explanation).not.toContain('尝试')
 
     await openProbe(wrapper)
@@ -1207,6 +1267,45 @@ describe('ModelIntegrityTestsView State Probe diagnostics', () => {
     expect(rows[1].querySelector('.sample-brief')!.textContent).not.toBe('HTTP 200')
     expect(rows[1].querySelector('[data-testid="sample-error"]')!.textContent).toBe('premature EOF before response.completed')
     expect($('[data-testid="detail-status"]')!.classList.contains('tone-ok')).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('names each chain of a retried probe and reports the last chain’s failure', async () => {
+    // Retrying servers number every chain; the verdict belongs to the last one sent.
+    api.listOpenAIEvalRuns.mockResolvedValue({
+      items: [probeRun({ failure: 'missing_terminal', request_count: 3, mint_status: 200, continue_status: 200, attempts: 2, max_attempts: 3, retry_policy: 'fresh_linked_ticket_chain' }, {
+        samples: [
+          mint({ probe_id: 'state-probe-1-mint', valid: false, http_status: 503, error_code: 'server_is_overloaded', error_message: 'capacity busy' }),
+          mint({ probe_id: 'state-probe-2-mint' }),
+          linked({ probe_id: 'state-probe-2-continue', valid: false, error_code: 'missing_terminal', error_message: 'premature EOF before response.completed' })
+        ]
+      })]
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    const explanation = wrapper.get('[data-testid="test-state_probe"] [data-testid="latest-explanation"]').text()
+    expect(explanation).toContain('第 2 条链的关联请求失败：premature EOF before response.completed')
+    expect(explanation).not.toContain('capacity busy')
+
+    await openProbe(wrapper)
+    const rows = $$('[data-testid="sample"]')
+    expect(rows.map(row => row.querySelector('.sample-index')!.textContent)).toEqual(['第 1 条链的首次请求', '第 2 条链的首次请求', '第 2 条链的关联请求'])
+    const metric = $$('p').find(node => node.textContent?.includes('共发送'))!.textContent!
+    expect(metric).toContain('共发送 2 条链，最后一条链的状态码 200 / 200')
+    wrapper.unmount()
+  })
+
+  it('keeps plain request names for a single numbered chain', async () => {
+    api.listOpenAIEvalRuns.mockResolvedValue({
+      items: [probeRun({ verdict: 'healthy', request_count: 2, mint_status: 200, continue_status: 200, attempts: 1, max_attempts: 3 }, {
+        samples: [mint({ probe_id: 'state-probe-1-mint' }), linked({ probe_id: 'state-probe-1-continue' })]
+      })]
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    await openProbe(wrapper)
+    expect($$('[data-testid="sample"]').map(row => row.querySelector('.sample-index')!.textContent)).toEqual(['首次请求', '关联请求'])
+    expect($$('p').some(node => node.textContent?.includes('两次请求状态码 200 / 200'))).toBe(true)
     wrapper.unmount()
   })
 

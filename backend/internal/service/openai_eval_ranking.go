@@ -107,10 +107,13 @@ func (r *OpenAIEvalRankingService) adoptLocked(config *OpenAIEvalConfig) bool {
 		return false
 	}
 	if r.config == nil || config.Revision != r.config.Revision {
+		if err := SetOpenAIEvalSchedulingPolicySnapshot(config); err != nil {
+			r.lastError = &OpenAIEvalRankingError{Code: "EVALUATION_CONFIG_INVALID", Message: err.Error(), ConfigRevision: config.Revision}
+			return false
+		}
 		r.generation++
 		r.config = cloneRankingConfig(config)
 		r.lastError = nil
-		SetOpenAIEvalSchedulingPolicySnapshot(r.config)
 	}
 	return true
 }
@@ -203,15 +206,18 @@ func (r *OpenAIEvalRankingService) evaluate(ctx context.Context, trigger string,
 	// Compatibility quality lookup and ranking publication share this commit.
 	cache := openAIEvalQualitySnapshots
 	cache.mu.Lock()
+	if cache.configRevision > config.Revision {
+		cache.mu.Unlock()
+		build.err = ErrOpenAIEvalRankingSuperseded
+		return nil, build.err
+	}
 	cache.entries = make(map[string]OpenAIEvalQualityAssessment)
-	if config.EffectsEnabled {
-		for _, dim := range snapshot.dimensions {
-			for _, account := range dim.Accounts {
-				q := account.Factors.Quality
-				if q.Known && q.ExpiresAt != nil {
-					key := (openAIEvalQualityRoute{AccountID: account.AccountID, Model: openAIEvalQualityDimension(dim.RequestedModel), Effort: dim.ReasoningEffort}).key()
-					cache.entries[key] = OpenAIEvalQualityAssessment{EvaluatedCount: q.Selected, PassCount: q.Pass, SuspectedPassCount: q.SuspectedPass, ExpiresAt: *q.ExpiresAt}
-				}
+	for _, dim := range snapshot.dimensions {
+		for _, account := range dim.Accounts {
+			q := account.Factors.Quality
+			if q.Known && q.ExpiresAt != nil {
+				key := (openAIEvalQualityRoute{AccountID: account.AccountID, Model: openAIEvalQualityDimension(dim.RequestedModel), Effort: dim.ReasoningEffort}).key()
+				cache.entries[key] = OpenAIEvalQualityAssessment{EvaluatedCount: q.Selected, PassCount: q.Pass, SuspectedPassCount: q.SuspectedPass, ExpiresAt: *q.ExpiresAt}
 			}
 		}
 	}
@@ -465,7 +471,7 @@ func (r *OpenAIEvalRankingService) readLatest(ctx context.Context, config *OpenA
 		}
 		for _, run := range runs {
 			key := OpenAIEvalEvidenceKey{run.AccountID, openAIEvalQualityDimension(run.RequestedModel), openAIEvalQualityDimension(run.ReasoningEffort), run.TestType}
-			if !seen[key] || run.Status == "running" {
+			if !seen[key] || run.Status == "running" || run.DiagnosticOnly {
 				continue
 			}
 			previous, exists := result[key]

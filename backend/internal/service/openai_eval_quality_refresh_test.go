@@ -248,7 +248,13 @@ func TestOpenAIEvalQualityRefreshConcurrentAndConfigRevision(t *testing.T) {
 				require.NoError(t, openAIEvalQualitySnapshots.configure(&repo.config))
 			}
 			close(release)
-			require.ErrorIs(t, <-done, ErrOpenAIEvalQualityRefreshSuperseded)
+			if change == "effects_off" {
+				require.NoError(t, <-done, "routing activation alone cannot supersede evidence refresh")
+				_, known := openAIEvalQualitySnapshots.lookup(17, "gpt-6.1-sol", "high", time.Now())
+				require.True(t, known)
+			} else {
+				require.ErrorIs(t, <-done, ErrOpenAIEvalQualityRefreshSuperseded)
+			}
 		})
 	}
 }
@@ -259,8 +265,8 @@ func TestOpenAIEvalQualityRefreshDisabledAndFreshness(t *testing.T) {
 	SetOpenAIEvalEffectsEnabled(false)
 	result, err := s.refreshOpenAIEvalQuality(context.Background(), true)
 	require.NoError(t, err)
-	require.Zero(t, result.RouteCount)
-	require.Empty(t, accounts.batches)
+	require.Equal(t, 1, result.RouteCount)
+	require.Len(t, accounts.batches, 1)
 	for _, hours := range []int{1, 6, 12, 24, 72} {
 		require.Equal(t, time.Duration(hours)*2*time.Hour, openAIEvalQualityFreshness(hours*3600, 3600))
 	}

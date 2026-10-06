@@ -100,6 +100,19 @@ func TestOpenAIEvalHandlersFailClosedWithoutService(t *testing.T) {
 	}
 }
 
+func TestMergeOpenAIEvalConfigPreservesThresholdsForOlderClients(t *testing.T) {
+	thresholds := &service.OpenAIEvalSchedulingThresholds{MinErrorSamples: 17, MinTTFTSamples: 23}
+	current := &service.OpenAIEvalConfig{SchedulingThresholds: thresholds}
+	incoming := &service.OpenAIEvalConfig{}
+	mergeOpenAIEvalConfigOmittedFields(incoming, current, map[string]json.RawMessage{})
+	require.Equal(t, thresholds, incoming.SchedulingThresholds)
+	incoming.SchedulingThresholds.MinErrorSamples = 31
+	require.EqualValues(t, 17, thresholds.MinErrorSamples)
+	explicit := &service.OpenAIEvalConfig{SchedulingThresholds: &service.OpenAIEvalSchedulingThresholds{MinErrorSamples: 1}}
+	mergeOpenAIEvalConfigOmittedFields(explicit, current, map[string]json.RawMessage{"scheduling_thresholds": json.RawMessage(`{}`)})
+	require.EqualValues(t, 1, explicit.SchedulingThresholds.MinErrorSamples)
+}
+
 func TestMergeOpenAIEvalConfigPreservesAttemptsForOlderClients(t *testing.T) {
 	current := &service.OpenAIEvalConfig{MaxRequestAttempts: 8}
 	incoming := &service.OpenAIEvalConfig{}

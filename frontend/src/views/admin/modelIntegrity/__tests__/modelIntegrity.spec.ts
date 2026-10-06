@@ -1,17 +1,24 @@
 import { describe, expect, it } from 'vitest'
-import type { OpenAIEvalConfig, OpenAIEvalModelCatalog, OpenAIEvalRouteConfig, OpenAIEvalRun } from '@/api/admin/accounts'
+import type { OpenAIEvalConfig, OpenAIEvalModelCatalog, OpenAIEvalPolicyWeights, OpenAIEvalRouteConfig, OpenAIEvalRun } from '@/api/admin/accounts'
 import { reinterpretationText, runExplanation, runStatusLabel } from '../runText'
 import { zhT } from './zhT'
 import en from '@/i18n/locales/en'
 import zhLocale from '@/i18n/locales/zh'
 import {
+  absolutePriorities,
   activeScheduleCount,
   attributionReinterpretation,
+  boardOrderingKey,
   candyExtractedAnswer,
   candyFullReply,
+  customBalanceIssue,
+  customBalanceIssueKey,
+  customBalancePayload,
   customBalanceShares,
+  hasNoPositiveWeight,
   isAttributionRun,
   isValidCustomBalance,
+  policyOrderKeys,
   runStatusKey,
   bpsModeOf,
   dailyRequests,
@@ -34,8 +41,17 @@ import {
   isDirectOAuthAccount,
   isDirectOAuthRoute,
   isHistoricalDataVersion,
+  DEFAULT_SCHEDULING_THRESHOLDS,
+  THRESHOLD_POLICIES,
+  errorRatePercentText,
+  invalidThresholdFields,
+  normalizeSchedulingThresholds,
+  parseThresholdInput,
   maxRequestsPerRun,
   normalizeMaxRequestAttempts,
+  stateProbeChains,
+  stateProbeMaxRequests,
+  totalDailyMaxRequests,
   redactSecrets,
   runSamples,
   sampleFailed,
@@ -156,6 +172,73 @@ describe('custom balance compatibility', () => {
     expect(customBalanceShares({ cost: 0, error_rate: 0, ttft: 0, load: 0, quality: 1 })).toEqual({ cost: 0, error_rate: 0, ttft: 0, load: 0, quality: 100 })
     expect(CUSTOM_FACTORS).toEqual(['cost', 'error_rate', 'ttft', 'load', 'quality'])
   })
+
+  it('keeps API-set absolute priorities when the weights are normalized for saving', () => {
+    const weights = { cost: 1, error_rate: 1, ttft: 0, load: 0, quality: 1, absolute_priorities: ['quality', 'cost'] }
+    expect(normalizeCustomBalance(weights).absolute_priorities).toEqual(['quality', 'cost'])
+    expect(normalizeCustomBalance({ cost: 1, error_rate: 0, ttft: 0, load: 0 })).not.toHaveProperty('absolute_priorities')
+  })
+
+  it('canonicalizes priorities and always sends the list', () => {
+    expect(absolutePriorities({ absolute_priorities: ['Price', 'errors', 'bogus', 'cost', 'latency'] })).toEqual(['cost', 'error_rate', 'ttft'])
+    expect(customBalancePayload({ cost: 1, error_rate: 0, ttft: 0, load: 0 }).absolute_priorities).toEqual([])
+    expect(customBalancePayload({ cost: 1, error_rate: 0, ttft: 0, load: 0, absolute_priorities: ['quality'] }).absolute_priorities).toEqual(['quality'])
+    // Clearing the last priority is sent as an explicit empty list.
+    expect(customBalancePayload({ cost: 1, error_rate: 0, ttft: 0, load: 0, absolute_priorities: [] }).absolute_priorities).toEqual([])
+  })
+
+  it('keeps all-zero weights with a priority order instead of replacing them with the defaults', () => {
+    const zeroWithPriority = { cost: 0, error_rate: 0, ttft: 0, load: 0, quality: 0, absolute_priorities: ['load'] as OpenAIEvalPolicyWeights['absolute_priorities'] }
+    expect(normalizeCustomBalance(zeroWithPriority)).toEqual({ cost: 0, error_rate: 0, ttft: 0, load: 0, quality: 0, stability: 0, absolute_priorities: ['load'] })
+    expect(customBalancePayload(zeroWithPriority)).toEqual({ cost: 0, error_rate: 0, ttft: 0, load: 0, quality: 0, stability: 0, absolute_priorities: ['load'] })
+    expect(customBalanceShares(zeroWithPriority)).toEqual({ cost: 0, error_rate: 0, ttft: 0, load: 0, quality: 0 })
+    // Without a priority, an all-zero set is still the old unsaveable object.
+    expect(normalizeCustomBalance({ cost: 0, error_rate: 0, ttft: 0, load: 0, absolute_priorities: [] })).toEqual({ cost: 0.2, error_rate: 0.43, ttft: 0.27, load: 0.1, quality: 0, stability: 0 })
+    // An unknown name alone is no priority.
+    expect(normalizeCustomBalance({ cost: 0, error_rate: 0, ttft: 0, load: 0, absolute_priorities: ['bogus'] }).cost).toBe(0.2)
+    // A negative value is never kept, priorities or not.
+    expect(normalizeCustomBalance({ cost: -1, error_rate: 0, ttft: 0, load: 0, absolute_priorities: ['cost'] })).toEqual({ cost: 0.2, error_rate: 0.43, ttft: 0.27, load: 0.1, quality: 0, stability: 0, absolute_priorities: ['cost'] })
+  })
+
+  it('explains the all-zero rule in both locales, without the old positive-weight requirement', () => {
+    const key = (issue: 'invalid_value' | 'zero_total') => customBalanceIssueKey(issue)
+    expect(key('zero_total')).toBe('admin.modelIntegrity.scheduling.policy.custom.zeroTotal')
+    expect(key('invalid_value')).toBe('admin.modelIntegrity.scheduling.policy.custom.zeroTotal')
+    expect(enT(key('zero_total'))).toBe('Weights must add up to more than 0. Set at least one weight, or add a priority.')
+    expect(zhT(key('zero_total'))).toBe('权重合计须大于 0，请至少为一项设置权重，或添加优先因素。')
+    for (const locale of [en, zhLocale] as unknown as Record<string, any>[]) {
+      const copy = locale.admin.modelIntegrity.scheduling.policy.custom.priorities
+      expect(copy).not.toHaveProperty('needsTiebreak')
+      for (const name of ['then', 'thenAccountOrder', 'summary', 'summaryAccountOrder', 'rules']) expect(typeof copy[name]).toBe('string')
+    }
+    expect(enT('admin.modelIntegrity.scheduling.policy.custom.priorities.rules')).toContain('if every weight is 0%, accounts that tie on every priority are ordered by account ID')
+    expect(zhT('admin.modelIntegrity.scheduling.policy.custom.priorities.rules')).toContain('全部为 0% 时，所有优先因素都相同的账号按账号 ID 排序')
+  })
+
+  it('accepts every weight at 0 once there is a priority order', () => {
+    expect(customBalanceIssue({ cost: 0, error_rate: 1, ttft: 0, load: 0, absolute_priorities: ['cost'] })).toBeNull()
+    expect(customBalanceIssue({ cost: 0, error_rate: 0, ttft: 0, load: 0, absolute_priorities: ['cost'] })).toBeNull()
+    expect(isValidCustomBalance({ cost: 0, error_rate: 0, ttft: 0, load: 0, quality: 0, absolute_priorities: ['quality', 'cost'] })).toBe(true)
+    expect(customBalanceIssue({ cost: 0, error_rate: 0, ttft: 0, load: 0 })).toBe('zero_total')
+    expect(customBalanceIssue({ cost: 0, error_rate: 0, ttft: 0, load: 0, absolute_priorities: [] })).toBe('zero_total')
+    expect(customBalanceIssue({ cost: -1, error_rate: 1, ttft: 0, load: 0, absolute_priorities: ['cost'] })).toBe('invalid_value')
+    expect(hasNoPositiveWeight({ cost: 0, error_rate: 0, ttft: 0, load: 0, absolute_priorities: ['cost'] })).toBe(true)
+    // A legacy stability weight is a positive weight once folded.
+    expect(hasNoPositiveWeight({ cost: 0, stability: 0.5, error_rate: 0, ttft: 0, load: 0 })).toBe(false)
+  })
+
+  it('describes custom balance order from its priorities', () => {
+    expect(policyOrderKeys('custom_balance', null)).toEqual(['weighted_score'])
+    expect(policyOrderKeys('custom_balance', { absolute_priorities: ['cost', 'error_rate'] })).toEqual(['priority.cost', 'priority.error_rate', 'weighted_tiebreak'])
+    expect(policyOrderKeys('custom_balance', { cost: 0, error_rate: 1, ttft: 0, load: 0, absolute_priorities: ['cost'] })).toEqual(['priority.cost', 'weighted_tiebreak'])
+    // No weight above 0 leaves no score, so account order breaks the remaining ties.
+    expect(policyOrderKeys('custom_balance', { cost: 0, error_rate: 0, ttft: 0, load: 0, absolute_priorities: ['cost'] })).toEqual(['priority.cost', 'account_order'])
+    expect(enT('admin.modelIntegrity.scheduling.policy.order.account_order')).toBe('Account ID order, for any tie left')
+    expect(zhT('admin.modelIntegrity.scheduling.policy.order.account_order')).toBe('仍相同时，按账号 ID 排序')
+    expect(policyOrderKeys('cost_first', { absolute_priorities: ['cost'] })).toEqual(['within_thresholds', 'price'])
+    expect(boardOrderingKey('score_desc', 'custom_balance', { absolute_priorities: ['quality'] })).toBe('priorities_then_score')
+    expect(boardOrderingKey('score_desc', 'custom_balance', {})).toBe('score_desc')
+  })
 })
 
 describe('BPS mode compatibility', () => {
@@ -194,6 +277,80 @@ describe('save payload', () => {
     expect(payload.accounts[0]).not.toHaveProperty('direct_oauth_eligible')
     expect(payload.accounts[0].bps_mode).toBe('auto')
     expect(payload.accounts[0].bps_auto).toBe(true)
+  })
+})
+
+describe('scheduling thresholds', () => {
+  it('fills a missing field or value from the defaults and keeps every sent value, including 0', () => {
+    expect(normalizeSchedulingThresholds(undefined)).toEqual(DEFAULT_SCHEDULING_THRESHOLDS)
+    expect(normalizeSchedulingThresholds(null)).toEqual(DEFAULT_SCHEDULING_THRESHOLDS)
+    const partial = normalizeSchedulingThresholds({ cost_first: { error_rate: 0 } as never, min_ttft_samples: 3 })
+    expect(partial.cost_first).toEqual({ error_rate: 0, ttft_seconds: 15 })
+    expect(partial.stability_first).toEqual({ error_rate: 0.05, ttft_seconds: 8 })
+    expect(partial.min_error_samples).toBe(10)
+    expect(partial.min_ttft_samples).toBe(3)
+    // A copy: editing the result never changes the defaults.
+    partial.custom_balance.error_rate = 0.5
+    expect(DEFAULT_SCHEDULING_THRESHOLDS.custom_balance.error_rate).toBe(0.2)
+  })
+
+  it('reports every value the server would reject', () => {
+    expect(invalidThresholdFields(DEFAULT_SCHEDULING_THRESHOLDS)).toEqual([])
+    const value = normalizeSchedulingThresholds({
+      cost_first: { error_rate: 1, ttft_seconds: 86400 },
+      stability_first: { error_rate: 0, ttft_seconds: 0.001 },
+      avoid_degradation: { error_rate: 1.01, ttft_seconds: 0 },
+      custom_balance: { error_rate: NaN, ttft_seconds: Infinity },
+      min_error_samples: 1_000_000,
+      min_ttft_samples: 2.5
+    })
+    expect(invalidThresholdFields(value)).toEqual([
+      'avoid_degradation.error_rate',
+      'avoid_degradation.ttft_seconds',
+      'min_ttft_samples'
+    ])
+    // An invalid custom_balance value is out of the edited scope, so it neither
+    // blocks saving nor is silently corrected.
+    expect(value.custom_balance).toEqual({ error_rate: NaN, ttft_seconds: Infinity })
+    expect(invalidThresholdFields({ ...DEFAULT_SCHEDULING_THRESHOLDS, min_error_samples: 0 })).toEqual(['min_error_samples'])
+    expect(invalidThresholdFields({ ...DEFAULT_SCHEDULING_THRESHOLDS, cost_first: { error_rate: -0.01, ttft_seconds: 86400.5 } })).toEqual(['cost_first.error_rate', 'cost_first.ttft_seconds'])
+  })
+
+  it('shows ratios as clean percentages and never reads empty input as 0', () => {
+    expect(errorRatePercentText(0.07)).toBe('7')
+    expect(errorRatePercentText(0.025)).toBe('2.5')
+    expect(errorRatePercentText(0)).toBe('0')
+    expect(errorRatePercentText(NaN)).toBe('')
+    expect(parseThresholdInput('')).toBeNaN()
+    expect(parseThresholdInput('  ')).toBeNaN()
+    expect(parseThresholdInput('0')).toBe(0)
+    expect(parseThresholdInput(' 12.5 ')).toBe(12.5)
+  })
+
+  it('is part of every save payload, defaulting when the config never had it', () => {
+    expect(toSavePayload({ effects_enabled: false, bps_auto_enabled: false, accounts: [] }).scheduling_thresholds).toEqual(DEFAULT_SCHEDULING_THRESHOLDS)
+    const configured = normalizeSchedulingThresholds({ ...DEFAULT_SCHEDULING_THRESHOLDS, stability_first: { error_rate: 0, ttft_seconds: 3 } })
+    expect(toSavePayload({ effects_enabled: false, bps_auto_enabled: false, accounts: [], scheduling_thresholds: configured }).scheduling_thresholds).toEqual(configured)
+  })
+
+  it('has the threshold copy in both locales', () => {
+    for (const locale of [en, zhLocale] as unknown as Record<string, any>[]) {
+      const copy = locale.admin.modelIntegrity.scheduling.thresholds
+      for (const key of ['title', 'hint', 'inUse', 'fieldAria', 'zeroNote', 'invalid']) expect(typeof copy[key]).toBe('string')
+      for (const key of ['errorRate', 'ttft']) expect(typeof copy.columns[key]).toBe('string')
+      for (const key of ['title', 'min_error_samples', 'min_ttft_samples', 'note']) expect(typeof copy.samples[key]).toBe('string')
+      for (const key of ['error_rate', 'ttft_seconds', 'samples']) expect(typeof copy.errors[key]).toBe('string')
+      expect(typeof copy.units.seconds).toBe('string')
+    }
+  })
+
+  it('edits only the policies that read a threshold, and keeps custom balance intact', () => {
+    // Custom balance is ordered by its weights, so it has no editable row; the
+    // schema still round-trips the object for API compatibility.
+    expect([...THRESHOLD_POLICIES]).toEqual(['cost_first', 'stability_first', 'avoid_degradation'])
+    expect(invalidThresholdFields(DEFAULT_SCHEDULING_THRESHOLDS)).toEqual([])
+    const kept = normalizeSchedulingThresholds({ custom_balance: { error_rate: 0.07, ttft_seconds: 30 } })
+    expect(kept.custom_balance).toEqual({ error_rate: 0.07, ttft_seconds: 30 })
   })
 })
 
@@ -450,10 +607,38 @@ describe('retries and per-sample helpers', () => {
     expect(toSavePayload({ effects_enabled: false, bps_auto_enabled: false, accounts: [] }).max_request_attempts).toBe(3)
   })
 
-  it('counts the request ceiling per run with attempts but never multiplies State Probe', () => {
+  it('counts the request ceiling per run with attempts, capping State Probe at three chains', () => {
     const route = oauthRoute()
     expect(maxRequestsPerRun(route, 'modeltrace', 3, catalog)).toBe(9)
-    expect(maxRequestsPerRun(route, 'state_probe', 3, catalog)).toBe(2)
+    // One chain is a mint plus a continue, and the server allows three chains
+    // even when the shared attempts setting is higher — six sends at most.
+    expect(maxRequestsPerRun(route, 'state_probe', 3, catalog)).toBe(6)
+    expect(maxRequestsPerRun(route, 'state_probe', 1, catalog)).toBe(2)
+    expect(maxRequestsPerRun(route, 'state_probe', 10, catalog)).toBe(6)
+  })
+
+  it('scales the State Probe daily ceiling by chains, not by the raw attempts value', () => {
+    const route = oauthRoute()
+    route.state_probe_schedule.enabled = true
+    route.state_probe_schedule.interval_seconds = 86_400
+    const probeRequests = dailyRequests(route, 'state_probe', catalog)
+    expect(probeRequests).toBe(2)
+    // Two sends per chain feeds the average; the ceiling adds one more chain.
+    expect(totalDailyMaxRequests([route], 3, catalog)).toBe(2 * 3)
+    expect(totalDailyMaxRequests([route], 8, catalog)).toBe(2 * 3)
+  })
+
+  it('clamps State Probe to the server’s three-chain budget before multiplying', () => {
+    // The server clamps the value it is handed (openAIStateProbeMaxAttempts),
+    // so the page must show the capped ceiling, never 2 × the raw setting.
+    expect(stateProbeChains(0)).toBe(1)
+    expect(stateProbeChains(1)).toBe(1)
+    expect(stateProbeChains(2)).toBe(2)
+    expect(stateProbeChains(3)).toBe(3)
+    expect(stateProbeChains(10)).toBe(3)
+    expect(stateProbeMaxRequests(1)).toBe(2)
+    expect(stateProbeMaxRequests(3)).toBe(6)
+    expect(stateProbeMaxRequests(10)).toBe(6)
   })
 
   it('treats State Probe eligibility as an account capability regardless of target effort', () => {

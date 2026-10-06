@@ -113,6 +113,12 @@ func (r *OpenAIEvalRunner) runDue(ctx context.Context) {
 	sem := make(chan struct{}, openAIEvalRunnerWorkers)
 	var wg sync.WaitGroup
 	for _, item := range items {
+		if r.service.accountTest != nil {
+			guardCtx := context.WithValue(ctx, openAIEvalAutomaticKey{}, true)
+			if r.service.accountTest.checkOpenAIEvalAutomaticAccount(guardCtx, &Account{ID: item.AccountID}) != nil {
+				continue
+			}
+		}
 		select {
 		case sem <- struct{}{}:
 		case <-ctx.Done():

@@ -343,7 +343,7 @@ func (r *openAIEvalRepository) CreateRun(ctx context.Context, run *service.OpenA
 	if run == nil {
 		return 0, fmt.Errorf("OpenAI evaluation run is required")
 	}
-	outcome, err := json.Marshal(run.Outcome)
+	outcome, err := marshalOpenAIEvalRunOutcome(run)
 	if err != nil {
 		return 0, fmt.Errorf("encode OpenAI evaluation outcome: %w", err)
 	}
@@ -375,7 +375,7 @@ func (r *openAIEvalRepository) FinishRun(ctx context.Context, id int64, run *ser
 	if run == nil {
 		return fmt.Errorf("OpenAI evaluation run result is required")
 	}
-	outcome, err := json.Marshal(run.Outcome)
+	outcome, err := marshalOpenAIEvalRunOutcome(run)
 	if err != nil {
 		return fmt.Errorf("encode OpenAI evaluation outcome: %w", err)
 	}
@@ -403,7 +403,7 @@ func (r *openAIEvalRepository) UpdateRunProgress(ctx context.Context, id int64, 
 	if run == nil || id <= 0 {
 		return fmt.Errorf("OpenAI evaluation run progress is required")
 	}
-	outcome, err := json.Marshal(run.Outcome)
+	outcome, err := marshalOpenAIEvalRunOutcome(run)
 	if err != nil {
 		return fmt.Errorf("encode OpenAI evaluation progress: %w", err)
 	}
@@ -469,7 +469,7 @@ func (r *openAIEvalRepository) ListRuns(ctx context.Context, filter service.Open
 		if cost.Valid {
 			run.CostEstimateUSD = &cost.Float64
 		}
-		if err := json.Unmarshal(outcomeRaw, &run.Outcome); err != nil {
+		if err := unmarshalOpenAIEvalRunOutcome(outcomeRaw, &run); err != nil {
 			return nil, fmt.Errorf("decode OpenAI evaluation outcome: %w", err)
 		}
 		if err := json.Unmarshal(samplesRaw, &run.Samples); err != nil {

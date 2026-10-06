@@ -347,7 +347,7 @@ func (c *openAIWSToolCallReplayCollector) addItem(item gjson.Result) {
 	c.items = append(c.items, json.RawMessage(raw))
 }
 
-func buildOpenAIWSHTTPBridgeErrorEvent(statusCode int, message string) []byte {
+func buildOpenAIWSHTTPBridgeErrorEvent(statusCode int, message string, source ...[]byte) []byte {
 	message = strings.TrimSpace(message)
 	if message == "" {
 		message = http.StatusText(statusCode)
@@ -363,6 +363,13 @@ func buildOpenAIWSHTTPBridgeErrorEvent(statusCode int, message string) []byte {
 			"type":    "upstream_error",
 			"message": message,
 		},
+	}
+	if len(source) > 0 && isOpenAIReplayItemIDRejection(statusCode, source[0]) {
+		errorPayload := event["error"].(map[string]any)
+		for _, field := range []string{"type", "code", "param"} {
+			errorPayload[field] = gjson.GetBytes(source[0], "error."+field).String()
+		}
+		errorPayload["code"] = extractUpstreamErrorCode(source[0])
 	}
 	body, err := json.Marshal(event)
 	if err != nil {
@@ -551,7 +558,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	}
 
 	turnStart := time.Now()
-	rejectedFieldRetryState := newOpenAIResponsesRejectedFieldRetryState(body)
+	rejectedFieldRetryState := openAIResponsesRejectedFieldRetryStateForLogicalWSTurn(ctx, c, body, turn)
 	var resp *http.Response
 	for {
 		upstreamReq, buildErr := buildUpstreamRequest(body)
@@ -591,7 +598,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		if retryErr != nil {
 			return nil, fmt.Errorf("normalize websocket http bridge rejected field retry: %w", retryErr)
 		}
-		if changed && rejectedFieldRetryState.Allow(retryBody) {
+		if changed && ctx.Err() == nil && rejectedFieldRetryState.AllowNormalization(retryBody, retryReason) {
 			logOpenAIWSModeInfo(
 				"ingress_ws_http_bridge_rejected_field_retry account_id=%d turn=%d reason=%s",
 				account.ID,
@@ -620,7 +627,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		if account.Platform != PlatformGrok && (shouldFailover || shouldCooldownOpenAITransientUpstreamError(resp.StatusCode, respBody)) {
 			s.handleOpenAIAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody, actualModel)
 		}
-		clientError := buildOpenAIWSHTTPBridgeErrorEvent(resp.StatusCode, upstreamMsg)
+		clientError := buildOpenAIWSHTTPBridgeErrorEvent(resp.StatusCode, upstreamMsg, s.redactAgentIdentitySensitiveBody(ctx, account, respBody))
 		if writeErr := writeClientMessage(clientError); writeErr == nil {
 			markOpenAIWSClientVisibleFailure(c, "error", clientError)
 		}

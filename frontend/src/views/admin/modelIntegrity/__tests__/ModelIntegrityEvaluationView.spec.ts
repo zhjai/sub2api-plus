@@ -371,7 +371,9 @@ describe('actual dispatch separation', () => {
     const empty = wrapper.get('[data-testid="requests-empty"]')
     expect(empty.text()).toContain('本实例暂无请求调度记录')
     expect(empty.text()).toContain('空列表不代表没有流量')
-    expect(empty.text()).toContain('最多 50 条')
+    // The instance keeps 256 records; 50 is only how many one read returns.
+    expect(empty.text()).toContain('最多 256 条')
+    expect(empty.text()).not.toContain('50')
   })
 
   it('keeps request records apart from evaluation records and states a failed read', async () => {
@@ -382,6 +384,9 @@ describe('actual dispatch separation', () => {
     await openRequests(wrapper)
     expect(wrapper.find('[data-testid="records-evaluations"]').exists()).toBe(false)
     expect(wrapper.get('[data-testid="requests-error"]').text()).toContain('ledger down')
+    // A failed read is never presented as "no records on this instance".
+    expect(wrapper.find('[data-testid="requests-empty"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="requests-unavailable"]').exists()).toBe(true)
     expect(wrapper.get('[data-testid="records-tab-requests"]').attributes('aria-selected')).toBe('true')
   })
 

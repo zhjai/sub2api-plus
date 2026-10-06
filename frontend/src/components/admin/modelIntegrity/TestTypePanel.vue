@@ -143,7 +143,7 @@ import { useI18n } from 'vue-i18n'
 import Icon from '@/components/icons/Icon.vue'
 import Toggle from '@/components/common/Toggle.vue'
 import type { OpenAIEvalModelCatalog, OpenAIEvalRouteConfig, OpenAIEvalRun } from '@/api/admin/accounts'
-import { CANDY_MAX_SAMPLES, CANDY_MIN_SAMPLES, CUSTOM_INTERVAL, DAY, DEFAULT_MAX_REQUEST_ATTEMPTS, HOUR, MAX_INTERVAL_MINUTES, TEST_TYPE_META, candyExpectedAnswer, candyExtractedAnswer, candyFullReply, dailyRequests, maxRequestsPerRun, maxScheduleJitterSeconds, normalizeSchedule, redactSecrets, requestsPerRun, resultTone, retriesSamples, runSamples, sampleFailed, sampleLacksDetail, scheduleOf, type EvalTestType } from '@/views/admin/modelIntegrity/modelIntegrity'
+import { CANDY_MAX_SAMPLES, CANDY_MIN_SAMPLES, CUSTOM_INTERVAL, DAY, DEFAULT_MAX_REQUEST_ATTEMPTS, HOUR, MAX_INTERVAL_MINUTES, TEST_TYPE_META, candyExpectedAnswer, candyExtractedAnswer, candyFullReply, dailyRequests, maxRequestsPerRun, maxScheduleJitterSeconds, normalizeSchedule, redactSecrets, requestsPerRun, resultTone, runSamples, sampleFailed, sampleLacksDetail, scheduleOf, stateProbeChains, type EvalTestType } from '@/views/admin/modelIntegrity/modelIntegrity'
 import { runExplanation, runStatusLabel } from '@/views/admin/modelIntegrity/runText'
 
 const props = defineProps<{
@@ -154,7 +154,11 @@ const props = defineProps<{
   progress?: OpenAIEvalRun
   running: boolean
   available: boolean
-  /** Shared attempts-per-sample setting; State Probe ignores it. */
+  /**
+   * Shared attempts-per-sample setting. State Probe reads it too, but one
+   * attempt there is a whole mint/continue chain, so the server caps it at
+   * three chains — the panel shows that capped ceiling, never 2 × the value.
+   */
   maxAttempts?: number
 }>()
 
@@ -167,7 +171,11 @@ const modes = computed(() => props.catalog?.fingerprint_modes?.length ? props.ca
 const perRun = computed(() => requestsPerRun(props.route, props.type, props.catalog))
 const perRunMax = computed(() => maxRequestsPerRun(props.route, props.type, props.maxAttempts ?? DEFAULT_MAX_REQUEST_ATTEMPTS, props.catalog))
 const perRunText = computed(() => {
-  if (!retriesSamples(props.type)) return t('admin.modelIntegrity.tests.perRunNoRetry', { count: perRun.value })
+  if (props.type === 'state_probe') {
+    const chains = stateProbeChains(props.maxAttempts ?? DEFAULT_MAX_REQUEST_ATTEMPTS)
+    if (chains < 2) return t('admin.modelIntegrity.tests.perRun', { count: perRun.value })
+    return t('admin.modelIntegrity.tests.perRunRetryChains', { count: perRun.value, chains, max: perRunMax.value })
+  }
   if (perRunMax.value > perRun.value) return t('admin.modelIntegrity.tests.perRunRetry', { count: perRun.value, max: perRunMax.value })
   return t('admin.modelIntegrity.tests.perRun', { count: perRun.value })
 })

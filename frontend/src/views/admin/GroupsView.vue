@@ -611,6 +611,38 @@
           <p class="input-hint">{{ t("admin.groups.copyAccounts.hint") }}</p>
         </div>
         <template v-if="!authStore.isSimpleMode">
+        <fieldset data-testid="create-group-billing-rate-mode">
+          <legend class="input-label">{{
+            t("admin.groups.billingRateMode.label")
+          }}</legend>
+          <div class="grid gap-2 sm:grid-cols-2">
+            <label
+              v-for="mode in billingRateModeOptions"
+              :key="mode"
+              class="block cursor-pointer rounded-lg border px-3 py-2.5 transition-colors focus-within:ring-2 focus-within:ring-primary-500"
+              :class="
+                createForm.billing_rate_mode === mode
+                  ? 'border-primary-500 bg-primary-50/60 dark:border-primary-400 dark:bg-primary-950/30'
+                  : 'border-gray-200 hover:border-gray-300 dark:border-dark-600 dark:hover:border-dark-500'
+              "
+            >
+              <input
+                v-model="createForm.billing_rate_mode"
+                type="radio"
+                name="create-group-billing-rate-mode"
+                :value="mode"
+                class="sr-only"
+                :data-testid="`create-group-billing-rate-mode-${mode}`"
+              />
+              <span class="block text-sm font-medium text-gray-900 dark:text-white">{{
+                t(`admin.groups.billingRateMode.${mode}`)
+              }}</span>
+              <span class="mt-0.5 block text-xs leading-relaxed text-gray-500 dark:text-gray-400">{{
+                t(`admin.groups.billingRateMode.${mode}Hint`)
+              }}</span>
+            </label>
+          </div>
+        </fieldset>
         <div>
           <label class="input-label">{{
             t("admin.groups.form.rateMultiplier")
@@ -624,7 +656,13 @@
             class="input"
             data-tour="group-form-multiplier"
           />
-          <p class="input-hint">{{ t("admin.groups.rateMultiplierHint") }}</p>
+          <p class="input-hint">
+            {{
+              createForm.billing_rate_mode === "account"
+                ? t("admin.groups.billingRateMode.rateMultiplierAccountHint")
+                : t("admin.groups.rateMultiplierHint")
+            }}
+          </p>
         </div>
         <div>
           <label class="input-label">{{ t("admin.groups.form.rpmLimit") }}</label>
@@ -2250,6 +2288,38 @@
             {{ t("admin.groups.copyAccounts.hintEdit") }}
           </p>
         </div>
+        <fieldset data-testid="edit-group-billing-rate-mode">
+          <legend class="input-label">{{
+            t("admin.groups.billingRateMode.label")
+          }}</legend>
+          <div class="grid gap-2 sm:grid-cols-2">
+            <label
+              v-for="mode in billingRateModeOptions"
+              :key="mode"
+              class="block cursor-pointer rounded-lg border px-3 py-2.5 transition-colors focus-within:ring-2 focus-within:ring-primary-500"
+              :class="
+                editForm.billing_rate_mode === mode
+                  ? 'border-primary-500 bg-primary-50/60 dark:border-primary-400 dark:bg-primary-950/30'
+                  : 'border-gray-200 hover:border-gray-300 dark:border-dark-600 dark:hover:border-dark-500'
+              "
+            >
+              <input
+                v-model="editForm.billing_rate_mode"
+                type="radio"
+                name="edit-group-billing-rate-mode"
+                :value="mode"
+                class="sr-only"
+                :data-testid="`edit-group-billing-rate-mode-${mode}`"
+              />
+              <span class="block text-sm font-medium text-gray-900 dark:text-white">{{
+                t(`admin.groups.billingRateMode.${mode}`)
+              }}</span>
+              <span class="mt-0.5 block text-xs leading-relaxed text-gray-500 dark:text-gray-400">{{
+                t(`admin.groups.billingRateMode.${mode}Hint`)
+              }}</span>
+            </label>
+          </div>
+        </fieldset>
         <div>
           <label class="input-label">{{
             t("admin.groups.form.rateMultiplier")
@@ -2263,6 +2333,12 @@
             class="input"
             data-tour="group-form-multiplier"
           />
+          <p
+            v-if="editForm.billing_rate_mode === 'account'"
+            class="input-hint"
+          >
+            {{ t("admin.groups.billingRateMode.rateMultiplierAccountHint") }}
+          </p>
         </div>
         <div>
           <label class="input-label">{{ t("admin.groups.form.rpmLimit") }}</label>
@@ -4281,6 +4357,7 @@ import type {
   CompositeRouteMatchType,
   GroupPlatform,
   SubscriptionType,
+  GroupBillingRateMode,
 } from "@/types";
 import {
   CONCRETE_PLATFORM_OPTIONS,
@@ -4937,11 +5014,18 @@ const submitEditAllowlistCustomEntry = () => {
   }
 };
 
+// Mirrors the backend: anything other than "account" bills with the fixed group multiplier.
+const normalizeBillingRateMode = (mode: unknown): GroupBillingRateMode =>
+  mode === "account" ? "account" : "group";
+
+const billingRateModeOptions: GroupBillingRateMode[] = ["group", "account"];
+
 const createForm = reactive({
   name: "",
   description: "",
   platform: "anthropic" as GroupPlatform,
   rate_multiplier: 1.0,
+  billing_rate_mode: "group" as GroupBillingRateMode,
   is_exclusive: false,
   subscription_type: "standard" as SubscriptionType,
   daily_limit_usd: null as number | null,
@@ -5306,6 +5390,7 @@ const editForm = reactive({
   description: "",
   platform: "anthropic" as GroupPlatform,
   rate_multiplier: 1.0,
+  billing_rate_mode: "group" as GroupBillingRateMode,
   is_exclusive: false,
   status: "active" as "active" | "inactive",
   subscription_type: "standard" as SubscriptionType,
@@ -5769,6 +5854,7 @@ const closeCreateModal = () => {
   createForm.description = "";
   createForm.platform = "anthropic";
   createForm.rate_multiplier = 1.0;
+  createForm.billing_rate_mode = "group";
   createForm.is_exclusive = false;
   createForm.subscription_type = "standard";
   createForm.daily_limit_usd = null;
@@ -5913,6 +5999,7 @@ const handleCreateGroup = async () => {
     // 构建请求数据，包含模型路由配置
     const requestData = {
       ...createGroupForm,
+      billing_rate_mode: normalizeBillingRateMode(createForm.billing_rate_mode),
       force_openai_fast: normalizeGroupOpenAIFast(
         createForm.platform,
         createForm.force_openai_fast,
@@ -6050,6 +6137,7 @@ const handleEdit = async (group: AdminGroup) => {
   editForm.description = group.description || "";
   editForm.platform = group.platform;
   editForm.rate_multiplier = group.rate_multiplier;
+  editForm.billing_rate_mode = normalizeBillingRateMode(group.billing_rate_mode);
   editForm.is_exclusive = group.is_exclusive;
   editForm.status = group.status;
   editForm.subscription_type = group.subscription_type || "standard";
@@ -6249,6 +6337,7 @@ const handleUpdateGroup = async () => {
     // 转换 fallback_group_id: null -> 0 (后端使用 0 表示清除)
     const payload = {
       ...editForm,
+      billing_rate_mode: normalizeBillingRateMode(editForm.billing_rate_mode),
       force_openai_fast: normalizeGroupOpenAIFast(
         editForm.platform,
         editForm.force_openai_fast,
