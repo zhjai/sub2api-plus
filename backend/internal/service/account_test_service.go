@@ -484,9 +484,7 @@ func (s *AccountTestService) doOpenAIEvalUpstream(req *http.Request, proxyURL st
 		if err := s.checkOpenAIEvalAutomaticAccount(req.Context(), account); err != nil {
 			return nil, err
 		}
-		if err := accountRPMPluginDispatchCheck(req.Context(), account); err != nil {
-			return nil, &OpenAIEvalRequestError{Code: "single_send_unsupported", Message: "plugin transport does not support evaluation send admission"}
-		}
+		// PluginManager checks only selected routes; unbound OAuth uses native admission.
 		response, handled, err := s.pluginManager.RoundTripOpenAIOAuth(req.Context(), req, proxyURL, credential)
 		if handled {
 			return response, err

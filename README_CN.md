@@ -41,7 +41,7 @@
 
 本 fork 的 Release 发布在 [zhjai/sub2api-plus/releases](https://github.com/zhjai/sub2api-plus/releases)，下方命令使用本 fork 的安装脚本、源码和容器镜像。
 
-版本号遵循上游基线，但不会冒充上游发行版。当前 fork 版本线为 `0.2.13-zhjai.17`：`0.2.13` 表示上游基线，`-zhjai.17` 表示本 fork 的第 17 次派生修订。更新器只识别带有该派生后缀的 Release，不会把历史上不带后缀的 fork 标签当作当前版本。
+版本号遵循上游基线，但不会冒充上游发行版。当前 fork 版本线为 `0.2.13-zhjai.18`：`0.2.13` 表示上游基线，`-zhjai.18` 表示本 fork 的第 18 次派生修订。更新器只识别带有该派生后缀的 Release，不会把历史上不带后缀的 fork 标签当作当前版本。
 
 Prism 原生渠道支持 Cookie 导入、授权登录和账号模型目录，使用现有分组及调度策略，无需额外代理服务；配置与能力边界见 [Prism 渠道说明](docs/PRISM_CHANNEL.md)。
 
@@ -179,7 +179,7 @@ curl -sSL https://raw.githubusercontent.com/zhjai/sub2api-plus/main/deploy/insta
 安装或回退到本 fork 的指定 Release：
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/zhjai/sub2api-plus/main/deploy/install.sh | sudo bash -s -- upgrade -v v0.2.13-zhjai.17
+curl -sSL https://raw.githubusercontent.com/zhjai/sub2api-plus/main/deploy/install.sh | sudo bash -s -- upgrade -v v0.2.13-zhjai.18
 ```
 
 升级命令只替换二进制并重启服务，不会删除 `/etc/sub2api`、PostgreSQL 数据或 Redis 数据；升级前仍建议备份数据库和配置，并保留旧 Release 以便回退。

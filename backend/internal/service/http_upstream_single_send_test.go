@@ -59,6 +59,41 @@ func TestR13EvalUnknownTransportAndExactPluginRoute(t *testing.T) {
 	require.EqualValues(t, 1, upstream.calls.Load())
 }
 
+func TestEvalOAuthRPMWithoutSelectedPluginUsesNativeAdmission(t *testing.T) {
+	for _, name := range []string{"plus", "pro"} {
+		for _, binding := range []string{"none", "inactive"} {
+			t.Run(name+"/"+binding, func(t *testing.T) {
+				upstream := &evalTransportStub{respond: func(req *http.Request, _ int) (*http.Response, error) {
+					require.True(t, HTTPUpstreamSingleSendRequired(req.Context()))
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}},
+						Body: io.NopCloser(strings.NewReader("data: {\"type\":\"response.completed\",\"response\":" + evalCompletedJSON("21") + "}\n\n"))}, nil
+				}}
+				svc, target := evalOAuthHarness(upstream)
+				target.Account.Name = name
+				target.Account.Extra = map[string]any{"rpm_limit": 1}
+				cache := &hardRPMCache{}
+				svc.openaiGatewayService.cache = cache
+				svc.pluginManager = &PluginManager{}
+				if binding == "inactive" {
+					svc.pluginManager.route.Store(&pluginRoute{pluginID: 7, rolloutPercent: 0})
+				}
+
+				response, attempts, err := svc.RunOpenAIEvalSampleAttempts(t.Context(), target, "probe", "medium", 3)
+				require.NoError(t, err)
+				require.Equal(t, "21", response.Text)
+				require.Equal(t, 1, attempts.Attempts)
+				require.EqualValues(t, 1, upstream.calls.Load())
+				require.Equal(t, 1, cache.used)
+
+				_, err = svc.runOpenAIEvalSampleSingleSend(t.Context(), target, "probe", "medium")
+				require.True(t, IsAccountRPMError(err), "RPM denial must remain intact: %v", err)
+				require.EqualValues(t, 1, upstream.calls.Load())
+				require.Equal(t, 1, cache.used)
+			})
+		}
+	}
+}
+
 type r13WirePlugin struct {
 	pluginv1.UnimplementedTransportPluginServer
 	target string
