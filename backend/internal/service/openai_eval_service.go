@@ -554,7 +554,7 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 		ExpectedSamples: expectedSamples,
 		Phase:           "sampling",
 		Samples:         make([]OpenAIEvalSampleRecord, 0),
-		DiagnosticOnly:  !target.Account.Schedulable,
+		DiagnosticOnly:  !target.Account.IsActive() || !target.Account.Schedulable,
 	}
 	run.Protocol = "responses"
 	if !target.Credential.IsOpenAIOAuthLike() && shouldForwardOpenAIResponsesViaRawChatCompletions(target.Account) {
@@ -595,7 +595,7 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 	}
 	finish := func(runErr error) (*OpenAIEvalRun, error) {
 		if s.accounts != nil {
-			if latest, readErr := s.accounts.GetByID(context.WithoutCancel(ctx), target.Account.ID); readErr == nil && latest != nil && !latest.Schedulable {
+			if latest, readErr := s.accounts.GetByID(context.WithoutCancel(ctx), target.Account.ID); readErr == nil && latest != nil && (!latest.IsActive() || !latest.Schedulable) {
 				run.DiagnosticOnly = true
 			}
 		}

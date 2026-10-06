@@ -32,7 +32,7 @@ func TestOpenAIEvalStateProbeBPSIsolation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			initialState := OpenAIBPSAccountState{DegradedStreak: 2, UpdatedAt: time.Now().UTC().Add(-time.Hour)}
 			account := &Account{
-				ID: 61, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1, Schedulable: true,
+				ID: 61, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Concurrency: 1, Schedulable: true,
 				Credentials: map[string]any{"access_token": "probe-token"},
 				Extra:       map[string]any{OpenAIBPSAccountStateExtraKey(): initialState},
 			}
@@ -158,7 +158,7 @@ func TestOpenAIEvalDisabledAccountProbeDoesNotMutateBPSState(t *testing.T) {
 func TestOpenAIEvalAccountDisabledDuringAutomaticProbeRemainsDiagnostic(t *testing.T) {
 	newCodexModelsOAuthCacheServer(t, `{"models":[{"slug":"gpt-6-astra"}]}`)
 	initial := OpenAIBPSAccountState{DegradedStreak: 2, UpdatedAt: time.Now().UTC().Add(-time.Hour)}
-	account := &Account{ID: 63, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Schedulable: true, Concurrency: 1,
+	account := &Account{ID: 63, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, Concurrency: 1,
 		Credentials: map[string]any{"access_token": "probe-token"},
 		Extra:       map[string]any{OpenAIBPSAccountStateExtraKey(): initial}}
 	accounts := &openAIAccountTestRepo{mockAccountRepoForGemini: mockAccountRepoForGemini{accountsByID: map[int64]*Account{account.ID: account}}}
@@ -167,7 +167,7 @@ func TestOpenAIEvalAccountDisabledDuringAutomaticProbeRemainsDiagnostic(t *testi
 	upstream := &evalTransportStub{respond: func(_ *http.Request, call int) (*http.Response, error) {
 		ticket := "ticket-a"
 		if call == 2 {
-			account.Schedulable = false
+			account.Status = "inactive"
 			ticket = "ticket-b"
 		}
 		return stateProbeResponse(ticket, "data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-6-astra\"}}\n\n", http.StatusOK), nil

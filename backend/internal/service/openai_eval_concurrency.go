@@ -24,7 +24,7 @@ func (s *AccountTestService) checkOpenAIEvalAutomaticAccount(ctx context.Context
 	if err != nil {
 		return &OpenAIEvalRequestError{Code: "account_lookup_unavailable", Message: "automatic evaluation account lookup failed"}
 	}
-	if latest == nil || !latest.Schedulable {
+	if latest == nil || !latest.IsActive() || !latest.Schedulable {
 		return &OpenAIEvalRequestError{Code: "account_scheduling_disabled", Message: "automatic evaluation skipped: account scheduling is disabled"}
 	}
 	return ctx.Err()

@@ -244,6 +244,7 @@ func evalRunHarness(t *testing.T, respond func(*http.Request, int) (*http.Respon
 	t.Helper()
 	a := newCodexModelsAPIKeyTestAccount("https://eval.example/v1")
 	a.ID = 995
+	a.Status = StatusActive
 	a.Schedulable = true
 	a.Credentials["api_key"] = "eval-key"
 	a.Extra = map[string]any{"openai_responses_supported": true}

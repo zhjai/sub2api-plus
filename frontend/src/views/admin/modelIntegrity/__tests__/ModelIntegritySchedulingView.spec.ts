@@ -649,6 +649,30 @@ describe('ModelIntegritySchedulingView', () => {
     expect(cells.map(cell => cell.text())).toEqual(['未知', '—'])
   })
 
+  it('shows the latest evaluation error in the unknown quality hint', async () => {
+    const decisions = await api.listSchedulerDecisions()
+    const trace = { ...decisions.items[0], scheduling_policy: 'avoid_degradation' }
+    trace.candidates = [{
+      ...trace.candidates[0],
+      eligible: true,
+      factors: {
+        quality: {
+          score: 0.5, known: false, observed_at: null, unknown_reason: 'selected_test_evidence_unavailable',
+          state: 'insufficient', pass: 0, suspected_pass: 0, selected: 1, evaluated: 0, ratio: null, expires_at: null,
+          evidence_error_code: 'insufficient_valid_samples', evidence_error_message: 'valid answers 0/1'
+        }
+      }
+    } as typeof trace.candidates[0]]
+    api.listSchedulerDecisions.mockResolvedValue({ limit: 50, items: [trace] })
+    const wrapper = await mountOnRequests()
+    await wrapper.get('[data-testid="decision-row"] .ledger-toggle').trigger('click')
+    const cell = wrapper.get('[data-testid="candidate-quality"]')
+    const title = cell.get('[data-testid="candidate-quality-unknown"]').attributes('title')
+    expect(title).toContain('最新评测未计入')
+    expect(title).toContain('insufficient_valid_samples')
+    expect(title).toContain('valid answers 0/1')
+  })
+
   it('keeps the model pass rate unknown and shows the account reference beside it', async () => {
     const decisions = await api.listSchedulerDecisions()
     const trace = { ...decisions.items[0], scheduling_policy: 'avoid_degradation', ranking_basis: 'snapshot' }

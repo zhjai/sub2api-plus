@@ -296,9 +296,12 @@ function qualityHint(candidate: SchedulerDecisionCandidate) {
   // Under an account-wide reference the measured cell is unknown for a
   // different reason, so the generic "no evidence, scored neutral" hint would
   // describe the wrong thing.
-  return accountQualityReference(candidate)
+  const base = accountQualityReference(candidate)
     ? t('admin.modelIntegrity.scheduling.decisions.qualityUnknownAccountReference')
     : unknownHint(dispatchQuality(candidate).kind === 'unknown' ? (dispatchQuality(candidate) as Extract<DispatchQuality, { kind: 'unknown' }>).reason : null)
+  const quality = candidate.factors?.quality
+  const details = [quality?.evidence_error_code, quality?.evidence_error_message].filter(Boolean).join(': ')
+  return details ? `${base} ${t('admin.modelIntegrity.scheduling.decisions.qualityEvidenceError')} ${redactSecrets(details)}` : base
 }
 
 const accountReference = (candidate: SchedulerDecisionCandidate): AccountQualityReference | null => accountQualityReference(candidate)

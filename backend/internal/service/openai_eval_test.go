@@ -521,7 +521,7 @@ func TestOpenAIEvalRunnerNormalizesBPSAccountSentinelBeforePublicEffortValidatio
 		RequestedModel:  "gpt-5.4",
 		ReasoningEffort: OpenAIEvalBPSAccountEffort,
 	}}}
-	accounts := &openAIAccountTestRepo{mockAccountRepoForGemini: mockAccountRepoForGemini{accountsByID: map[int64]*Account{61: {ID: 61, Schedulable: true}}}}
+	accounts := &openAIAccountTestRepo{mockAccountRepoForGemini: mockAccountRepoForGemini{accountsByID: map[int64]*Account{61: {ID: 61, Status: StatusActive, Schedulable: true}}}}
 	service := NewOpenAIEvalService(repo, accounts, &AccountTestService{accountRepo: accounts})
 	runner := NewOpenAIEvalRunner(repo, service)
 
@@ -625,6 +625,7 @@ func TestOpenAIEvalRunCandyAndFingerprintUseSafeRouteOutcomes(t *testing.T) {
 	newHarness := func(answer string) (*OpenAIEvalService, *openAIEvalRepoFake, *openAIAccountTestRepo, *openAIEvalUpstreamStub) {
 		account := newCodexModelsAPIKeyTestAccount("https://upstream.example/v1")
 		account.ID = 51
+		account.Status = StatusActive
 		account.Schedulable = true
 		account.Extra = map[string]any{"openai_responses_supported": true}
 		account.Credentials["api_key"] = "sk-eval-test"

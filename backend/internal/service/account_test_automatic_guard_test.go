@@ -25,6 +25,20 @@ func TestAccountTestBackgroundDisabledSkipsSend(t *testing.T) {
 	require.Empty(t, upstream.requests)
 }
 
+func TestAccountTestBackgroundInactiveSchedulableSkipsSend(t *testing.T) {
+	account := &Account{ID: 42, Platform: PlatformOpenAI, Type: AccountTypeAPIKey,
+		Status: "inactive", Schedulable: true,
+		Credentials: map[string]any{"api_key": "fixture", "base_url": "https://example.invalid"}}
+	repo := &openAIAccountTestRepo{mockAccountRepoForGemini: mockAccountRepoForGemini{accountsByID: map[int64]*Account{42: account}}}
+	upstream := &automaticGuardUpstream{queuedHTTPUpstream: queuedHTTPUpstream{responses: []*http.Response{newJSONResponse(200, `{"output":[]}`)}}}
+	svc := &AccountTestService{accountRepo: repo, httpUpstream: upstream, cfg: &config.Config{}}
+	result, err := svc.RunTestBackground(context.Background(), 42, "gpt-6.1-sol")
+	require.NoError(t, err)
+	require.NotEqual(t, "success", result.Status)
+	require.Contains(t, result.ErrorMessage, "scheduling is disabled")
+	require.Empty(t, upstream.requests)
+}
+
 func TestAccountTestBackgroundDisableBeforeSend(t *testing.T) {
 	account := &Account{ID: 42, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Schedulable: true,
 		Credentials: map[string]any{"api_key": "fixture", "base_url": "https://example.invalid"}}
