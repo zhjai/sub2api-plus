@@ -11,7 +11,7 @@ import {
   type RankingError
 } from '@/api/admin/accounts'
 import type { AccountListItem } from '@/types'
-import { DEFAULT_CUSTOM_BALANCE, DEFAULT_MAX_REQUEST_ATTEMPTS, DEFAULT_QUALITY_REFRESH_SECONDS, normalizeBPSAccount, normalizeCustomBalance, normalizeMaxRequestAttempts, normalizeQualityRefreshInterval, normalizeRoute, normalizeSchedulingThresholds, toSavePayload } from './modelIntegrity'
+import { DEFAULT_CUSTOM_BALANCE, DEFAULT_MAX_REQUEST_ATTEMPTS, DEFAULT_QUALITY_REFRESH_SECONDS, isRuleEnabled, normalizeAccountPriorityRule, normalizeBPSAccount, normalizeCustomBalance, normalizeMaxRequestAttempts, normalizeQualityRefreshInterval, normalizeRoute, normalizeSchedulingThresholds, toSavePayload } from './modelIntegrity'
 
 /**
  * 'saved_evaluation_failed' is a real, distinct outcome: the server accepted
@@ -48,7 +48,7 @@ function isConflict(error: unknown): boolean {
  * overwriting what the other page changed.
  */
 export function useModelIntegrityConfig() {
-  const config = reactive<OpenAIEvalConfig>({ effects_enabled: false, bps_auto_enabled: false, scheduling_policy: '', custom_balance: { ...DEFAULT_CUSTOM_BALANCE }, scheduling_thresholds: normalizeSchedulingThresholds(), policies: [], bps_accounts: [], max_request_attempts: DEFAULT_MAX_REQUEST_ATTEMPTS, quality_refresh_interval_seconds: DEFAULT_QUALITY_REFRESH_SECONDS, accounts: [] })
+  const config = reactive<OpenAIEvalConfig>({ effects_enabled: false, bps_auto_enabled: false, scheduling_policy: '', custom_balance: { ...DEFAULT_CUSTOM_BALANCE }, scheduling_thresholds: normalizeSchedulingThresholds(), policies: [], account_priority_rules: [], bps_accounts: [], max_request_attempts: DEFAULT_MAX_REQUEST_ATTEMPTS, quality_refresh_interval_seconds: DEFAULT_QUALITY_REFRESH_SECONDS, accounts: [] })
   const catalog = ref<OpenAIEvalModelCatalog | null>(null)
   const accounts = ref<AccountListItem[]>([])
   const loading = ref(true)
@@ -117,15 +117,18 @@ export function useModelIntegrityConfig() {
     config.policies = (saved.policies ?? []).map(rule => ({
       ...rule,
       reasoning_effort: rule.reasoning_effort || '',
+      enabled: isRuleEnabled(rule),
       ...(rule.policy === 'custom_balance' ? { custom_balance: normalizeCustomBalance(rule.custom_balance ?? saved.custom_balance) } : {})
     }))
+    config.account_priority_rules = (saved.account_priority_rules ?? []).map(normalizeAccountPriorityRule)
     config.bps_accounts = (saved.bps_accounts ?? []).map(item => normalizeBPSAccount({ ...item }))
     config.max_request_attempts = normalizeMaxRequestAttempts(saved.max_request_attempts)
     config.quality_refresh_interval_seconds = normalizeQualityRefreshInterval(saved.quality_refresh_interval_seconds)
     config.quality_refreshed_at = saved.quality_refreshed_at ?? null
     config.quality_next_refresh_at = saved.quality_next_refresh_at ?? null
     savedQualityRefreshInterval.value = config.quality_refresh_interval_seconds
-    savedRules.value = (saved.policies ?? []).map(rule => ({ ...rule, reasoning_effort: rule.reasoning_effort || '' }))
+    // Disabled rules are kept in the config but never apply to requests.
+    savedRules.value = (saved.policies ?? []).filter(isRuleEnabled).map(rule => ({ ...rule, reasoning_effort: rule.reasoning_effort || '' }))
     config.accounts = (saved.accounts ?? []).map(route => normalizeRoute({ ...route }))
     applyRanking(saved)
     snapshot.value = serialized()

@@ -111,6 +111,31 @@ func TestOpenAIEvalAccountPriorityRulesSnapshotAndConfigRoundTrip(t *testing.T) 
 	require.NoError(t, err)
 }
 
+func TestOpenAIEvalDisabledModelRuleDoesNotAffectPolicyOrWeights(t *testing.T) {
+	disabled := false
+	config := &OpenAIEvalConfig{
+		SchedulingPolicy: OpenAIEvalSchedulingPolicyCostFirst,
+		CustomBalance:    OpenAIEvalPolicyWeights{Cost: 1},
+		Policies: []OpenAIEvalSchedulingPolicyRule{
+			{RequestedModel: "gpt-6.1-sol", Policy: OpenAIEvalSchedulingPolicyAvoidDegradation, Enabled: &disabled},
+			{RequestedModel: "gpt-6.1-sol", ReasoningEffort: "high", Policy: OpenAIEvalSchedulingPolicyCustomBalance,
+				CustomBalance: &OpenAIEvalPolicyWeights{Quality: 1}, Enabled: &disabled},
+		},
+	}
+	require.Equal(t, OpenAIEvalSchedulingPolicyCostFirst, OpenAIEvalSchedulingPolicyFor(config, "gpt-6.1-sol", "high"))
+	policy, weights := openAIEvalRankingWeights(config, "gpt-6.1-sol", "high")
+	require.Equal(t, OpenAIEvalSchedulingPolicyCostFirst, policy)
+	require.Equal(t, 1.0, weights.Price)
+	require.Zero(t, weights.Quality)
+}
+
+func TestOpenAIEvalLegacyModelRuleWithoutEnabledRemainsActive(t *testing.T) {
+	config := &OpenAIEvalConfig{SchedulingPolicy: OpenAIEvalSchedulingPolicyCostFirst, Policies: []OpenAIEvalSchedulingPolicyRule{
+		{RequestedModel: "gpt-6.1-sol", Policy: OpenAIEvalSchedulingPolicyAvoidDegradation},
+	}}
+	require.Equal(t, OpenAIEvalSchedulingPolicyAvoidDegradation, OpenAIEvalSchedulingPolicyFor(config, "gpt-6.1-sol", "high"))
+}
+
 func TestOpenAIEvalInvalidAccountPrioritySnapshotPreservesAcceptedState(t *testing.T) {
 	previous := openAIEvalSchedulingPolicy.Load()
 	cache := &openAIEvalQualitySnapshotStore{}

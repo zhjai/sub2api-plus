@@ -183,6 +183,9 @@ func (r *OpenAIEvalRankingService) discover(ctx context.Context, cfg *OpenAIEval
 			}
 		}
 		for _, rule := range cfg.Policies {
+			if rule.Enabled != nil && !*rule.Enabled {
+				continue
+			}
 			add(rule.RequestedModel, "policy_rule")
 		}
 		for _, route := range cfg.Accounts {

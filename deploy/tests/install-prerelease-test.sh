@@ -25,9 +25,10 @@ github_api_curl() {
         "https://api.github.com/repos/zhjai/sub2api-plus/releases?per_page=100")
             printf '%s\n' \
                 '[' \
-                '{"tag_name": "v0.2.11-zhjai.14-rc.1"},' \
-                '{"tag_name": "v0.2.11-zhjai.14-beta.2"},' \
-                '{"tag_name": "v0.2.11-zhjai.14-alpha.1"},' \
+                '{"tag_name": "v0.2.11-zhjai.15"},' \
+                '{"tag_name": "v0.2.11-zhjai.15-rc.1"},' \
+                '{"tag_name": "v0.2.11-zhjai.15-beta.2"},' \
+                '{"tag_name": "v0.2.11-zhjai.15-alpha.1"},' \
                 '{"tag_name": "v0.2.11-zhjai.13"},' \
                 '{"tag_name": "v0.2.11-zhjai.12"},' \
                 '{"tag_name": "v0.2.10"}' \
@@ -43,12 +44,12 @@ github_api_curl() {
 for version in \
     v0.2.11-zhjai.13 \
     0.2.11-zhjai.13 \
-    v0.2.11-zhjai.14-rc.1 \
-    0.2.11-zhjai.14-rc.1 \
-    v0.2.11-zhjai.14-beta.2 \
-    v0.2.11-zhjai.14-alpha.1 \
-    v0.2.11-zhjai.14-rc \
-    v0.2.11-zhjai.14-beta-2; do
+    v0.2.11-zhjai.15-rc.1 \
+    0.2.11-zhjai.15-rc.1 \
+    v0.2.11-zhjai.15-beta.2 \
+    v0.2.11-zhjai.15-alpha.1 \
+    v0.2.11-zhjai.15-rc \
+    v0.2.11-zhjai.15-beta-2; do
     EXPECTED_TAG="v${version#v}"
     normalized=$(validate_version "$version" 2>/dev/null) || fail "Rejected valid version: $version"
     [ "$normalized" = "$EXPECTED_TAG" ] || fail "Incorrect normalized version: $normalized"
@@ -56,13 +57,13 @@ done
 
 for version in \
     v0.2.11 \
-    v0.2.11-zhjai.14-preview.1 \
-    v0.2.11-zhjai.14-rc. \
-    v0.2.11-zhjai.14-rc..1 \
-    v0.2.11-zhjai.14-rc.1/other \
-    v0.2.11-zhjai.14-rc.1+build \
-    v0.2.11-zhjai.14-RC.1 \
-    v0.2.11-zhjai.14-rc.1-extra; do
+    v0.2.11-zhjai.15-preview.1 \
+    v0.2.11-zhjai.15-rc. \
+    v0.2.11-zhjai.15-rc..1 \
+    v0.2.11-zhjai.15-rc.1/other \
+    v0.2.11-zhjai.15-rc.1+build \
+    v0.2.11-zhjai.15-RC.1 \
+    v0.2.11-zhjai.15-rc.1-extra; do
     EXPECTED_TAG="invalid-must-not-reach-api"
     previous_calls=$(wc -l < "$TEMP_DIR/api-calls")
     if output=$(validate_version "$version" 2>&1); then
@@ -71,7 +72,7 @@ for version in \
     [ "$(wc -l < "$TEMP_DIR/api-calls")" -eq "$previous_calls" ] || fail "Invalid version reached GitHub: $version"
 done
 
-EXPECTED_TAG=v0.2.11-zhjai.14-rc.1
+EXPECTED_TAG=v0.2.11-zhjai.15-rc.1
 warning=$(validate_version "$EXPECTED_TAG" 2>&1 >/dev/null)
 [[ "$warning" == *"Selecting a pre-release"* ]] || fail "Missing pre-release warning"
 LANG_CHOICE=zh
@@ -87,7 +88,7 @@ done
 unset MOCK_HTTP_CODE
 
 get_latest_version >/dev/null
-[ "$LATEST_VERSION" = v0.2.11-zhjai.13 ] || fail "Default selection included a pre-release: $LATEST_VERSION"
+[ "$LATEST_VERSION" = v0.2.11-zhjai.15 ] || fail "Default selection did not choose the latest stable release: $LATEST_VERSION"
 
 # Exercise real CLI dispatch and install_version while mocking all system writes.
 touch "$TEMP_DIR/sub2api"
@@ -118,12 +119,12 @@ assert_cli_download() {
     [[ "$output" == *"download=$expected"* ]] || fail "CLI selected the wrong release: $*; $output"
 }
 
-EXPECTED_TAG=v0.2.11-zhjai.14-rc.1
+EXPECTED_TAG=v0.2.11-zhjai.15-rc.1
 INSTALL_DIR="$TEMP_DIR/fresh"
 assert_cli_download "$EXPECTED_TAG" install -v "$EXPECTED_TAG"
 assert_cli_download "$EXPECTED_TAG" install --version="${EXPECTED_TAG#v}"
 assert_cli_download "$EXPECTED_TAG" -v "$EXPECTED_TAG"
-assert_cli_download v0.2.11-zhjai.13 install
+assert_cli_download v0.2.11-zhjai.15 install
 
 INSTALL_DIR="$TEMP_DIR"
 assert_cli_download "$EXPECTED_TAG" install -v "$EXPECTED_TAG"

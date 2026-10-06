@@ -333,6 +333,9 @@ func rankingConfigHasPolicy(config *OpenAIEvalConfig) bool {
 		return true
 	}
 	for _, rule := range config.Policies {
+		if rule.Enabled != nil && !*rule.Enabled {
+			continue
+		}
 		if rule.Policy != "" {
 			return true
 		}

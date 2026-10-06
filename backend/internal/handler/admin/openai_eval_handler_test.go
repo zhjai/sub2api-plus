@@ -123,6 +123,63 @@ func TestMergeOpenAIEvalConfigPreservesAttemptsForOlderClients(t *testing.T) {
 	require.Equal(t, 1, incoming.MaxRequestAttempts)
 }
 
+func TestMergeOpenAIEvalConfigPreservesAccountPriorityRulesAndDisabledState(t *testing.T) {
+	disabled := false
+	current := &service.OpenAIEvalConfig{AccountPriorityRules: []service.OpenAIEvalAccountPriorityRule{
+		{AccountID: 7, Priority: 1, RequestedModels: []string{"gpt-6.1-sol"}, Enabled: &disabled},
+	}}
+	incoming := &service.OpenAIEvalConfig{}
+	mergeOpenAIEvalConfigOmittedFields(incoming, current, map[string]json.RawMessage{})
+	require.Len(t, incoming.AccountPriorityRules, 1)
+	require.NotSame(t, current.AccountPriorityRules[0].Enabled, incoming.AccountPriorityRules[0].Enabled)
+	require.False(t, *incoming.AccountPriorityRules[0].Enabled)
+	incoming.AccountPriorityRules[0].RequestedModels[0] = "changed"
+	require.Equal(t, "gpt-6.1-sol", current.AccountPriorityRules[0].RequestedModels[0])
+
+	// A client that sends the list but predates the enabled field must not turn
+	// an explicitly disabled saved rule back on.
+	incoming = &service.OpenAIEvalConfig{AccountPriorityRules: []service.OpenAIEvalAccountPriorityRule{{AccountID: 7, Priority: 1, RequestedModels: []string{"gpt-6.1-sol"}}}}
+	mergeOpenAIEvalConfigOmittedFields(incoming, current, map[string]json.RawMessage{
+		"account_priority_rules": json.RawMessage(`[{"account_id":7,"priority":1,"requested_models":["gpt-6.1-sol"]}]`),
+	})
+	require.NotNil(t, incoming.AccountPriorityRules[0].Enabled)
+	require.False(t, *incoming.AccountPriorityRules[0].Enabled)
+
+	// Legacy clients may reorder rules while omitting the switch field. State
+	// follows the rule identity, not its array position.
+	otherDisabled := false
+	current = &service.OpenAIEvalConfig{AccountPriorityRules: []service.OpenAIEvalAccountPriorityRule{
+		{AccountID: 7, Priority: 1, RequestedModels: []string{"gpt-6.1-sol"}, Enabled: &disabled},
+		{AccountID: 8, Priority: 2, RequestedModels: []string{"gpt-6-astra"}, Enabled: &otherDisabled},
+	}}
+	incoming = &service.OpenAIEvalConfig{AccountPriorityRules: []service.OpenAIEvalAccountPriorityRule{
+		{AccountID: 8, Priority: 9, RequestedModels: []string{" GPT-6-ASTRA "}},
+		{AccountID: 7, Priority: 3, RequestedModels: []string{"gpt-6.1-sol"}},
+	}}
+	mergeOpenAIEvalConfigOmittedFields(incoming, current, map[string]json.RawMessage{
+		"account_priority_rules": json.RawMessage(`[{"account_id":8,"priority":9,"requested_models":[" GPT-6-ASTRA "]},{"account_id":7,"priority":3,"requested_models":["gpt-6.1-sol"]}]`),
+	})
+	require.NotNil(t, incoming.AccountPriorityRules[0].Enabled)
+	require.False(t, *incoming.AccountPriorityRules[0].Enabled)
+	require.NotNil(t, incoming.AccountPriorityRules[1].Enabled)
+	require.False(t, *incoming.AccountPriorityRules[1].Enabled)
+}
+
+func TestMergeOpenAIEvalConfigPreservesDisabledModelRuleForOlderClients(t *testing.T) {
+	disabled := false
+	current := &service.OpenAIEvalConfig{Policies: []service.OpenAIEvalSchedulingPolicyRule{
+		{RequestedModel: "gpt-6.1-sol", Policy: service.OpenAIEvalSchedulingPolicyAvoidDegradation, Enabled: &disabled},
+	}}
+	incoming := &service.OpenAIEvalConfig{Policies: []service.OpenAIEvalSchedulingPolicyRule{
+		{RequestedModel: "gpt-6.1-sol", Policy: service.OpenAIEvalSchedulingPolicyAvoidDegradation},
+	}}
+	mergeOpenAIEvalConfigOmittedFields(incoming, current, map[string]json.RawMessage{
+		"policies": json.RawMessage(`[{"requested_model":"gpt-6.1-sol","policy":"avoid_degradation"}]`),
+	})
+	require.NotNil(t, incoming.Policies[0].Enabled)
+	require.False(t, *incoming.Policies[0].Enabled)
+}
+
 func TestOpenAIEvalConfigRejectsInvalidExplicitAttempts(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h := &AccountHandler{openAIEvalService: service.NewOpenAIEvalService(nil, nil, nil)}

@@ -31,6 +31,9 @@ func openAIEvalRankingWeights(config *OpenAIEvalConfig, model, effort string) (s
 	case OpenAIEvalSchedulingPolicyCustomBalance:
 		weights := config.CustomBalance
 		for _, rule := range config.Policies {
+			if rule.Enabled != nil && !*rule.Enabled {
+				continue
+			}
 			if openAIEvalQualityDimension(rule.RequestedModel) != openAIEvalQualityDimension(model) || rule.CustomBalance == nil {
 				continue
 			}
@@ -39,6 +42,9 @@ func openAIEvalRankingWeights(config *OpenAIEvalConfig, model, effort string) (s
 			}
 		}
 		for _, rule := range config.Policies {
+			if rule.Enabled != nil && !*rule.Enabled {
+				continue
+			}
 			if rule.ReasoningEffort != "" && openAIEvalQualityDimension(rule.RequestedModel) == openAIEvalQualityDimension(model) && openAIEvalQualityDimension(rule.ReasoningEffort) == effort && rule.CustomBalance != nil {
 				weights = *rule.CustomBalance
 				break

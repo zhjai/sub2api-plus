@@ -34,6 +34,7 @@ import {
   requestsPerRun,
   resultTone,
   toSavePayload,
+  accountPriorityRuleIssues,
   totalDailyRequests,
   candyExpectedAnswer,
   CUSTOM_FACTORS,
@@ -258,6 +259,36 @@ describe('BPS mode compatibility', () => {
 })
 
 describe('save payload', () => {
+  it('sends account priority rules with every model omitted as all models, keeping disabled ones', () => {
+    const payload = toSavePayload({
+      effects_enabled: false,
+      bps_auto_enabled: false,
+      accounts: [],
+      account_priority_rules: [
+        { account_id: 3, priority: 0, requested_models: [] },
+        { account_id: 4, priority: -2, requested_models: [' gpt-5 ', ''], enabled: false }
+      ]
+    })
+    expect(payload.account_priority_rules).toEqual([
+      { account_id: 3, priority: 0, enabled: true },
+      { account_id: 4, priority: -2, requested_models: ['gpt-5'], enabled: false }
+    ])
+    // A config from an older server has no rules and saves none.
+    expect(toSavePayload({ effects_enabled: false, bps_auto_enabled: false, accounts: [] }).account_priority_rules).toEqual([])
+  })
+
+  it('flags account rules the server would reject, ignoring disabled rules for overlaps', () => {
+    const issues = accountPriorityRuleIssues([
+      { account_id: 0, priority: 1 },
+      { account_id: 5, priority: 1.5 },
+      { account_id: 6, priority: 1, requested_models: ['gpt-5'] },
+      { account_id: 6, priority: 2, requested_models: ['GPT-5'], enabled: false },
+      { account_id: 6, priority: 3, requested_models: ['gpt-5', 'gpt-5-mini'] },
+      { account_id: 7, priority: 1, requested_models: [] }
+    ], rule => rule.account_id === 7)
+    expect([...issues.entries()]).toEqual([[0, 'account'], [1, 'priority'], [4, 'overlap'], [5, 'models']])
+  })
+
   it('keeps fields the page does not edit and strips read-only runtime state', () => {
     const route = oauthRoute({ bps_mode: 'auto', bps_state: { active: true, degraded_streak: 3, healthy_streak: 0 } })
     const config: OpenAIEvalConfig = {
@@ -272,7 +303,7 @@ describe('save payload', () => {
     expect(payload.revision).toBe(7)
     expect(payload.effects_enabled).toBe(true)
     expect(payload.scheduling_policy).toBe('cost_first')
-    expect(payload.policies).toEqual([{ requested_model: 'gpt-5', reasoning_effort: '', policy: 'avoid_degradation' }])
+    expect(payload.policies).toEqual([{ requested_model: 'gpt-5', reasoning_effort: '', policy: 'avoid_degradation', enabled: true }])
     expect(payload.accounts[0]).not.toHaveProperty('bps_state')
     expect(payload.accounts[0]).not.toHaveProperty('direct_oauth_eligible')
     expect(payload.accounts[0].bps_mode).toBe('auto')

@@ -130,21 +130,30 @@
               </div>
               <p v-if="!rules.length" class="rules-empty">{{ t('admin.modelIntegrity.scheduling.rules.empty') }}</p>
               <ul v-else class="rules-list">
-                <li v-for="(rule, index) in rules" :key="index" class="rule-row" data-testid="policy-rule">
-                  <label class="rule-field">
+                <li v-for="(rule, index) in rules" :key="index" class="rule-row" :class="{ 'rule-row-off': !isRuleEnabled(rule) }" data-testid="policy-rule">
+                  <div class="rule-field rule-switch">
+                    <span class="rule-label" aria-hidden="true">{{ t('admin.modelIntegrity.scheduling.rules.enabled') }}</span>
+                    <Toggle
+                      :model-value="isRuleEnabled(rule)"
+                      :aria-label="t('admin.modelIntegrity.scheduling.rules.enableLabel', { model: rule.requested_model || t('admin.modelIntegrity.scheduling.rules.pickModel') })"
+                      data-testid="rule-enabled"
+                      @update:model-value="rule.enabled = $event"
+                    />
+                  </div>
+                  <label class="rule-field rule-dim">
                     <span class="rule-label">{{ t('admin.modelIntegrity.scheduling.rules.model') }}</span>
                     <select v-model="rule.requested_model" class="input rule-input">
                       <option value="" disabled>{{ t('admin.modelIntegrity.scheduling.rules.pickModel') }}</option>
                       <option v-for="model in catalog?.items || []" :key="model.id" :value="model.id">{{ model.display_name || model.id }}</option>
                     </select>
                   </label>
-                  <label class="rule-field">
+                  <label class="rule-field rule-dim">
                     <span class="rule-label">{{ t('admin.modelIntegrity.scheduling.rules.effort') }}</span>
                     <select v-model="rule.reasoning_effort" class="input rule-input">
                       <option v-for="effort in efforts" :key="effort" :value="effort">{{ effort || t('admin.modelIntegrity.common.allEfforts') }}</option>
                     </select>
                   </label>
-                  <label class="rule-field">
+                  <label class="rule-field rule-dim">
                     <span class="rule-label">{{ t('admin.modelIntegrity.scheduling.rules.policy') }}</span>
                     <select :value="rule.policy" class="input rule-input" data-testid="rule-policy" @change="setRulePolicy(rule, ($event.target as HTMLSelectElement).value as OpenAIEvalSchedulingPolicyRule['policy'])">
                       <option v-for="policy in RULE_POLICIES" :key="policy" :value="policy">{{ t(`admin.modelIntegrity.scheduling.policy.options.${policy}.name`) }}</option>
@@ -178,7 +187,79 @@
                       <p class="sched-note">{{ t('admin.modelIntegrity.scheduling.rules.weightsHint') }}</p>
                     </div>
                   </div>
+                  <p v-if="!isRuleEnabled(rule)" class="rule-off" data-testid="rule-off">{{ t('admin.modelIntegrity.scheduling.rules.off') }}</p>
                   <p v-if="duplicateRuleIndexes.has(index)" class="rule-error" role="alert">{{ t('admin.modelIntegrity.scheduling.rules.duplicate') }}</p>
+                </li>
+              </ul>
+            </div>
+
+            <div class="rules" data-testid="account-rules">
+              <div class="rules-head">
+                <div>
+                  <h3 class="sched-h3">{{ t('admin.modelIntegrity.scheduling.accountRules.title') }}</h3>
+                  <p class="sched-hint">{{ t('admin.modelIntegrity.scheduling.accountRules.hint') }}</p>
+                </div>
+                <button type="button" class="btn btn-secondary btn-sm" data-testid="add-account-rule" @click="addAccountRule">
+                  <Icon name="plus" size="sm" />{{ t('admin.modelIntegrity.scheduling.accountRules.add') }}
+                </button>
+              </div>
+              <p v-if="!accountRules.length" class="rules-empty">{{ t('admin.modelIntegrity.scheduling.accountRules.empty') }}</p>
+              <ul v-else class="rules-list">
+                <li v-for="(rule, index) in accountRules" :key="index" class="rule-row account-rule-row" :class="{ 'rule-row-off': !isRuleEnabled(rule) }" data-testid="account-rule">
+                  <div class="rule-field rule-switch">
+                    <span class="rule-label" aria-hidden="true">{{ t('admin.modelIntegrity.scheduling.rules.enabled') }}</span>
+                    <Toggle
+                      :model-value="isRuleEnabled(rule)"
+                      :aria-label="t('admin.modelIntegrity.scheduling.accountRules.enableLabel', { account: rule.account_id > 0 ? accountLabel(rule.account_id) : t('admin.modelIntegrity.scheduling.accountRules.pickAccount') })"
+                      data-testid="account-rule-enabled"
+                      @update:model-value="rule.enabled = $event"
+                    />
+                  </div>
+                  <label class="rule-field rule-dim">
+                    <span class="rule-label">{{ t('admin.modelIntegrity.scheduling.accountRules.account') }}</span>
+                    <select v-model.number="rule.account_id" class="input rule-input" data-testid="account-rule-account">
+                      <option :value="0" disabled>{{ t('admin.modelIntegrity.scheduling.accountRules.pickAccount') }}</option>
+                      <option v-for="account in accounts" :key="account.id" :value="account.id">{{ accountLabel(account.id) }}</option>
+                      <!-- Keeps a saved account selectable when the list no longer has it. -->
+                      <option v-if="rule.account_id > 0 && !accounts.some(account => account.id === rule.account_id)" :value="rule.account_id">{{ accountLabel(rule.account_id) }}</option>
+                    </select>
+                  </label>
+                  <label class="rule-field rule-dim">
+                    <span class="rule-label">{{ t('admin.modelIntegrity.scheduling.accountRules.priority') }}</span>
+                    <input
+                      v-model.number="rule.priority"
+                      type="number"
+                      step="1"
+                      inputmode="numeric"
+                      class="input rule-input tabular-nums"
+                      data-testid="account-rule-priority"
+                    />
+                  </label>
+                  <label class="rule-field rule-dim">
+                    <span class="rule-label">{{ t('admin.modelIntegrity.scheduling.accountRules.scope') }}</span>
+                    <select :value="accountRuleScope(rule)" class="input rule-input" data-testid="account-rule-scope" @change="setAccountRuleScope(rule, ($event.target as HTMLSelectElement).value as AccountRuleScope)">
+                      <option value="all">{{ t('admin.modelIntegrity.scheduling.accountRules.allModels') }}</option>
+                      <option value="some">{{ t('admin.modelIntegrity.scheduling.accountRules.someModels') }}</option>
+                    </select>
+                  </label>
+                  <button type="button" class="rule-remove" :title="t('admin.modelIntegrity.scheduling.accountRules.remove')" :aria-label="t('admin.modelIntegrity.scheduling.accountRules.remove')" @click="removeAccountRule(index)">
+                    <Icon name="trash" size="sm" />
+                  </button>
+                  <fieldset v-if="accountRuleScope(rule) === 'some'" class="rule-models rule-dim" data-testid="account-rule-models">
+                    <legend class="rule-label">{{ t('admin.modelIntegrity.scheduling.accountRules.models') }}</legend>
+                    <label v-for="model in accountRuleModelOptions(rule)" :key="model.id" class="model-chip">
+                      <input
+                        type="checkbox"
+                        class="model-chip-input"
+                        :value="model.id"
+                        :checked="(rule.requested_models ?? []).includes(model.id)"
+                        @change="toggleAccountRuleModel(rule, model.id, ($event.target as HTMLInputElement).checked)"
+                      />
+                      <span>{{ model.label }}</span>
+                    </label>
+                  </fieldset>
+                  <p v-if="!isRuleEnabled(rule)" class="rule-off" data-testid="account-rule-off">{{ t('admin.modelIntegrity.scheduling.rules.off') }}</p>
+                  <p v-if="accountRuleIssues.has(index)" class="rule-error" role="alert" data-testid="account-rule-error">{{ t(`admin.modelIntegrity.scheduling.accountRules.errors.${accountRuleIssues.get(index)}`) }}</p>
                 </li>
               </ul>
             </div>
@@ -419,12 +500,12 @@ import EvaluationRecords from '@/components/admin/modelIntegrity/EvaluationRecor
 import BpsAccountDialog from '@/components/admin/modelIntegrity/BpsAccountDialog.vue'
 import PolicyWeightsEditor from '@/components/admin/modelIntegrity/PolicyWeightsEditor.vue'
 import SchedulingThresholdsEditor from '@/components/admin/modelIntegrity/SchedulingThresholdsEditor.vue'
-import { accountsAPI, listSchedulerDecisions, type OpenAIEvalAccountOverview, type OpenAIEvalBPSAccountConfig, type OpenAIEvalRankingSummary, type OpenAIEvalSchedulingPolicy, type OpenAIEvalSchedulingPolicyRule, type SchedulerDecisionTrace } from '@/api/admin/accounts'
+import { accountsAPI, listSchedulerDecisions, type OpenAIEvalAccountOverview, type OpenAIEvalAccountPriorityRule, type OpenAIEvalBPSAccountConfig, type OpenAIEvalRankingSummary, type OpenAIEvalSchedulingPolicy, type OpenAIEvalSchedulingPolicyRule, type SchedulerDecisionTrace } from '@/api/admin/accounts'
 import groupsAPI from '@/api/admin/groups'
 import type { AdminGroup } from '@/types'
 import { useAppStore } from '@/stores/app'
 import { extractApiErrorMessage } from '@/utils/apiError'
-import { CUSTOM_FACTORS, CUSTOM_INTERVAL, DAY, EFFECTIVE_KEYS, HOUR, MAX_INTERVAL_MINUTES, QUALITY_REFRESH_INTERVALS, THRESHOLD_POLICIES, absolutePriorities, customBalanceIssue, customBalanceIssueKey, invalidThresholdFields,bpsAccountLane, bpsDisabledKey, bpsModeOf, canResetBPSAccount, customBalanceShares, effectiveTone as effectiveToneOf, hasNoPositiveWeight, isDirectOAuthRoute, isInactiveStatus, isValidCustomBalance, normalizeBPSAccount, normalizeCustomBalance, normalizeQualityRefreshInterval, rankingErrorText, rankingTriggerKey, type BPSLane, type RankingReadOutcome } from './modelIntegrity'
+import { CUSTOM_FACTORS, CUSTOM_INTERVAL, DAY, EFFECTIVE_KEYS, HOUR, MAX_INTERVAL_MINUTES, QUALITY_REFRESH_INTERVALS, THRESHOLD_POLICIES, absolutePriorities, accountPriorityRuleIssues, customBalanceIssue, customBalanceIssueKey, invalidThresholdFields,bpsAccountLane, bpsDisabledKey, bpsModeOf, canResetBPSAccount, customBalanceShares, effectiveTone as effectiveToneOf, hasNoPositiveWeight, isDirectOAuthRoute, isInactiveStatus, isRuleEnabled, isValidCustomBalance, normalizeBPSAccount, normalizeCustomBalance, normalizeQualityRefreshInterval, rankingErrorText, rankingTriggerKey, type BPSLane, type RankingReadOutcome } from './modelIntegrity'
 import { useModelIntegrityConfig } from './useModelIntegrityConfig'
 
 /** Records read per request; the server filters its retained window before applying it. */
@@ -617,15 +698,17 @@ async function reloadRanking(options: { invalidate?: boolean } = { invalidate: t
 }
 // useModelIntegrityConfig always initialises policies to an array.
 const rules = computed(() => config.policies as OpenAIEvalSchedulingPolicyRule[])
+/** Disabled rules keep their settings but do not apply, so nothing below reads them. */
+const activeRules = computed(() => rules.value.filter(isRuleEnabled))
 const efforts = computed(() => catalog.value?.reasoning_efforts?.length ? catalog.value.reasoning_efforts : [''])
-const usesAvoidDegradation = computed(() => defaultPolicy.value === 'avoid_degradation' || rules.value.some(rule => rule.policy === 'avoid_degradation'))
+const usesAvoidDegradation = computed(() => defaultPolicy.value === 'avoid_degradation' || activeRules.value.some(rule => rule.policy === 'avoid_degradation'))
 /** Any saved policy that reads the integrity pass rate. */
 const usesQuality = computed(() => usesAvoidDegradation.value ||
   (defaultPolicy.value === 'custom_balance' && Number(config.custom_balance?.quality) > 0) ||
-  rules.value.some(rule => rule.policy === 'custom_balance' && Number(rule.custom_balance?.quality) > 0))
-/** Threshold rows the default policy or a model rule currently uses, as edited. */
+  activeRules.value.some(rule => rule.policy === 'custom_balance' && Number(rule.custom_balance?.quality) > 0))
+/** Threshold rows the default policy or an enabled model rule currently uses, as edited. */
 const thresholdPoliciesInUse = computed(() => {
-  const used = new Set<string>([defaultPolicy.value, ...rules.value.map(rule => rule.policy)])
+  const used = new Set<string>([defaultPolicy.value, ...activeRules.value.map(rule => rule.policy)])
   return THRESHOLD_POLICIES.filter(policy => used.has(policy))
 })
 const thresholdsEditor = ref<InstanceType<typeof SchedulingThresholdsEditor> | null>(null)
@@ -702,13 +785,61 @@ const duplicateRuleIndexes = computed(() => {
   const seen = new Map<string, number>()
   const duplicates = new Set<number>()
   rules.value.forEach((rule, index) => {
-    if (!rule.requested_model) return
+    // A disabled copy may be kept aside; only enabled rules compete for a model.
+    if (!rule.requested_model || !isRuleEnabled(rule)) return
     const key = `${rule.requested_model.toLowerCase()}\u0000${(rule.reasoning_effort || '').toLowerCase()}`
     if (seen.has(key)) duplicates.add(index)
     else seen.set(key, index)
   })
   return duplicates
 })
+
+// -- Account priority rules -------------------------------------------------
+type AccountRuleScope = 'all' | 'some'
+// useModelIntegrityConfig always initialises account_priority_rules to an array.
+const accountRules = computed(() => config.account_priority_rules as OpenAIEvalAccountPriorityRule[])
+/**
+ * Rules switched to chosen models before any model is ticked. An empty model
+ * list means every model to the server, so the choice is held here until a
+ * model is picked; saving is blocked meanwhile.
+ */
+const pickingModels = ref<OpenAIEvalAccountPriorityRule[]>([])
+const accountRuleIssues = computed(() => accountPriorityRuleIssues(accountRules.value, rule => accountRuleScope(rule) === 'some'))
+
+function accountRuleScope(rule: OpenAIEvalAccountPriorityRule): AccountRuleScope {
+  return rule.requested_models?.length || pickingModels.value.includes(rule) ? 'some' : 'all'
+}
+
+function setAccountRuleScope(rule: OpenAIEvalAccountPriorityRule, scope: AccountRuleScope) {
+  const index = pickingModels.value.indexOf(rule)
+  if (index >= 0) pickingModels.value.splice(index, 1)
+  if (scope === 'all') rule.requested_models = []
+  else if (!rule.requested_models?.length) pickingModels.value.push(rule)
+}
+
+/** Public catalog models, plus any saved model the catalog no longer lists. */
+function accountRuleModelOptions(rule: OpenAIEvalAccountPriorityRule) {
+  const options = (catalog.value?.items ?? []).map(model => ({ id: model.id, label: model.display_name || model.id }))
+  for (const id of rule.requested_models ?? []) if (!options.some(option => option.id === id)) options.push({ id, label: id })
+  return options
+}
+
+function toggleAccountRuleModel(rule: OpenAIEvalAccountPriorityRule, model: string, checked: boolean) {
+  const models = (rule.requested_models ?? []).filter(item => item !== model)
+  rule.requested_models = checked ? [...models, model] : models
+  // Unticking the last model keeps the row on chosen models rather than widening it to all.
+  if (!rule.requested_models.length && !pickingModels.value.includes(rule)) pickingModels.value.push(rule)
+}
+
+function addAccountRule() {
+  accountRules.value.push({ account_id: 0, priority: 1, requested_models: [], enabled: true })
+}
+
+function removeAccountRule(index: number) {
+  const [rule] = accountRules.value.splice(index, 1)
+  const picking = pickingModels.value.indexOf(rule)
+  if (picking >= 0) pickingModels.value.splice(picking, 1)
+}
 
 // useModelIntegrityConfig always initialises bps_accounts to an array.
 const bpsAccounts = computed(() => config.bps_accounts as OpenAIEvalBPSAccountConfig[])
@@ -726,7 +857,7 @@ const laneCount = computed(() => {
 const legacyRouteCount = computed(() => config.accounts.filter(route => isDirectOAuthRoute(route) && bpsModeOf(route) !== 'force_off').length)
 
 function addRule() {
-  rules.value.push({ requested_model: '', reasoning_effort: '', policy: 'stability_first' })
+  rules.value.push({ requested_model: '', reasoning_effort: '', policy: 'stability_first', enabled: true })
 }
 
 function laneOf(item: OpenAIEvalBPSAccountConfig): BPSLane {
@@ -847,6 +978,12 @@ async function handleSave() {
     appStore.showError(rules.value.some(rule => !rule.requested_model) ? t('admin.modelIntegrity.scheduling.rules.pickModel') : t('admin.modelIntegrity.scheduling.rules.duplicate'))
     return
   }
+  // The server rejects the whole save on any of these, so stop and point at the row.
+  const accountIssue = accountRuleIssues.value.values().next().value
+  if (accountIssue) {
+    appStore.showError(t(`admin.modelIntegrity.scheduling.accountRules.errors.${accountIssue}`))
+    return
+  }
   // Only fills a rule that never had weights; existing rule weights are kept as edited.
   for (const rule of rules.value) {
     if (rule.policy === 'custom_balance' && !rule.custom_balance) rule.custom_balance = normalizeCustomBalance(config.custom_balance)
@@ -952,13 +1089,24 @@ onMounted(initialLoad)
 .rules-head { @apply flex flex-wrap items-start justify-between gap-3; }
 .rules-empty { @apply text-sm text-gray-500 dark:text-gray-400; }
 .rules-list { @apply space-y-2; }
-.rule-row { @apply grid items-end gap-2 rounded-lg bg-gray-50 p-3 dark:bg-dark-900/50 sm:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)_2.25rem]; }
+.rule-row { @apply grid items-end gap-2 rounded-lg border border-transparent bg-gray-50 p-3 dark:bg-dark-900/50 sm:grid-cols-[auto_minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)_2.25rem]; }
+.account-rule-row { @apply sm:grid-cols-[auto_minmax(0,1.6fr)_minmax(0,0.7fr)_minmax(0,1fr)_2.25rem]; }
+/* A switched-off rule keeps its values readable but visibly out of force. */
+.rule-row-off { @apply border border-dashed border-gray-300 bg-transparent dark:border-dark-600; }
+.rule-row-off .rule-dim { @apply opacity-60; }
+.rule-switch { @apply flex-row items-center gap-2 sm:h-full sm:flex-col sm:items-start sm:justify-end sm:gap-1; }
+.rule-switch :deep(button) { @apply my-1.5; }
+.rule-off { @apply text-xs text-gray-500 dark:text-gray-400 sm:col-span-5; }
+.rule-models { @apply flex min-w-0 flex-wrap gap-2 border-t border-gray-200 pt-3 dark:border-dark-700 sm:col-span-5; }
+.rule-models legend { @apply float-left mb-1 w-full; }
+.model-chip { @apply inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-gray-200 bg-white px-2 py-1 text-xs text-gray-700 has-[:checked]:border-primary-400 has-[:checked]:bg-primary-50 has-[:checked]:text-primary-900 has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-primary-500 dark:border-dark-600 dark:bg-dark-800 dark:text-gray-300 dark:has-[:checked]:border-primary-500 dark:has-[:checked]:bg-primary-950/40 dark:has-[:checked]:text-primary-100; }
+.model-chip-input { @apply rounded border-gray-300 text-primary-600 focus:ring-0 focus:ring-offset-0 dark:border-dark-500; }
 .rule-field { @apply flex min-w-0 flex-col gap-1; }
 .rule-label { @apply text-xs text-gray-500 dark:text-gray-400; }
 .rule-input { @apply h-9 py-1 text-sm; }
 .rule-remove { @apply inline-flex h-9 w-9 items-center justify-center rounded-md text-gray-400 hover:bg-rose-50 hover:text-rose-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 dark:hover:bg-rose-950/40; }
-.rule-error { @apply text-xs text-rose-700 dark:text-rose-300 sm:col-span-4; }
-.rule-weights { @apply min-w-0 space-y-3 border-t border-gray-200 pt-3 dark:border-dark-700 sm:col-span-4; }
+.rule-error { @apply text-xs text-rose-700 dark:text-rose-300 sm:col-span-5; }
+.rule-weights { @apply min-w-0 space-y-3 border-t border-gray-200 pt-3 dark:border-dark-700 sm:col-span-5; }
 .rule-weights-head { @apply flex flex-wrap items-center justify-between gap-2; }
 .rule-weights-summary { @apply flex min-w-0 flex-wrap items-baseline gap-x-2 text-xs tabular-nums text-gray-600 dark:text-gray-300; }
 .rule-weights-invalid { @apply text-rose-700 dark:text-rose-300; }

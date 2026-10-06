@@ -221,7 +221,22 @@ export interface OpenAIEvalSchedulingPolicyRule {
   /** Empty means every reasoning effort of the model. */
   reasoning_effort?: string
   policy: Exclude<OpenAIEvalSchedulingPolicy, ''>
+  /** Omitted by older configs, which means enabled. A disabled rule is kept but not applied. */
+  enabled?: boolean
   custom_balance?: OpenAIEvalPolicyWeights
+}
+
+/**
+ * Admits matching accounts before all others, lowest priority number first;
+ * the scheduling policy orders accounts within one priority.
+ */
+export interface OpenAIEvalAccountPriorityRule {
+  account_id: number
+  priority: number
+  /** Public model names; empty or omitted means every model. */
+  requested_models?: string[]
+  /** Omitted means enabled. A disabled rule is kept but not applied. */
+  enabled?: boolean
 }
 
 /**
@@ -253,6 +268,8 @@ export interface OpenAIEvalConfig {
   bps_auto_enabled: boolean
   scheduling_policy?: OpenAIEvalSchedulingPolicy
   policies?: OpenAIEvalSchedulingPolicyRule[]
+  /** Older servers omit it; every save sends the list back as loaded or edited. */
+  account_priority_rules?: OpenAIEvalAccountPriorityRule[]
   custom_balance?: OpenAIEvalPolicyWeights
   /**
    * Per-policy runtime thresholds and the shared minimum sample counts.

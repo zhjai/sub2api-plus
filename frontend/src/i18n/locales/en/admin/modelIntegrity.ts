@@ -466,7 +466,31 @@ export default {
         editWeights: 'Edit weights',
         doneWeights: 'Collapse',
         weightsFor: 'Custom weights for {model} ({effort})',
-        weightsHint: 'Applies to this rule only, independent of the default policy weights. Enter percentages; they are normalized on save.'
+        weightsHint: 'Applies to this rule only, independent of the default policy weights. Enter percentages; they are normalized on save.',
+        enabled: 'On',
+        enableLabel: 'Enable the rule for {model}',
+        off: 'Off: settings are kept but not used for scheduling.'
+      },
+      accountRules: {
+        title: 'Account priority rules',
+        hint: 'Accounts that match a rule are scheduled before other accounts, lower numbers first. Accounts with the same priority are ordered by the scheduling policy. For one account, a rule for specific models takes precedence over a rule for all models.',
+        empty: 'No rules configured. Accounts are ordered by the scheduling policy.',
+        add: 'Add account rule',
+        remove: 'Delete account rule',
+        account: 'Account',
+        pickAccount: 'Select an account',
+        priority: 'Priority (lower first)',
+        scope: 'Models',
+        allModels: 'All models',
+        someModels: 'Specific models',
+        models: 'Public models this rule applies to',
+        enableLabel: 'Enable the priority rule for {account}',
+        errors: {
+          account: 'Select an account.',
+          priority: 'Priority must be a whole number.',
+          models: 'Select at least one model.',
+          overlap: 'This account already has an enabled rule covering the same model.'
+        }
       },
       gates: {
         title: 'Scheduling conditions',

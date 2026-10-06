@@ -466,7 +466,31 @@ export default {
         editWeights: '编辑权重',
         doneWeights: '收起',
         weightsFor: '{model}（{effort}）自定义权重',
-        weightsHint: '仅作用于本规则，与默认策略的权重相互独立。按百分比填写，保存时自动归一化。'
+        weightsHint: '仅作用于本规则，与默认策略的权重相互独立。按百分比填写，保存时自动归一化。',
+        enabled: '启用',
+        enableLabel: '启用 {model} 的规则',
+        off: '已停用：配置保留，不参与调度。'
+      },
+      accountRules: {
+        title: '账号优先规则',
+        hint: '匹配规则的账号先于其他账号参与调度，数字越小越优先；同一优先级内按调度策略排序。同一账号的指定模型规则优先于全部模型规则。',
+        empty: '未配置规则，账号按调度策略排序。',
+        add: '添加账号规则',
+        remove: '删除账号规则',
+        account: '账号',
+        pickAccount: '请选择账号',
+        priority: '优先级（越小越优先）',
+        scope: '适用模型',
+        allModels: '全部模型',
+        someModels: '指定模型',
+        models: '适用的公开模型',
+        enableLabel: '启用 {account} 的优先规则',
+        errors: {
+          account: '请选择账号。',
+          priority: '优先级须为整数。',
+          models: '请至少选择一个模型。',
+          overlap: '该账号已有覆盖相同模型的启用规则。'
+        }
       },
       gates: {
         title: '调度条件',

@@ -193,6 +193,9 @@ func (s *defaultOpenAIAccountScheduler) overviewPriorLocked(r *OpenAIEvalRanking
 		return nil, false
 	}
 	for _, rule := range cfg.Policies {
+		if rule.Enabled != nil && !*rule.Enabled {
+			continue
+		}
 		if openAIEvalQualityDimension(rule.RequestedModel) == openAIEvalQualityDimension(model) && (rule.ReasoningEffort == "" || rule.ReasoningEffort == effort) {
 			return nil, false
 		}

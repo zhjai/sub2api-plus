@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -117,6 +118,26 @@ func mergeOpenAIEvalConfigOmittedFields(incoming, current *service.OpenAIEvalCon
 	if _, ok := fields["policies"]; !ok {
 		incoming.Policies = current.Policies
 	}
+	if _, ok := fields["account_priority_rules"]; !ok {
+		incoming.AccountPriorityRules = cloneOpenAIEvalAccountPriorityRules(current.AccountPriorityRules)
+	}
+	if raw, ok := fields["account_priority_rules"]; ok {
+		// Older clients can send the rule list without the switch field. Preserve
+		// an explicitly disabled saved rule instead of silently re-enabling it.
+		var rawRules []map[string]json.RawMessage
+		if json.Unmarshal(raw, &rawRules) == nil {
+			previousEnabled := make(map[string]*bool, len(current.AccountPriorityRules))
+			for _, rule := range current.AccountPriorityRules {
+				previousEnabled[openAIEvalAccountPriorityRuleMergeKey(rule)] = cloneBoolPointer(rule.Enabled)
+			}
+			for i := range incoming.AccountPriorityRules {
+				if _, present := rawRules[i]["enabled"]; present {
+					continue
+				}
+				incoming.AccountPriorityRules[i].Enabled = cloneBoolPointer(previousEnabled[openAIEvalAccountPriorityRuleMergeKey(incoming.AccountPriorityRules[i])])
+			}
+		}
+	}
 	if _, ok := fields["custom_balance"]; !ok {
 		incoming.CustomBalance = current.CustomBalance
 	} else {
@@ -126,12 +147,21 @@ func mergeOpenAIEvalConfigOmittedFields(incoming, current *service.OpenAIEvalCon
 		var rawRules []map[string]json.RawMessage
 		if json.Unmarshal(raw, &rawRules) == nil {
 			previous := make(map[string]*service.OpenAIEvalPolicyWeights)
+			previousEnabled := make(map[string]*bool)
 			for _, rule := range current.Policies {
-				previous[service.OpenAIEvalRouteHealthKey(rule.RequestedModel, rule.ReasoningEffort)] = rule.CustomBalance
+				key := service.OpenAIEvalRouteHealthKey(rule.RequestedModel, rule.ReasoningEffort)
+				previous[key] = rule.CustomBalance
+				previousEnabled[key] = rule.Enabled
 			}
 			for i := range incoming.Policies {
 				rule := &incoming.Policies[i]
-				old := previous[service.OpenAIEvalRouteHealthKey(rule.RequestedModel, rule.ReasoningEffort)]
+				key := service.OpenAIEvalRouteHealthKey(rule.RequestedModel, rule.ReasoningEffort)
+				old := previous[key]
+				if i < len(rawRules) {
+					if _, present := rawRules[i]["enabled"]; !present {
+						rule.Enabled = cloneBoolPointer(previousEnabled[key])
+					}
+				}
 				if old != nil && rule.CustomBalance != nil && i < len(rawRules) {
 					mergeOpenAIEvalQualityWeight(rule.CustomBalance, *old, rawRules[i]["custom_balance"])
 				}
@@ -157,6 +187,36 @@ func mergeOpenAIEvalConfigOmittedFields(incoming, current *service.OpenAIEvalCon
 			}
 		}
 	}
+}
+
+func cloneBoolPointer(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func cloneOpenAIEvalAccountPriorityRules(rules []service.OpenAIEvalAccountPriorityRule) []service.OpenAIEvalAccountPriorityRule {
+	if rules == nil {
+		return nil
+	}
+	cloned := make([]service.OpenAIEvalAccountPriorityRule, len(rules))
+	for i, rule := range rules {
+		cloned[i] = rule
+		cloned[i].RequestedModels = append([]string(nil), rule.RequestedModels...)
+		cloned[i].Enabled = cloneBoolPointer(rule.Enabled)
+	}
+	return cloned
+}
+
+func openAIEvalAccountPriorityRuleMergeKey(rule service.OpenAIEvalAccountPriorityRule) string {
+	models := make([]string, 0, len(rule.RequestedModels))
+	for _, model := range rule.RequestedModels {
+		models = append(models, strings.ToLower(strings.TrimSpace(model)))
+	}
+	sort.Strings(models)
+	return strconv.FormatInt(rule.AccountID, 10) + "|" + strings.Join(models, ",")
 }
 
 func mergeOpenAIEvalQualityWeight(incoming *service.OpenAIEvalPolicyWeights, current service.OpenAIEvalPolicyWeights, raw json.RawMessage) {

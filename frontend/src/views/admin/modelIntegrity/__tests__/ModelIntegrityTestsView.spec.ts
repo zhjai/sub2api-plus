@@ -374,7 +374,8 @@ describe('ModelIntegrityTestsView', () => {
     const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
     expect(payload.revision).toBe(9)
     expect(payload.scheduling_policy).toBe('stability_first')
-    expect(payload.policies).toEqual([{ requested_model: 'gpt-5', reasoning_effort: 'high', policy: 'cost_first' }])
+    // A legacy rule without the switch is sent back explicitly enabled, which the server reads the same way.
+    expect(payload.policies).toEqual([{ requested_model: 'gpt-5', reasoning_effort: 'high', policy: 'cost_first', enabled: true }])
     expect(payload.effects_enabled).toBe(true)
     expect(payload.accounts.map(route => `${route.account_id}:${route.reasoning_effort}`)).toEqual(['12:high', '11:', '12:'])
     expect(payload.accounts.every(route => !('direct_oauth_eligible' in route))).toBe(true)
@@ -512,7 +513,8 @@ describe('ModelIntegrityTestsView target editing', () => {
     expect(edited.bps_mode).toBe('force_off')
     expect(payload.bps_auto_enabled).toBe(true)
     expect(payload.bps_accounts).toEqual(bpsAccounts)
-    expect(payload.policies).toEqual([{ requested_model: 'gpt-5', reasoning_effort: 'high', policy: 'cost_first' }])
+    // A legacy rule without the switch is sent back explicitly enabled, which the server reads the same way.
+    expect(payload.policies).toEqual([{ requested_model: 'gpt-5', reasoning_effort: 'high', policy: 'cost_first', enabled: true }])
     wrapper.unmount()
   })
 

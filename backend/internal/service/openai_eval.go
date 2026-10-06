@@ -185,6 +185,10 @@ func newOpenAIEvalSchedulingPolicySnapshot(config *OpenAIEvalConfig) (*openAIEva
 		snapshot.CustomBalance.AbsolutePriorities = append([]string(nil), config.CustomBalance.AbsolutePriorities...)
 		snapshot.Rules = append([]OpenAIEvalSchedulingPolicyRule(nil), config.Policies...)
 		for i := range snapshot.Rules {
+			if config.Policies[i].Enabled != nil {
+				enabled := *config.Policies[i].Enabled
+				snapshot.Rules[i].Enabled = &enabled
+			}
 			if snapshot.Rules[i].CustomBalance != nil {
 				weights := *snapshot.Rules[i].CustomBalance
 				weights.AbsolutePriorities = append([]string(nil), weights.AbsolutePriorities...)
@@ -224,6 +228,9 @@ func OpenAIEvalCustomBalanceForRequest(model, effort string) (OpenAIEvalPolicyWe
 	model = strings.ToLower(strings.TrimSpace(model))
 	effort = strings.ToLower(strings.TrimSpace(effort))
 	for _, rule := range snapshot.Rules {
+		if rule.Enabled != nil && !*rule.Enabled {
+			continue
+		}
 		if rule.CustomBalance == nil || !strings.EqualFold(strings.TrimSpace(rule.RequestedModel), model) {
 			continue
 		}
@@ -347,6 +354,9 @@ func OpenAIEvalSchedulingPolicyFor(config *OpenAIEvalConfig, model, effort strin
 		policy = OpenAIEvalSchedulingPolicyLegacy
 	}
 	for _, rule := range config.Policies {
+		if rule.Enabled != nil && !*rule.Enabled {
+			continue
+		}
 		if !strings.EqualFold(strings.TrimSpace(rule.RequestedModel), model) {
 			continue
 		}
@@ -617,10 +627,14 @@ type OpenAIEvalConfig struct {
 // model and, optionally, reasoning effort.  An empty effort is the model
 // default.  More specific effort rules win at read time.
 type OpenAIEvalSchedulingPolicyRule struct {
-	RequestedModel  string                   `json:"requested_model"`
-	ReasoningEffort string                   `json:"reasoning_effort,omitempty"`
-	Policy          string                   `json:"policy"`
-	CustomBalance   *OpenAIEvalPolicyWeights `json:"custom_balance,omitempty"`
+	RequestedModel  string `json:"requested_model"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	Policy          string `json:"policy"`
+	// Enabled is a pointer for backwards compatibility: omitted legacy rules
+	// retain their historical active behavior, while false explicitly disables
+	// the rule without deleting its saved configuration.
+	Enabled       *bool                    `json:"enabled,omitempty"`
+	CustomBalance *OpenAIEvalPolicyWeights `json:"custom_balance,omitempty"`
 }
 
 type OpenAIEvalProbe struct {

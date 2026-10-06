@@ -1556,3 +1556,152 @@ describe('ModelIntegritySchedulingView request records by group', () => {
     expect(wrapper.findAll('[data-testid="decision-row"]')).toHaveLength(1)
   })
 })
+
+describe('ModelIntegritySchedulingView rule switches', () => {
+  it('reads a legacy model rule without the field as enabled and saves it as enabled', async () => {
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ policies: [{ requested_model: 'gpt-5', policy: 'cost_first' }] }))
+    const wrapper = mountView()
+    await flushPromises()
+
+    const toggle = wrapper.get('[data-testid="rule-enabled"]')
+    expect(toggle.attributes('aria-checked')).toBe('true')
+    expect(toggle.attributes('aria-label')).toBe('启用 gpt-5 的规则')
+    expect(wrapper.find('[data-testid="rule-off"]').exists()).toBe(false)
+    // Reading the default does not count as an edit.
+    expect(wrapper.get('[data-testid="model-integrity-save"]').attributes('disabled')).toBeDefined()
+
+    await wrapper.get('[data-testid="rule-policy"]').setValue('stability_first')
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
+    expect(payload.policies).toEqual([{ requested_model: 'gpt-5', reasoning_effort: '', policy: 'stability_first', enabled: true }])
+  })
+
+  it('keeps a disabled model rule configured, saves enabled false, and lets an enabled copy of it coexist', async () => {
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ policies: [{ requested_model: 'gpt-5', policy: 'avoid_degradation' }] }))
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-testid="rule-enabled"]').trigger('click')
+    expect(wrapper.get('[data-testid="rule-enabled"]').attributes('aria-checked')).toBe('false')
+    expect(wrapper.get('[data-testid="rule-off"]').text()).toBe('已停用：配置保留，不参与调度。')
+    // A disabled avoid-degradation rule no longer marks its threshold row as used.
+    expect(wrapper.text()).not.toContain(zhT('admin.modelIntegrity.scheduling.policy.avoidNote'))
+
+    // An enabled rule for the same model is not a duplicate of a disabled one.
+    await wrapper.get('[data-testid="add-rule"]').trigger('click')
+    const second = wrapper.findAll('[data-testid="policy-rule"]')[1]
+    await second.find('select').setValue('gpt-5')
+    expect(wrapper.text()).not.toContain('该模型与推理强度的规则已存在')
+
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
+    expect(payload.policies).toEqual([
+      { requested_model: 'gpt-5', reasoning_effort: '', policy: 'avoid_degradation', enabled: false },
+      { requested_model: 'gpt-5', reasoning_effort: '', policy: 'stability_first', enabled: true }
+    ])
+  })
+})
+
+describe('ModelIntegritySchedulingView account priority rules', () => {
+  it('explains the order and starts empty for a config without rules', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    const section = wrapper.get('[data-testid="account-rules"]')
+    expect(section.text()).toContain('数字越小越优先')
+    expect(section.text()).toContain('未配置规则，账号按调度策略排序。')
+    await wrapper.get('[data-testid="effects-toggle"]').trigger('click')
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    expect((api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig).account_priority_rules).toEqual([])
+  })
+
+  it('adds an all-models rule and a specific-models rule and saves them', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-testid="add-account-rule"]').trigger('click')
+    await wrapper.get('[data-testid="add-account-rule"]').trigger('click')
+    const rows = () => wrapper.findAll('[data-testid="account-rule"]')
+    await rows()[0].get('[data-testid="account-rule-account"]').setValue('11')
+    await rows()[0].get('[data-testid="account-rule-priority"]').setValue('2')
+    await rows()[1].get('[data-testid="account-rule-account"]').setValue('12')
+    await rows()[1].get('[data-testid="account-rule-priority"]').setValue('1')
+    await rows()[1].get('[data-testid="account-rule-scope"]').setValue('some')
+    // No model picked yet: the row says so and the save is blocked.
+    expect(rows()[1].get('[data-testid="account-rule-error"]').text()).toBe('请至少选择一个模型。')
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    expect(api.saveOpenAIEvalConfig).not.toHaveBeenCalled()
+
+    const models = rows()[1].get('[data-testid="account-rule-models"]')
+    expect(models.get('legend').text()).toBe('适用的公开模型')
+    await models.findAll('input[type="checkbox"]')[1].setValue(true)
+    expect(rows()[1].find('[data-testid="account-rule-error"]').exists()).toBe(false)
+    expect(rows()[1].get('[data-testid="account-rule-enabled"]').attributes('aria-label')).toBe('启用 apikey-b #12 的优先规则')
+
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
+    expect(payload.account_priority_rules).toEqual([
+      { account_id: 11, priority: 2, enabled: true },
+      { account_id: 12, priority: 1, requested_models: ['gpt-5-mini'], enabled: true }
+    ])
+  })
+
+  it('reads legacy rules as enabled, keeps a disabled rule, and only flags overlaps between enabled rules', async () => {
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({
+      account_priority_rules: [
+        { account_id: 11, priority: 1 },
+        { account_id: 11, priority: 5, enabled: false },
+        { account_id: 11, priority: 3, requested_models: ['gpt-5'] }
+      ]
+    }))
+    const wrapper = mountView()
+    await flushPromises()
+
+    const rows = () => wrapper.findAll('[data-testid="account-rule"]')
+    expect(rows()).toHaveLength(3)
+    expect(rows()[0].get('[data-testid="account-rule-enabled"]').attributes('aria-checked')).toBe('true')
+    expect(rows()[1].get('[data-testid="account-rule-enabled"]').attributes('aria-checked')).toBe('false')
+    expect(rows()[1].get('[data-testid="account-rule-off"]').text()).toContain('不参与调度')
+    expect(rows()[2].get('[data-testid="account-rule-scope"]').element).toHaveProperty('value', 'some')
+    expect(wrapper.find('[data-testid="account-rule-error"]').exists()).toBe(false)
+
+    // Enabling the second all-models rule would overlap the first one.
+    await rows()[1].get('[data-testid="account-rule-enabled"]').trigger('click')
+    expect(rows()[1].get('[data-testid="account-rule-error"]').text()).toBe('该账号已有覆盖相同模型的启用规则。')
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    expect(api.saveOpenAIEvalConfig).not.toHaveBeenCalled()
+
+    // Switching the first one off resolves it; both stay in the config.
+    await rows()[0].get('[data-testid="account-rule-enabled"]').trigger('click')
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
+    expect(payload.account_priority_rules).toEqual([
+      { account_id: 11, priority: 1, enabled: false },
+      { account_id: 11, priority: 5, enabled: true },
+      { account_id: 11, priority: 3, requested_models: ['gpt-5'], enabled: true }
+    ])
+  })
+
+  it('blocks a rule without an account or with a fractional priority, and deletes a rule', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-testid="add-account-rule"]').trigger('click')
+    const row = () => wrapper.get('[data-testid="account-rule"]')
+    expect(row().get('[data-testid="account-rule-error"]').text()).toBe('请选择账号。')
+    await row().get('[data-testid="account-rule-account"]').setValue('11')
+    await row().get('[data-testid="account-rule-priority"]').setValue('1.5')
+    expect(row().get('[data-testid="account-rule-error"]').text()).toBe('优先级须为整数。')
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    expect(api.saveOpenAIEvalConfig).not.toHaveBeenCalled()
+    expect(store.showError).toHaveBeenCalledWith('优先级须为整数。')
+
+    await row().get('button[aria-label="删除账号规则"]').trigger('click')
+    expect(wrapper.find('[data-testid="account-rule"]').exists()).toBe(false)
+  })
+})

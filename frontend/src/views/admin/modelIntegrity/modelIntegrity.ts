@@ -2,6 +2,7 @@
 // They only describe what the backend already enforces; keep numbers here in
 // sync with backend/internal/service/openai_eval*.go instead of inventing them.
 import type {
+  OpenAIEvalAccountPriorityRule,
   OpenAIEvalBPSAccountConfig,
   OpenAIEvalBPSMode,
   OpenAIEvalConfig,
@@ -231,6 +232,58 @@ export function routeKey(route: Pick<OpenAIEvalRouteConfig, 'account_id' | 'requ
   return `${route.account_id}:${route.requested_model.toLowerCase()}:${(route.reasoning_effort || '').toLowerCase()}`
 }
 
+/** Rules saved before the switch existed omit it and stay in force. */
+export function isRuleEnabled(rule: { enabled?: boolean }): boolean {
+  return rule.enabled !== false
+}
+
+export function normalizeAccountPriorityRule(rule: OpenAIEvalAccountPriorityRule): OpenAIEvalAccountPriorityRule {
+  return {
+    account_id: rule.account_id,
+    priority: rule.priority,
+    requested_models: [...(rule.requested_models ?? [])],
+    enabled: isRuleEnabled(rule)
+  }
+}
+
+/** An empty model list is sent as omitted, which the server reads as every model. */
+function accountPriorityRulePayload(rule: OpenAIEvalAccountPriorityRule): OpenAIEvalAccountPriorityRule {
+  const models = (rule.requested_models ?? []).map(model => model.trim()).filter(Boolean)
+  return {
+    account_id: rule.account_id,
+    priority: rule.priority,
+    ...(models.length ? { requested_models: models } : {}),
+    enabled: isRuleEnabled(rule)
+  }
+}
+
+export type AccountPriorityRuleIssue = 'account' | 'priority' | 'models' | 'overlap'
+
+/**
+ * Mirrors the server's checks so a save is blocked where the server would
+ * reject it: an account, a whole-number priority, at least one model when
+ * models are chosen, and no two enabled rules for one account covering the
+ * same model. Like the server, the later rule of an overlapping pair is flagged.
+ */
+export function accountPriorityRuleIssues(rules: OpenAIEvalAccountPriorityRule[], pickingModels: (rule: OpenAIEvalAccountPriorityRule) => boolean): Map<number, AccountPriorityRuleIssue> {
+  const issues = new Map<number, AccountPriorityRuleIssue>()
+  const scopes = new Map<number, Set<string>>()
+  rules.forEach((rule, index) => {
+    const models = (rule.requested_models ?? []).map(model => model.trim()).filter(Boolean)
+    if (!(rule.account_id > 0)) issues.set(index, 'account')
+    else if (typeof rule.priority !== 'number' || !Number.isSafeInteger(rule.priority)) issues.set(index, 'priority')
+    else if (pickingModels(rule) && !models.length) issues.set(index, 'models')
+    if (!isRuleEnabled(rule) || !(rule.account_id > 0)) return
+    const taken = scopes.get(rule.account_id) ?? new Set<string>()
+    scopes.set(rule.account_id, taken)
+    for (const key of models.length ? models.map(model => model.toLowerCase()) : ['']) {
+      if (taken.has(key) && !issues.has(index)) issues.set(index, 'overlap')
+      taken.add(key)
+    }
+  })
+  return issues
+}
+
 /**
  * Serialises the editable part of the config. Read-only runtime fields
  * (bps_state, direct_oauth_eligible) never go back to the server, while every
@@ -250,10 +303,12 @@ export function toSavePayload(config: OpenAIEvalConfig): OpenAIEvalConfig {
     policies: (config.policies ?? []).map(rule => ({
       ...rule,
       reasoning_effort: rule.reasoning_effort || '',
+      enabled: isRuleEnabled(rule),
       ...(rule.policy === 'custom_balance'
         ? { custom_balance: customBalancePayload(rule.custom_balance ?? config.custom_balance) }
         : {})
     })),
+    account_priority_rules: (config.account_priority_rules ?? []).map(accountPriorityRulePayload),
     bps_accounts: (config.bps_accounts ?? []).map(bpsAccountPayload),
     max_request_attempts: normalizeMaxRequestAttempts(config.max_request_attempts),
     quality_refresh_interval_seconds: normalizeQualityRefreshInterval(config.quality_refresh_interval_seconds),
