@@ -22,6 +22,9 @@ type openAIRankingScope struct {
 }
 
 func (r *OpenAIEvalRankingService) discover(ctx context.Context, cfg *OpenAIEvalConfig, observed []openAIRankingObservedRoute) ([]openAIRankingScope, OpenAIEvalRankingCoverage, error) {
+	if r.gateway != nil {
+		ctx = withPrismLifecycle(ctx, r.gateway.prismAccountService)
+	}
 	coverage := OpenAIEvalRankingCoverage{Status: "complete", DiscoveryComplete: true, Reasons: []string{}}
 	groups := []Group{{Name: "Ungrouped", Platform: PlatformOpenAI, Status: StatusActive}}
 	for page := 1; ; page++ {
@@ -91,7 +94,7 @@ func (r *OpenAIEvalRankingService) discover(ctx context.Context, cfg *OpenAIEval
 	scopes := make([]openAIRankingScope, 0, len(groups))
 	for _, group := range groups {
 		scope := openAIRankingScope{group: group, models: make(map[string]map[string]bool), channel: channels[group.ID]}
-		if group.Platform != PlatformOpenAI && group.Platform != PlatformGrok && group.Platform != PlatformComposite {
+		if group.Platform != PlatformOpenAI && group.Platform != PlatformGrok && group.Platform != PlatformComposite && group.Platform != "prism" {
 			scopes = append(scopes, scope)
 			continue
 		}
@@ -139,10 +142,26 @@ func (r *OpenAIEvalRankingService) discover(ctx context.Context, cfg *OpenAIEval
 			}
 			scope.models[model][source] = true
 		}
-		for _, model := range OpenAIEvalSupportedModels() {
-			add(model.ID, "catalog")
+		if group.Platform != "prism" {
+			for _, model := range OpenAIEvalSupportedModels() {
+				add(model.ID, "catalog")
+			}
 		}
-		for _, account := range scope.accounts {
+		for index, account := range scope.accounts {
+			if account.Platform == "prism" {
+				fresh, models, err := PrismAccountCatalogSnapshot(ctx, account)
+				if err != nil {
+					coverage.DiscoveryComplete = false
+					coverage.Reasons = append(coverage.Reasons, "prism_catalog_unavailable")
+				} else {
+					account = fresh
+					scope.accounts[index] = fresh
+					for _, model := range PrismPublicModels(account, models) {
+						add(model.ID, "prism_account_catalog")
+					}
+				}
+				continue
+			}
 			for model := range account.GetModelMapping() {
 				add(model, "account_mapping")
 			}
@@ -379,7 +398,7 @@ func (r *OpenAIEvalRankingService) build(ctx context.Context, cfg *OpenAIEvalCon
 		if scope.group.ID != 0 {
 			group.GroupID = rankingPtr(scope.group.ID)
 		}
-		if scope.group.Platform != PlatformOpenAI && scope.group.Platform != PlatformGrok && scope.group.Platform != PlatformComposite {
+		if scope.group.Platform != PlatformOpenAI && scope.group.Platform != PlatformGrok && scope.group.Platform != PlatformComposite && scope.group.Platform != "prism" {
 			group.Status = "out_of_scope"
 			group.Reason = rankingPtr("platform_not_supported_by_openai_scheduler")
 		} else if scope.models == nil {

@@ -37,9 +37,16 @@ export default {
     },
     reason: {
       stateProbe: {
-        healthy: '两次请求使用同一线路。',
-        degraded: '两次请求之间线路发生切换。本次结果不改变 BPS 状态；账号的 BPS 自动切换由「调度策略」中该账号的独立探测决定。',
-        inconclusive: '本次无法判断线路是否切换。'
+        healthy: '关联请求已完成，票据未显示线路切换。',
+        degraded: '关联请求返回的票据有变化，推测线路可能已切换。本次结果不改变 BPS 状态；账号的 BPS 自动切换由「调度策略」中该账号的独立探测决定。',
+        inconclusive: '本次无法根据票据判断线路是否切换。',
+        ticket: {
+          none: '关联请求已完成，未签发新票据。',
+          same: '关联请求已完成，返回相同票据。',
+          different: '关联请求返回不同票据，推测线路可能已切换。本次结果不改变 BPS 状态；账号的 BPS 自动切换由「调度策略」中该账号的独立探测决定。'
+        },
+        mintMissingTicket: '请求已完成，但未取得首次票据，无法继续判定。',
+        legacyLinkedMissingTicket: '旧版探针结果，请重新测试。'
       },
       running: '测试进行中，请稍后刷新查看结果。',
       noDetail: '本次结果无附加说明。',
@@ -128,7 +135,7 @@ export default {
         },
         state_probe: {
           name: '状态探针',
-          what: '发送两次关联请求（先取票、再续写），检测线路是否在中途切换；失败时重新开始一条链，最多 3 条链、共 6 次请求。结果不计入降智通过率，也不改变 BPS 状态；BPS 自动切换由「调度策略」中的账号探测决定。'
+          what: '发送两次关联请求（先取票、再续写），比较上游返回的票据，推测线路是否在中途切换；票据只反映线路，不说明模型质量。失败时重新开始一条链，最多 3 条链、共 6 次请求。结果不计入降智通过率，也不改变 BPS 状态；BPS 自动切换由「调度策略」中的账号探测决定。'
         }
       },
       runNow: '立即测试',
@@ -234,9 +241,14 @@ export default {
         attributionNote: '归因基于回答行为推断，不能证明实际路由。该测试开启自动运行时，最近一次已完成的归因结论会计入降智通过率，手动或自动运行均可。ModelTrace 只要有一条有效输出即可归因，失败的请求仍保留以供排查；行为指纹需全部计划采样均有效才会归因。',
         stateProbeMetric: '两次请求状态码 {mint} / {cont}，{ticket}',
         stateProbeMetricChains: '共发送 {chains} 条链，最后一条链的状态码 {mint} / {cont}，{ticket}',
-        newTicket: '线路已切换',
-        sameTicket: '线路未变',
-        ticketUnknown: '未能判断线路是否切换',
+        newTicket: '票据有变化',
+        sameTicket: '票据未显示切换',
+        ticketUnknown: '未能根据票据判断线路是否切换',
+        ticket: {
+          none: '未签发新票据',
+          same: '返回相同票据',
+          different: '返回不同票据'
+        },
         logicalSamples: '有效样本 / 计划样本',
         physicalRequests: '上游请求（含重试）',
         expected: '预期答案',
@@ -278,6 +290,7 @@ export default {
           inChain: '第 {chain} 条链的{request}',
           completed: '已完成',
           completedNote: '请求已完成。该测试只比较线路票据，不保存回答内容。',
+          ticketMissingNote: '请求已完成，但上游未返回票据，无法发送关联请求。',
           notSent: '未发送',
           failure: '{request}失败：{error}。',
           notSentFailure: '未发送请求：{error}。'
@@ -287,6 +300,19 @@ export default {
         title: '添加测试对象',
         accounts: '账号',
         accountsHint: '支持多选，仅列出 OpenAI 账号。',
+        prismAccountsHint: '支持多选。模型与推理强度来自所选账号自身的 Prism 目录。',
+        noPrismAccounts: '没有找到 Prism 账号。',
+        source: '账号类型',
+        prismPickAccountFirst: '请先选择账号',
+        prismLoadingModels: '正在读取账号的 Prism 模型…',
+        prismCatalogLoading: '读取模型中…',
+        prismCatalogError: '模型不可用',
+        prismCatalogCount: '{count} 个模型',
+        prismCatalogFailed: '无法读取 {accounts} 的 Prism 模型。请重试，或到账号管理页刷新凭据。',
+        prismNoSharedModels: '所选账号没有共同的模型，请减少所选账号。',
+        prismNoModels: '此账号目前没有可选的 Prism 模型。请到账号管理页检查其别名与目录。',
+        prismDefaultEffort: '默认（{effort}）',
+        prismNote: 'Prism 目标可对目录中任一模型运行 Candy；Fingerprint 与 ModelTrace 仅在有版本化基线覆盖该模型时可用。状态探针与 BPS 不适用。',
         searchAccounts: '搜索账号名称或 ID',
         noAccounts: '未找到 OpenAI 账号。',
         model: '请求模型',
@@ -299,6 +325,8 @@ export default {
       },
       edit: {
         open: '编辑',
+        prismCatalogFailed: '无法读取此账号的 Prism 模型。',
+        prismNotInCatalog: '{model}（不在账号目录中）',
         title: '编辑测试对象',
         account: '账号',
         submit: '应用',
@@ -306,6 +334,18 @@ export default {
         duplicate: '该账号已有 {target} 的测试对象。',
         hint: '自动测试计划保持不变，修改只影响之后的测试。历史记录仍按原模型和推理强度保留。',
         stateProbeDefault: '状态探针会继续按账号的默认推理强度运行，自动计划不变。'
+      },
+      prism: {
+        target: 'Prism 账号。模型与推理强度以其自身目录为准。',
+        targetAlias: 'Prism 账号。此名称是 {model} 的别名，测试评估的是该模型。',
+        targetLoading: 'Prism 账号。正在读取模型目录…',
+        targetCatalogError: 'Prism 账号。无法读取模型目录，每次运行仍由服务器校验。',
+        noFingerprintBaseline: '没有版本化 Fingerprint 基线覆盖 {model}，此目标不运行该测试。',
+        stateProbeUnsupported: 'Prism 不支持 Codex 状态探针与 BPS。',
+        unsupported: 'Prism 目标不可用。',
+        noModelTraceBaseline: 'ModelTrace 题库未覆盖 {model}，此目标不运行该测试。',
+        modelTraceCoverageUnknown: '此服务器未提供 ModelTrace 题库的覆盖范围；未覆盖的模型会在发出请求前被拒绝。',
+        notInCatalog: '{model} 目前不是此账号可选的模型。编辑目标前，运行会被拒绝。'
       },
       baselineNote: '行为指纹参考样本版本 {version}。'
     },
@@ -321,9 +361,27 @@ export default {
           quality: '降智通过率',
           price: '价格',
           errors: '错误率',
-          speed: '首包延迟'
+          speed: '首包延迟',
+          load: '并发负载'
         },
         levelAria: '{factor}：{level} / 4',
+        /** 条形只表示该因素对排序的影响程度，不是后端固定的权重。 */
+        meter: {
+          legend: '条形表示各因素对排序的影响程度，不是后端的固定权重；将鼠标移到某一行上可查看它在该策略中的具体作用。',
+          aria: '{factor}：{role}',
+          system: '系统设置中的调度权重',
+          sort: '排序依据：按价格从低到高排序',
+          sort_in_tier: '同一通过率档内按价格从低到高排序',
+          gate_strict: '严格阈值（{limit}）：超过的账号向后移动一位，不参与加权',
+          gate_standard: '常规阈值（{limit}）：超过的账号向后移动一位，不参与加权',
+          gate_loose: '宽松阈值（{limit}）：超过的账号向后移动一位，不参与加权',
+          weight: '自定义权重 {share}%',
+          tier: '先按通过率分档，档位高的始终优先，价格无法抵消',
+          priority: '第 {n} 优先：在权重之前严格比较',
+          ignored: '不影响排序',
+          percent: '{value}%',
+          seconds: '{value} 秒'
+        },
         qualityMode: {
           tier: '优先比较',
           ignored: '不参考'
@@ -354,7 +412,7 @@ export default {
           },
           cost_first: {
             name: '优先低价',
-            effect: '按价格从低到高排序；真实请求的错误率或首包延迟超过本策略阈值的账号，排到其余账号之后。'
+            effect: '按价格从低到高排序；真实请求的错误率或首包延迟超过本策略阈值的账号，与后一个账号交换，向后移动一位。'
           },
           stability_first: {
             name: '优先稳定',
@@ -362,7 +420,7 @@ export default {
           },
           avoid_degradation: {
             name: '避免降智',
-            effect: '降智通过率分档始终优先，同一档内按价格排序；最高一档没有未超阈值的账号时，再依次尝试下一档。'
+            effect: '降智通过率始终优先：高一档的账号全部排在低一档之前。同一档内按价格排序，超过阈值的账号只在本档内向后移动一位，不会移到低一档之后。'
           },
           custom_balance: {
             name: '自定义平衡',
@@ -409,12 +467,12 @@ export default {
             summaryJoin: '，其次'
           }
         },
-        avoidNote: '降智通过率按测试项计算：已勾选的糖果题、行为指纹、ModelTrace 中，最近一次已完成测试的结论为通过或疑似通过的项数 ÷ 勾选项数。开启自动运行即为勾选；最新结果无论来自手动还是自动运行都计入，进行中的测试不会替代它。例如勾选两项、通过一项为 50%，勾选三项、通过一项为 33.3%。每项只看最终结论，与采样次数和重试无关。任一勾选项的最新结果缺少有效结论（没有有效输出、运行失败或取消、已过期）时，通过率为未知，既不算通过也不算降智，也不会改用更早的通过结果。「避免降智」始终先从通过率最高的一档中选择，同一档内按价格排序；该档没有未超阈值的账号或没有可用容量时，再依次尝试下一档。通过率未知的账号排在所有已评估账号之后。账号停用、模型支持、容量和续写响应的账号绑定仍实时判断。',
+        avoidNote: '降智通过率按测试项计算：已勾选的糖果题、行为指纹、ModelTrace 中，最近一次已完成测试的结论为通过或疑似通过的项数 ÷ 勾选项数。开启自动运行即为勾选；最新结果无论来自手动还是自动运行都计入，进行中的测试不会替代它。例如勾选两项、通过一项为 50%，勾选三项、通过一项为 33.3%。每项只看最终结论，与采样次数和重试无关。任一勾选项的最新结果缺少有效结论（没有有效输出、运行失败或取消、已过期）时，通过率为未知，既不算通过也不算降智，也不会改用更早的通过结果。「避免降智」始终先从通过率最高的一档中选择，同一档内按价格排序；只有该档没有账号能处理请求时，才尝试下一档。运行阈值最多让账号在本档内向后移动一位，不会让低一档排到前面。通过率未知的账号排在所有已评估账号之后。账号停用、模型支持、容量和续写响应的账号绑定仍实时判断。',
         sharedNote: '选用「系统默认」以外的策略后，已发布的顺序会取代账号优先级、系统调度权重和可迁移的会话粘性；只有续写响应等必须绑定的请求仍留在原账号。负载权重仅在「自定义平衡」下可调，其余策略使用固定权重。'
       },
       thresholds: {
         title: '运行阈值',
-        hint: '账号的真实请求错误率或首包延迟超过所用策略的阈值时，会排到两项均未超限的账号之后。账号不会被停用，能否调度仍由归属、分组和容量等条件决定。「系统默认」不使用阈值，「自定义平衡」按自身的优先顺序与权重排序，两者均不在此设置。',
+        hint: '账号的真实请求错误率或首包延迟超过所用策略的阈值时，会与后一个账号交换，向后移动一位，不会移到最后。「避免降智」下只在同一通过率档内移动。账号不会被停用，能否调度仍由归属、分组和容量等条件决定。「系统默认」不使用阈值，「自定义平衡」按自身的优先顺序与权重排序，两者均不在此设置。',
         columns: {
           errorRate: '错误率超过',
           ttft: '首包延迟超过'
@@ -424,7 +482,7 @@ export default {
         },
         inUse: '使用中',
         fieldAria: '{policy}：{field}',
-        zeroNote: '错误率设为 0% 时，样本数达标后只要出现一次失败，账号就会后移。',
+        zeroNote: '错误率设为 0% 时，样本数达标后只要出现一次失败，账号就会向后移动一位。',
         samples: {
           title: '最少真实样本数（所有策略共用）',
           min_error_samples: '计入错误率前所需的请求数',
@@ -473,7 +531,7 @@ export default {
       },
       accountRules: {
         title: '账号优先规则',
-        hint: '匹配规则的账号先于其他账号参与调度，数字越小越优先；同一优先级内按调度策略排序。同一账号的指定模型规则优先于全部模型规则。',
+        hint: '匹配规则的账号先于其他账号参与调度，数字越小越优先；同一优先级内按调度策略排序。「避免降智」下通过率分档始终在前，规则只在同一通过率档内调整顺序。同一账号的指定模型规则优先于全部模型规则。',
         empty: '未配置规则，账号按调度策略排序。',
         add: '添加账号规则',
         remove: '删除账号规则',
@@ -485,10 +543,44 @@ export default {
         someModels: '指定模型',
         models: '适用的公开模型',
         enableLabel: '启用 {account} 的优先规则',
+        condition: {
+          label: '生效条件',
+          none: '无条件',
+          metricAria: '条件指标',
+          operatorAria: '比较方式',
+          valueAria: '条件数值',
+          metrics: {
+            quality_ratio: '通过率',
+            error_rate: '错误率',
+            ttft_ms: '首包延迟',
+            price: '价格倍率',
+            load_rate: '负载率'
+          },
+          operators: {
+            gte: '大于等于',
+            gt: '大于',
+            lte: '小于等于',
+            lt: '小于',
+            eq: '等于'
+          },
+          units: {
+            percent: '%',
+            seconds: '秒',
+            multiplier: '倍'
+          },
+          ranges: {
+            percent: '0–100 之间的数字',
+            seconds: '不小于 0 的数字',
+            multiplier: '不小于 0 的数字'
+          },
+          noneNote: '规则始终生效。',
+          unknownNote: '仅在账号当前数据满足条件时生效；缺少该项数据的账号视为不满足。指定模型的规则不满足条件时，改用该账号的全部模型规则，没有则按调度策略排序。'
+        },
         errors: {
           account: '请选择账号。',
           priority: '优先级须为整数。',
           models: '请至少选择一个模型。',
+          condition: '{metric}的条件值须为{range}。',
           overlap: '该账号已有覆盖相同模型的启用规则。'
         }
       },
@@ -840,15 +932,15 @@ export default {
         modelsKnown: '{known}/{models} 个模型已知',
         compositeOf: '满分 100',
         /**
-         * 该账号排在其余账号之后的原因：其真实请求超过当前策略的运行阈值。
+         * 该账号向后移动一位的原因：其真实请求超过当前策略的运行阈值。
          * 取值见 THRESHOLD_REASONS，未识别的取值按原样显示。
          */
         threshold: {
-          label: '超出阈值后移',
+          label: '超出阈值后移一位',
           error_rate_threshold: '错误率',
           ttft_threshold: '首包延迟',
           other: '取值：{code}',
-          hint: '该账号的真实请求超过了当前策略的运行阈值，因此排在两项均未超限的账号之后。账号不会被停用，能否调度仍由归属、分组和容量等条件决定。',
+          hint: '该账号的真实请求超过了当前策略的运行阈值，因此向后移动一位；「避免降智」下仍留在本通过率档内。账号不会被停用，能否调度仍由归属、分组和容量等条件决定。',
           evidence: '由该账号的真实请求计算，不来自本次评估。'
         },
         ineligible: '评估时不可用',
@@ -905,7 +997,7 @@ export default {
           other: '服务端报告了未列出的来源，不视为实测。'
         },
         ordering: {
-          price_asc: '按价格从低到高排序；真实请求超过运行阈值的账号排在最后。',
+          price_asc: '按价格从低到高排序；真实请求超过运行阈值的账号向后移动一位。',
           score_desc: '按综合分从高到低排列，同分按账号 ID。',
           priorities_then_score: '按你设定的优先因素依次排序，某项缺少数据的账号排在该项有数据的账号之后；仍相同时按综合分从高到低，再按账号 ID。',
           quality_then_score: '先按通过率从高到低排列，未知排在所有已知之后；通过率相同时按运行分（价格、错误率、首包、负载加权）排列，再按账号 ID。',

@@ -17,9 +17,10 @@
       </button>
     </header>
 
-    <p v-if="!available" class="tt-unavailable-note">{{ t('admin.modelIntegrity.tests.onlyDirectOAuth') }}</p>
+    <p v-if="!available" class="tt-unavailable-note" data-testid="unavailable-note">{{ unavailableReason || t('admin.modelIntegrity.tests.onlyDirectOAuth') }}</p>
 
     <template v-else>
+      <p v-if="notice" class="tt-notice" data-testid="test-notice">{{ notice }}</p>
       <div class="tt-controls">
         <label class="tt-switch">
           <Toggle v-model="schedule.enabled" :aria-label="`${t(`admin.modelIntegrity.tests.types.${type}.name`)} ${t('admin.modelIntegrity.tests.auto')}`" />
@@ -154,6 +155,10 @@ const props = defineProps<{
   progress?: OpenAIEvalRun
   running: boolean
   available: boolean
+  /** Why the test cannot run for this target; defaults to the direct OAuth note. */
+  unavailableReason?: string
+  /** A caveat shown on an available test. */
+  notice?: string
   /**
    * Shared attempts-per-sample setting. State Probe reads it too, but one
    * attempt there is a whole mint/continue chain, so the server caps it at
@@ -179,7 +184,7 @@ const perRunText = computed(() => {
   if (perRunMax.value > perRun.value) return t('admin.modelIntegrity.tests.perRunRetry', { count: perRun.value, max: perRunMax.value })
   return t('admin.modelIntegrity.tests.perRun', { count: perRun.value })
 })
-const perDay = computed(() => dailyRequests(props.route, props.type, props.catalog))
+const perDay = computed(() => (props.available ? dailyRequests(props.route, props.type, props.catalog, () => true) : 0))
 const maxJitterMinutes = computed(() => Math.floor(maxScheduleJitterSeconds(schedule.value.interval_seconds) / 60))
 const customIntervalSelected = ref(!intervals.value.includes(schedule.value.interval_seconds))
 
@@ -289,6 +294,7 @@ const formatTime = (value: string) => {
 .tt-what { @apply mt-1 max-w-[62ch] text-[0.8125rem] leading-relaxed text-gray-600 dark:text-gray-400; }
 .tt-unavailable .tt-name { @apply text-gray-500 dark:text-gray-400; }
 .tt-unavailable-note { @apply text-xs text-gray-500 dark:text-gray-400; }
+.tt-notice { @apply mt-2 text-xs leading-relaxed text-gray-600 dark:text-gray-300; }
 .tt-controls { @apply flex flex-wrap items-end gap-3; }
 .tt-switch { @apply flex h-9 cursor-pointer items-center gap-2 pr-2 text-sm text-gray-700 dark:text-gray-300; }
 .tt-field { @apply flex flex-col gap-1; }

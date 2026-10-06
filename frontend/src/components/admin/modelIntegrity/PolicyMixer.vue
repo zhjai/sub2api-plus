@@ -21,47 +21,37 @@
         {{ t(`admin.modelIntegrity.scheduling.policy.options.${policyKey(policy)}.name`) }}
       </span>
       <span class="mixer-effect">{{ effectText(policy) }}</span>
-      <!-- How the policy compares two accounts, step by step: each step only
-           breaks ties of the one before it. A preset publishes a price-only
-           weight set, so percentages would describe a score the order does not
-           use; the steps are the order itself. -->
-      <span v-if="orderSteps(policy)" class="mixer-order" data-testid="mixer-order">
-        <ol class="mixer-order-list">
-          <!-- A single step is not a sequence, so custom balance shows its basis unnumbered. -->
-          <li v-for="(step, index) in orderSteps(policy)" :key="step" class="mixer-order-step" :class="{ 'mixer-order-single': orderSteps(policy)!.length === 1 }">
-            <span v-if="orderSteps(policy)!.length > 1" class="mixer-order-num" aria-hidden="true">{{ index + 1 }}</span>
-            <span
-              class="mixer-order-text"
-              :class="{ 'mixer-order-quality': step === 'quality' || step === 'priority.quality' }"
-              :data-testid="step === 'quality' ? `mixer-quality-${policyKey(policy)}` : undefined"
-            >{{ t(`admin.modelIntegrity.scheduling.policy.order.${step}`) }}</span>
-          </li>
-        </ol>
-      </span>
-      <!-- System default is the only policy still ordered by the system
-           scheduling weights, so it keeps the relative-emphasis meters. -->
-      <span v-else class="mixer-meters">
-        <span v-for="factor in FACTORS" :key="factor" class="mixer-meter">
-          <span class="mixer-meter-label">{{ t(`admin.modelIntegrity.scheduling.policy.factors.${factor}`) }}</span>
-          <!-- Only “System default” reaches these meters, and it does not read the
-               pass rate, so that factor is stated rather than metered. -->
+      <!-- Every card uses the same bars. A bar reads how strongly a factor
+           decides the order (sort key, threshold strictness, custom share),
+           never a fixed backend weight; each row's tooltip says which. Strict
+           steps and unused factors are stated in words instead of drawn. -->
+      <span class="mixer-meters" data-testid="mixer-meters">
+        <span
+          v-for="meter in metersFor(policy)"
+          :key="meter.factor"
+          class="mixer-meter"
+          :title="roleText(meter)"
+          :data-testid="`mixer-meter-${policyKey(policy)}-${meter.factor}`"
+          :data-role="meter.role"
+        >
+          <span class="mixer-meter-label">{{ t(`admin.modelIntegrity.scheduling.policy.factors.${meter.factor}`) }}</span>
           <span
-            v-if="factor === 'quality' && QUALITY_MODE[policy] !== 'weighted'"
+            v-if="TEXT_METER_ROLES.includes(meter.role)"
             class="mixer-meter-mode"
-            :class="`mixer-meter-mode-${QUALITY_MODE[policy]}`"
-            :data-testid="`mixer-quality-${policyKey(policy)}`"
-          >{{ t(`admin.modelIntegrity.scheduling.policy.qualityMode.${QUALITY_MODE[policy]}`) }}</span>
+            :class="`mixer-meter-mode-${meter.role}`"
+            :data-testid="meter.factor === 'quality' ? `mixer-quality-${policyKey(policy)}` : undefined"
+          >{{ modeText(meter) }}</span>
           <span
             v-else
             class="mixer-meter-track"
             role="img"
-            :aria-label="t('admin.modelIntegrity.scheduling.policy.levelAria', { factor: t(`admin.modelIntegrity.scheduling.policy.factors.${factor}`), level: POLICY_EMPHASIS[policy][factor] })"
+            :aria-label="t('admin.modelIntegrity.scheduling.policy.meter.aria', { factor: t(`admin.modelIntegrity.scheduling.policy.factors.${meter.factor}`), role: roleText(meter) })"
           >
             <span
               v-for="segment in 4"
               :key="segment"
               class="mixer-segment"
-              :class="segment <= POLICY_EMPHASIS[policy][factor] ? `mixer-segment-${factor}` : ''"
+              :class="segment <= meter.level ? `mixer-segment-${meter.factor}` : ''"
             />
           </span>
         </span>
@@ -72,8 +62,8 @@
 
 <script setup lang="ts">
 import { useI18n } from 'vue-i18n'
-import type { OpenAIEvalPolicyWeights, OpenAIEvalSchedulingPolicy } from '@/api/admin/accounts'
-import { POLICIES, POLICY_EMPHASIS, QUALITY_MODE, absolutePriorities, policyKey, policyOrderKeys, type PolicyFactor } from '@/views/admin/modelIntegrity/modelIntegrity'
+import type { OpenAIEvalPolicyWeights, OpenAIEvalSchedulingPolicy, OpenAIEvalSchedulingThresholds } from '@/api/admin/accounts'
+import { POLICIES, TEXT_METER_ROLES, absolutePriorities, errorRatePercentText, policyKey, policyMeters, type PolicyMeter } from '@/views/admin/modelIntegrity/modelIntegrity'
 
 const props = withDefaults(defineProps<{
   modelValue: OpenAIEvalSchedulingPolicy
@@ -82,19 +72,33 @@ const props = withDefaults(defineProps<{
   disabled?: boolean
   /** The default custom weights, so the custom balance card describes its real order. */
   customBalance?: OpenAIEvalPolicyWeights | null
-}>(), { disabled: false, customBalance: null })
+  /** The edited runtime thresholds, so preset bars follow how strict they are. */
+  thresholds?: OpenAIEvalSchedulingThresholds | null
+}>(), { disabled: false, customBalance: null, thresholds: null })
 
 const emit = defineEmits<{ (e: 'update:modelValue', value: OpenAIEvalSchedulingPolicy): void }>()
 const { t } = useI18n()
-const FACTORS: PolicyFactor[] = ['quality', 'price', 'errors', 'speed']
 
-/**
- * The comparison steps a ranking policy applies, or null for the system
- * default, which keeps the weight meters. Never derived from the published
- * weight set: those weights only build the price score the presets sort by.
- */
-function orderSteps(policy: OpenAIEvalSchedulingPolicy) {
-  return policy ? policyOrderKeys(policy, props.customBalance) : null
+function metersFor(policy: OpenAIEvalSchedulingPolicy) {
+  return policyMeters(policy, props.customBalance, props.thresholds)
+}
+
+/** The visible words for a factor that is a strict step or unused. */
+function modeText(meter: PolicyMeter) {
+  if (meter.role === 'priority') return t('admin.modelIntegrity.scheduling.policy.custom.priorities.badge', { n: meter.value })
+  return t(`admin.modelIntegrity.scheduling.policy.qualityMode.${meter.role}`)
+}
+
+/** What the bar means for this factor under this policy, as the row tooltip. */
+function roleText(meter: PolicyMeter) {
+  const key = `admin.modelIntegrity.scheduling.policy.meter.${meter.role}`
+  if (meter.role.startsWith('gate_')) {
+    const limit = meter.factor === 'errors'
+      ? t('admin.modelIntegrity.scheduling.policy.meter.percent', { value: errorRatePercentText(meter.value ?? 0) })
+      : t('admin.modelIntegrity.scheduling.policy.meter.seconds', { value: meter.value })
+    return t(key, { limit })
+  }
+  return t(key, { n: meter.value, share: meter.value })
 }
 
 /** With priorities, custom balance is no longer a pure weighted sort, so it says so. */
@@ -118,30 +122,25 @@ function effectText(policy: OpenAIEvalSchedulingPolicy) {
 .mixer-option-active .mixer-radio { @apply border-primary-600 dark:border-primary-400; box-shadow: inset 0 0 0 2px white; background: theme('colors.primary.600'); }
 :global(.dark) .mixer-option-active .mixer-radio { box-shadow: inset 0 0 0 2px theme('colors.dark.800'); }
 .mixer-effect { @apply min-h-[2.75rem] text-[0.8125rem] leading-relaxed text-gray-600 dark:text-gray-400; }
-/* The order is a sequence, so it is numbered; a later step only ties an earlier one. */
-.mixer-order { @apply mt-auto rounded-md bg-gray-50 px-2.5 py-2 dark:bg-dark-900/60; }
-.mixer-order-list { @apply grid gap-1; }
-.mixer-order-step { @apply grid grid-cols-[1rem_1fr] items-baseline gap-2 text-xs text-gray-700 dark:text-gray-300; }
-.mixer-order-single { @apply grid-cols-1; }
-.mixer-order-num { @apply text-center text-[11px] tabular-nums text-gray-400 dark:text-gray-500; }
-.mixer-order-text { @apply min-w-0; }
-/* The pass rate is a comparison step, never a weight price could trade against. */
-.mixer-order-quality { @apply font-medium text-violet-700 dark:text-violet-300; }
 .mixer-meters { @apply mt-auto grid gap-1.5 border-t border-gray-100 pt-3 dark:border-dark-700; }
 .mixer-meter { @apply grid grid-cols-[5.5rem_1fr] items-center gap-2 text-xs text-gray-500 dark:text-gray-400; }
 .mixer-meter-track { @apply grid h-2 grid-cols-4 gap-0.5; }
 .mixer-meter-mode { @apply text-xs leading-none; }
+/* The pass rate tier and custom priorities are strict steps, never a weight price could trade against. */
 .mixer-meter-mode-tier { @apply font-semibold text-violet-700 dark:text-violet-300; }
+.mixer-meter-mode-priority { @apply font-semibold text-gray-800 dark:text-gray-200; }
 .mixer-meter-mode-ignored { @apply text-gray-400 dark:text-gray-500; }
 .mixer-segment { @apply rounded-[2px] bg-gray-200 dark:bg-dark-600; }
 .mixer-segment-quality { @apply bg-violet-600 dark:bg-violet-400; }
 .mixer-segment-price { @apply bg-amber-500 dark:bg-amber-400; }
 .mixer-segment-errors { @apply bg-primary-600 dark:bg-primary-500; }
 .mixer-segment-speed { @apply bg-sky-600 dark:bg-sky-500; }
+.mixer-segment-load { @apply bg-gray-500 dark:bg-gray-400; }
 .mixer-option:not(.mixer-option-active) .mixer-segment-quality,
 .mixer-option:not(.mixer-option-active) .mixer-segment-price,
 .mixer-option:not(.mixer-option-active) .mixer-segment-errors,
-.mixer-option:not(.mixer-option-active) .mixer-segment-speed { @apply opacity-40; }
+.mixer-option:not(.mixer-option-active) .mixer-segment-speed,
+.mixer-option:not(.mixer-option-active) .mixer-segment-load { @apply opacity-40; }
 @media (prefers-reduced-motion: no-preference) {
   .mixer-segment { transition: opacity 180ms ease, background-color 180ms ease; }
 }

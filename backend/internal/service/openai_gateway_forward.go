@@ -20,6 +20,9 @@ import (
 
 // Forward forwards request to OpenAI API
 func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
+	if account != nil && account.Platform == PlatformPrism {
+		return s.forwardPrismResponses(ctx, c, account, body)
+	}
 	beginUpstreamResponseModelObservation(c)
 	setOpenAIExecContract(c, body, false)
 	ClearActualOpenAIUpstreamEndpoint(c)

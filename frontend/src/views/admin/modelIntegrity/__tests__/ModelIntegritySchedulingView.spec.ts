@@ -2,6 +2,7 @@ import { flushPromises, mount, RouterLinkStub } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { OpenAIEvalConfig } from '@/api/admin/accounts'
 import { zhT } from './zhT'
+import { evalConfigServer } from './evalConfigServer'
 
 const api = vi.hoisted(() => ({
   getOpenAIEvalModels: vi.fn(),
@@ -211,21 +212,31 @@ describe('ModelIntegritySchedulingView', () => {
     await wrapper.get('[data-testid="policy-avoid_degradation"]').setValue(true)
     expect(wrapper.text()).toContain('勾选两项、通过一项为 50%，勾选三项、通过一项为 33.3%')
     expect(wrapper.text()).toContain('从通过率最高的一档中选择')
-    expect(wrapper.text()).toContain('该档没有未超阈值的账号或没有可用容量时，再依次尝试下一档')
+    expect(wrapper.text()).toContain('只有该档没有账号能处理请求时，才尝试下一档')
+    // Runtime thresholds move an account back one position inside its tier, never to the end or across tiers.
+    expect(wrapper.text()).toContain('运行阈值最多让账号在本档内向后移动一位，不会让低一档排到前面')
+    expect(wrapper.text()).not.toMatch(/排到其余账号之后|两项均未超限的账号之后|未超阈值的账号/)
     expect(wrapper.text()).toContain('同一档内按价格排序')
     expect(wrapper.text()).toContain('账号停用、模型支持、容量和续写响应的账号绑定仍实时判断')
     expect(wrapper.text()).not.toMatch(/实际有效回答的样本数/)
     expect(wrapper.text()).not.toMatch(/仅作提醒|不参与账号排序/)
-    // The pass rate is its own comparison step, stated rather than drawn as a
-    // weight price could trade against.
-    expect(wrapper.get('[data-testid="mixer-quality-avoid_degradation"]').text()).toBe('降智通过率更高')
-    // Stability first ignores the pass rate entirely, so its order has no
-    // pass-rate step to show and cannot read as a weight of 0 %.
-    expect(wrapper.find('[data-testid="mixer-quality-stability_first"]').exists()).toBe(false)
-    // The policy cards state the order, never a stale preset percentage.
-    const orderText = wrapper.get('[data-testid="mixer-order"]').text()
-    expect(orderText).toContain('价格更低')
-    expect(orderText).not.toMatch(/%/)
+    // The pass rate is a strict tier, stated rather than drawn as a weight
+    // price could trade against; stability first does not read it at all.
+    expect(wrapper.get('[data-testid="mixer-quality-avoid_degradation"]').text()).toBe('优先比较')
+    expect(wrapper.get('[data-testid="mixer-quality-stability_first"]').text()).toBe('不参考')
+    // Every preset card uses the system default's bars, never a stale percentage.
+    const meter = (policy: string, factor: string) => wrapper.get(`[data-testid="mixer-meter-${policy}-${factor}"]`)
+    const filled = (policy: string, factor: string) => meter(policy, factor).findAll(`.mixer-segment-${factor}`).length
+    expect(filled('cost_first', 'price')).toBe(4)
+    expect(meter('cost_first', 'price').attributes('title')).toContain('按价格从低到高排序')
+    expect(filled('avoid_degradation', 'price')).toBe(3)
+    expect(meter('avoid_degradation', 'price').attributes('title')).toContain('同一通过率档内')
+    // Stability differs by stricter thresholds, not by a weighted error score.
+    expect(filled('stability_first', 'errors')).toBeGreaterThan(filled('cost_first', 'errors'))
+    expect(meter('stability_first', 'errors').attributes('title')).toBe('严格阈值（5%）：超过的账号向后移动一位，不参与加权')
+    expect(meter('cost_first', 'speed').attributes('title')).toBe('常规阈值（15 秒）：超过的账号向后移动一位，不参与加权')
+    expect(wrapper.get('[data-testid="mixer-meters"]').text()).not.toMatch(/%/)
+    expect(wrapper.get('[data-testid="mixer-legend"]').text()).toContain('不是后端的固定权重')
     await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
     await flushPromises()
 
@@ -240,18 +251,16 @@ describe('ModelIntegritySchedulingView', () => {
     expect(payload).not.toHaveProperty('quality_refreshed_at')
   })
 
-  it('describes custom balance as weighted factors, without a threshold step', async () => {
+  it('describes custom balance by its weight shares, without a threshold gate', async () => {
     const wrapper = mountView()
     await flushPromises()
 
     // rankingThresholdReasons returns nil for custom balance, so nothing is
-    // screened out by a threshold: the card must show the weighted order alone.
+    // screened out by a threshold: the card shows the custom shares alone.
     const card = wrapper.findAll('.mixer-option').find(option => (option.find('input').element as HTMLInputElement).value === 'custom_balance')!
-    const steps = card.findAll('.mixer-order-step')
-    expect(steps.map(step => step.find('.mixer-order-text').text())).toEqual(['自定义加权分更高'])
-    expect(card.find('[data-testid="mixer-order"]').text()).not.toContain('未超运行阈值')
-    // One step is not a sequence, so it carries no step number.
-    expect(card.find('.mixer-order-num').exists()).toBe(false)
+    const roles = card.findAll('.mixer-meter').map(row => row.attributes('data-role'))
+    expect(roles.every(role => role === 'weight' || role === 'ignored')).toBe(true)
+    expect(card.findAll('.mixer-meter').map(row => row.attributes('title')).join()).not.toContain('阈值')
     // The factors that decide that score are the ones the page lets admins set.
     expect(card.text()).toContain('按自定义的价格、错误率、首包延迟、负载与降智通过率权重排序')
     expect(card.text()).toContain('不应用运行阈值')
@@ -273,7 +282,9 @@ describe('ModelIntegritySchedulingView', () => {
     // A prioritized factor may weigh 0 %; that is not the all-zero error.
     expect(editor.find('[data-testid="weights-error"]').exists()).toBe(false)
     expect(editor.get('[data-testid="weight-rank-cost"]').text()).toBe('第 1 优先')
-    expect(card().findAll('.mixer-order-text').map(step => step.text())).toEqual(['价格更低', '仍相同时，自定义加权分更高'])
+    // A priority is a strict step, so it is named rather than drawn as a share.
+    expect(card().get('[data-testid="mixer-meter-custom_balance-price"]').text()).toContain('第 1 优先')
+    expect(card().get('[data-testid="mixer-meter-custom_balance-errors"]').attributes('title')).toBe('自定义权重 50%')
     expect(card().text()).toContain('先按你设定的优先因素逐项严格比较')
     expect(card().text()).not.toContain('按自定义的价格、错误率、首包延迟、负载与降智通过率权重排序')
 
@@ -288,7 +299,8 @@ describe('ModelIntegritySchedulingView', () => {
 
     await editor.get('[data-testid="priority-up-error_rate"]').trigger('click')
     expect(rows()).toEqual([expect.stringContaining('错误率更低'), expect.stringContaining('价格更低')])
-    expect(card().findAll('.mixer-order-text').map(step => step.text())).toEqual(['错误率更低', '价格更低', '仍相同时，自定义加权分更高'])
+    expect(card().get('[data-testid="mixer-meter-custom_balance-errors"]').text()).toContain('第 1 优先')
+    expect(card().get('[data-testid="mixer-meter-custom_balance-price"]').text()).toContain('第 2 优先')
 
     await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
     await flushPromises()
@@ -328,7 +340,8 @@ describe('ModelIntegritySchedulingView', () => {
     expect(editor.find('[data-testid="weights-error"]').exists()).toBe(false)
     expect(editor.get('[data-testid="weight-cost"]').attributes('aria-invalid')).toBeUndefined()
     expect(editor.get('[data-testid="priority-then"]').text()).toBe('所有权重均为 0%，之后仍相同时按账号 ID 排序。')
-    expect(card().findAll('.mixer-order-text').map(step => step.text())).toEqual(['价格更低', '仍相同时，按账号 ID 排序'])
+    expect(card().get('[data-testid="mixer-meter-custom_balance-price"]').text()).toContain('第 1 优先')
+    expect(card().get('[data-testid="mixer-meter-custom_balance-errors"]').attributes('data-role')).toBe('ignored')
 
     await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
     await flushPromises()
@@ -414,6 +427,22 @@ describe('ModelIntegritySchedulingView', () => {
     expect(wrapper.get('[data-testid="bps-mode-auto"]').exists()).toBe(true)
     expect(wrapper.get('[data-testid="bps-mode-force_off"]').exists()).toBe(true)
     expect(wrapper.get('[data-testid="bps-mode-force_on"]').exists()).toBe(true)
+  })
+
+  it('never offers a Prism account as a BPS route', async () => {
+    api.list.mockImplementation(async (_page: number, _size: number, filters: { platform: string }) => ({
+      items: filters.platform === 'prism'
+        ? [{ id: 31, name: 'prism-one', platform: 'prism', type: 'oauth' }]
+        : [{ id: 11, name: 'oauth-a', platform: 'openai', type: 'oauth' }]
+    }))
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ bps_accounts: [] }))
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('[data-testid="bps-add"]').trigger('click')
+    await flushPromises()
+    const options = wrapper.findAll('[data-testid="bps-account"] option').map(option => option.text())
+    expect(options.some(text => text.includes('oauth-a'))).toBe(true)
+    expect(options.some(text => text.includes('prism-one'))).toBe(false)
   })
 
   it('uses the shared interval presets and preserves a custom BPS interval', async () => {
@@ -1649,8 +1678,8 @@ describe('ModelIntegritySchedulingView account priority rules', () => {
     await flushPromises()
     const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
     expect(payload.account_priority_rules).toEqual([
-      { account_id: 11, priority: 2, enabled: true },
-      { account_id: 12, priority: 1, requested_models: ['gpt-5-mini'], enabled: true }
+      { account_id: 11, priority: 2, enabled: true, condition: null },
+      { account_id: 12, priority: 1, requested_models: ['gpt-5-mini'], enabled: true, condition: null }
     ])
   })
 
@@ -1685,9 +1714,9 @@ describe('ModelIntegritySchedulingView account priority rules', () => {
     await flushPromises()
     const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
     expect(payload.account_priority_rules).toEqual([
-      { account_id: 11, priority: 1, enabled: false },
-      { account_id: 11, priority: 5, enabled: true },
-      { account_id: 11, priority: 3, requested_models: ['gpt-5'], enabled: true }
+      { account_id: 11, priority: 1, enabled: false, condition: null },
+      { account_id: 11, priority: 5, enabled: true, condition: null },
+      { account_id: 11, priority: 3, requested_models: ['gpt-5'], enabled: true, condition: null }
     ])
   })
 
@@ -1707,5 +1736,109 @@ describe('ModelIntegritySchedulingView account priority rules', () => {
 
     await row().get('button[aria-label="删除账号规则"]').trigger('click')
     expect(wrapper.find('[data-testid="account-rule"]').exists()).toBe(false)
+  })
+
+  it('edits a rule condition as metric, comparison and value boxes, and saves it in storage units', async () => {
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({
+      account_priority_rules: [
+        { account_id: 11, priority: 1, condition: { metric: 'error_rate', operator: 'lt', threshold: 0.05 } },
+        { account_id: 12, priority: 2, enabled: false, condition: { metric: 'quality_ratio', operator: 'gte', threshold: 1 } }
+      ]
+    }))
+    const wrapper = mountView()
+    await flushPromises()
+    const rows = () => wrapper.findAll('[data-testid="account-rule"]')
+    const field = (index: number, name: string) => rows()[index].get(`[data-testid="account-rule-condition-${name}"]`)
+
+    // Rates show as percent: [错误率] [小于] [5 %].
+    expect((field(0, 'metric').element as HTMLSelectElement).value).toBe('error_rate')
+    expect((field(0, 'operator').element as HTMLSelectElement).value).toBe('lt')
+    expect((field(0, 'value').element as HTMLInputElement).value).toBe('5')
+    expect(rows()[0].get('[data-testid="account-rule-condition"]').text()).toContain('缺少该项数据的账号视为不满足')
+    expect((field(1, 'value').element as HTMLInputElement).value).toBe('100')
+
+    // A blank value is not read as 0: the row is flagged and the save blocked.
+    await field(0, 'value').setValue('')
+    expect(rows()[0].get('[data-testid="account-rule-error"]').text()).toBe('错误率的条件值须为0–100 之间的数字。')
+    expect(field(0, 'value').attributes('aria-invalid')).toBe('true')
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    expect(api.saveOpenAIEvalConfig).not.toHaveBeenCalled()
+    expect(store.showError).toHaveBeenCalledWith('错误率的条件值须为0–100 之间的数字。')
+
+    await field(0, 'value').setValue('3')
+    await field(0, 'operator').setValue('lte')
+    expect(rows()[0].find('[data-testid="account-rule-error"]').exists()).toBe(false)
+
+    // First-token latency is typed in seconds and stored in milliseconds.
+    await field(1, 'metric').setValue('ttft_ms')
+    expect((field(1, 'operator').element as HTMLSelectElement).value).toBe('lte')
+    await field(1, 'value').setValue('2.5')
+
+    // A new rule starts unconditional; picking 无条件 again clears a condition.
+    await wrapper.get('[data-testid="add-account-rule"]').trigger('click')
+    await rows()[2].get('[data-testid="account-rule-account"]').setValue('11')
+    await rows()[2].get('[data-testid="account-rule-scope"]').setValue('some')
+    await rows()[2].get('[data-testid="account-rule-models"]').findAll('input[type="checkbox"]')[0].setValue(true)
+    expect(rows()[2].find('[data-testid="account-rule-condition-operator"]').exists()).toBe(false)
+    await field(2, 'metric').setValue('price')
+    await field(2, 'metric').setValue('')
+    expect(rows()[2].find('[data-testid="account-rule-condition-value"]').exists()).toBe(false)
+
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
+    expect(payload.account_priority_rules).toEqual([
+      { account_id: 11, priority: 1, enabled: true, condition: { metric: 'error_rate', operator: 'lte', threshold: 0.03 } },
+      { account_id: 12, priority: 2, enabled: false, condition: { metric: 'ttft_ms', operator: 'lte', threshold: 2500 } },
+      { account_id: 11, priority: 1, requested_models: ['gpt-5'], enabled: true, condition: null }
+    ])
+  })
+
+  it('clears a saved condition with 无条件, and it stays cleared after the server merges, saves and reloads', async () => {
+    const server = evalConfigServer(serverConfig({
+      account_priority_rules: [
+        { account_id: 11, priority: 1, enabled: true, condition: { metric: 'error_rate', operator: 'lt', threshold: 0.05 } },
+        { account_id: 12, priority: 2, requested_models: ['gpt-5'], enabled: true, condition: { metric: 'quality_ratio', operator: 'gte', threshold: 1 } }
+      ]
+    }))
+    api.getOpenAIEvalConfig.mockImplementation(server.read)
+    api.saveOpenAIEvalConfig.mockImplementation(server.save)
+    const wrapper = mountView()
+    await flushPromises()
+    const rows = () => wrapper.findAll('[data-testid="account-rule"]')
+    const metric = (index: number) => rows()[index].get('[data-testid="account-rule-condition-metric"]')
+
+    await metric(0).setValue('')
+    expect(rows()[0].find('[data-testid="account-rule-condition-value"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+
+    // The wire payload states the clear; omitting it would make the server keep the old condition.
+    const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
+    expect(payload.account_priority_rules![0]).toHaveProperty('condition', null)
+    expect(server.stored().account_priority_rules![0]).not.toHaveProperty('condition')
+    // The untouched rule keeps its condition.
+    expect(server.stored().account_priority_rules![1].condition).toEqual({ metric: 'quality_ratio', operator: 'gte', threshold: 1 })
+
+    // The page re-reads after saving, and a fresh visit to the page shows the same.
+    expect((metric(0).element as HTMLSelectElement).value).toBe('')
+    expect((metric(1).element as HTMLSelectElement).value).toBe('quality_ratio')
+    wrapper.unmount()
+    const reopened = mountView()
+    await flushPromises()
+    const reopenedRows = () => reopened.findAll('[data-testid="account-rule"]')
+    expect((reopenedRows()[0].get('[data-testid="account-rule-condition-metric"]').element as HTMLSelectElement).value).toBe('')
+    expect(reopenedRows()[0].find('[data-testid="account-rule-condition-operator"]').exists()).toBe(false)
+    expect((reopenedRows()[1].get('[data-testid="account-rule-condition-value"]').element as HTMLInputElement).value).toBe('100')
+
+    // A second save sends the clear again, and nothing comes back.
+    await reopened.get('[data-testid="policy-cost_first"]').setValue(true)
+    await reopened.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    expect(api.saveOpenAIEvalConfig).toHaveBeenCalledTimes(2)
+    expect((api.saveOpenAIEvalConfig.mock.calls[1][0] as OpenAIEvalConfig).account_priority_rules![0]).toHaveProperty('condition', null)
+    expect(server.stored().account_priority_rules![0]).not.toHaveProperty('condition')
+    expect(server.stored().account_priority_rules![1].condition).toEqual({ metric: 'quality_ratio', operator: 'gte', threshold: 1 })
+    reopened.unmount()
   })
 })

@@ -17,6 +17,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/typesafe"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 )
 
@@ -109,12 +110,26 @@ func (s *adminServiceImpl) GetGroupModelsListCandidates(ctx context.Context, id 
 	for _, model := range candidates {
 		seen[model] = struct{}{}
 	}
+	prismLifecycle := NewPrismAccountService(s)
 	for _, acc := range accounts {
 		if platform == PlatformComposite {
 			if !isConcreteRequestPlatform(acc.Platform) {
 				continue
 			}
 		} else if acc.Platform != platform {
+			continue
+		}
+		if acc.Platform == PlatformPrism {
+			catalog, catalogErr := prismLifecycle.Catalog(ctx, acc.ID, false)
+			if catalogErr != nil {
+				continue
+			}
+			for _, model := range PrismPublicModels(&acc, catalog) {
+				if _, ok := seen[model.ID]; !ok {
+					seen[model.ID] = struct{}{}
+					candidates = append(candidates, model.ID)
+				}
+			}
 			continue
 		}
 		for model := range acc.GetModelMapping() {
@@ -296,6 +311,10 @@ func defaultModelsListCandidateIDs(platform string) []string {
 		return xai.DefaultModelIDs()
 	case PlatformOpenCodeGo:
 		return DefaultOpenCodeGoModelIDs()
+	case PlatformTypeSafe:
+		return []string{typesafe.JevLatestModel}
+	case PlatformPrism:
+		return nil // Only account-scoped live entitlements may advertise Prism models.
 	case PlatformComposite:
 		return compositeDefaultModelsListCandidateIDs()
 	default:
@@ -316,6 +335,9 @@ func defaultAllowImageGenerationForPlatform(platform string) bool {
 func compositeDefaultModelsListCandidateIDs() []string {
 	seen := make(map[string]struct{})
 	ids := make([]string, 0)
+	// TypeSafe stays out of the static composite candidates (jev-latest only works
+	// through /v1/systemone); groups with TypeSafe accounts still get it from the
+	// account model mappings collected by GetGroupModelsListCandidates.
 	for _, platform := range []string{PlatformAnthropic, PlatformGemini, PlatformOpenAI, PlatformAntigravity, PlatformGrok, PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax, PlatformOpenCodeGo} {
 		for _, id := range defaultModelsListCandidateIDs(platform) {
 			if _, ok := seen[id]; ok {
@@ -341,6 +363,7 @@ func groupSupportsOAuthOnlyFilter(platform string) bool {
 		platform == PlatformAnthropic ||
 		platform == PlatformGemini ||
 		platform == PlatformGrok ||
+		platform == PlatformPrism ||
 		platform == PlatformComposite
 }
 

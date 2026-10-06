@@ -69,21 +69,23 @@ var openAIAdvancedSchedulerSettingCache atomic.Value // *cachedOpenAIAdvancedSch
 var openAIAdvancedSchedulerSettingSF singleflight.Group
 
 type OpenAIAccountScheduleRequest struct {
-	accountPriorityIndex     map[int64]openAIEvalAccountPriorityIndex
-	accountPriorityResolved  bool
-	accountPriorityActive    bool
-	accountPriorityPool      []Account
-	rankingDecision          *OpenAIAccountScheduleDecision
-	rankingCandidateAccounts []Account
-	GroupID                  *int64
-	Platform                 string
-	SessionHash              string
-	StickyAccountID          int64
-	GuardianParentAccountID  int64
-	StickyPreviousAccountID  int64
-	StickyWeighted           bool
-	SubscriptionPriority     bool
-	PreserveStickyBinding    bool
+	accountPriorityIndex              map[int64]openAIEvalAccountPriorityIndex
+	accountPriorityResolved           bool
+	accountPriorityActive             bool
+	accountPriorityPool               []Account
+	accountPriorityResolutionFallback string
+	priorityConditionEvidence         bool
+	rankingDecision                   *OpenAIAccountScheduleDecision
+	rankingCandidateAccounts          []Account
+	GroupID                           *int64
+	Platform                          string
+	SessionHash                       string
+	StickyAccountID                   int64
+	GuardianParentAccountID           int64
+	StickyPreviousAccountID           int64
+	StickyWeighted                    bool
+	SubscriptionPriority              bool
+	PreserveStickyBinding             bool
 	// DisableStickyEscape keeps task-owner lookups on their account even when
 	// generic sticky health or concurrency heuristics would prefer another.
 	DisableStickyEscape     bool
@@ -894,6 +896,13 @@ func (s *defaultOpenAIAccountScheduler) Select(
 				decision.ReasonText = "no eligible account"
 			}
 		}
+		if req.accountPriorityResolutionFallback != "" {
+			decision.RankingFallbackReason = rankingPtr(req.accountPriorityResolutionFallback)
+			if err == nil && decision.Layer == openAIAccountScheduleLayerLoadBalance && !req.RouteMigrationActive && !openAIAccountPriorityRulesActive(req) {
+				decision.ReasonCode = "account_priority_condition_fallback"
+				decision.ReasonText = "Account priority conditions were skipped because their live evidence was unavailable; ordinary scheduling continued."
+			}
+		}
 		// Waiting/admission and owner/migration reasons are authoritative. Do not
 		// let the generic ranked reason overwrite them in the trace.
 		if decision.WaitPlan {
@@ -994,7 +1003,10 @@ func (s *defaultOpenAIAccountScheduler) Select(
 	}()
 
 	previousResponseID := strings.TrimSpace(req.PreviousResponseID)
-	if previousResponseID != "" && NormalizeOpenAICompatiblePlatform(req.Platform) == PlatformOpenAI &&
+	if NormalizeOpenAICompatiblePlatform(req.Platform) == PlatformPrism && previousResponseID != "" {
+		req.PreviousResponseCanMove = false
+	}
+	if previousResponseID != "" && (NormalizeOpenAICompatiblePlatform(req.Platform) == PlatformOpenAI || NormalizeOpenAICompatiblePlatform(req.Platform) == PlatformPrism) &&
 		((!openAIRankedPolicyEnabled(req) && !openAIAccountPriorityRulesActive(req)) || !req.PreviousResponseCanMove || req.DisableStickyEscape) &&
 		((!req.RouteMigrationActive && !req.StickyWeighted) || !req.PreviousResponseCanMove) {
 		selection, err := s.service.selectAccountByPreviousResponseIDForCapability(
@@ -1046,7 +1058,7 @@ func (s *defaultOpenAIAccountScheduler) Select(
 
 	// A required response owner is a hard boundary, not session affinity.
 	// Reject its failed selection before trying any unrelated sticky account.
-	if NormalizeOpenAICompatiblePlatform(req.Platform) == PlatformOpenAI && req.RequiredCapability != OpenAIEndpointCapabilityEmbeddings && previousResponseID != "" && !req.PreviousResponseCanMove {
+	if (NormalizeOpenAICompatiblePlatform(req.Platform) == PlatformOpenAI || NormalizeOpenAICompatiblePlatform(req.Platform) == PlatformPrism) && req.RequiredCapability != OpenAIEndpointCapabilityEmbeddings && previousResponseID != "" && !req.PreviousResponseCanMove {
 		decision.RankingBasis = "owner"
 		return nil, decision, noAvailableOpenAISelectionError(req.RequestedModel, false, "required_owner_unavailable")
 	}
@@ -2823,6 +2835,9 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 	if account == nil {
 		return false, "account_nil"
 	}
+	if account.Platform == PlatformPrism && PrismAccountModelEligibility(ctx, account, req.RequestedModel, req.RequestedReasoningEffort) != nil {
+		return false, "prism_model_or_effort_unavailable"
+	}
 	if source, ok := CompositeRouteSourceFromContext(ctx); ok && source == CompositeRouteSourceAccount {
 		if publicModel, modelOK := RequestedPublicModelFromContext(ctx); modelOK && !explicitModelMappingClaims(*account, publicModel) {
 			return false, "account_model_not_owned"
@@ -2865,7 +2880,7 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 	}) {
 		return false, "shadow_parent_unhealthy"
 	}
-	if req.RequestedModel != "" && !account.IsModelSupported(req.RequestedModel) {
+	if account.Platform != PlatformPrism && req.RequestedModel != "" && !account.IsModelSupported(req.RequestedModel) {
 		return false, "model_not_supported"
 	}
 	if req.GroupID != nil && s != nil && s.service != nil &&
@@ -3310,6 +3325,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	useUpstreamTokenCost bool,
 ) (selected *AccountSelectionResult, finalDecision OpenAIAccountScheduleDecision, selectErr error) {
 	ctx = s.withOpenAIQuotaAutoPauseContext(ctx)
+	ctx = withPrismLifecycle(ctx, s.prismAccountService)
 	ctx = s.withOpenAIGroupPrivacyRequirement(ctx, groupID)
 	// 分组利润控制：唯一文本调度入口的防御性装门。handler 文本
 	// 入口已在请求开始经 WithOpenAIRequestPricingContext 装门并固定 pricingAt，
@@ -3321,6 +3337,9 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 		ctx = s.withOpenAIProfitControlGate(ctx, groupID)
 	}
 	platform = NormalizeOpenAICompatiblePlatform(platform)
+	if platform == PlatformPrism && strings.TrimSpace(previousResponseID) != "" {
+		previousResponseCanMove = false
+	}
 	clientRequestedModel := OpenAIClientRequestedModelFromContext(ctx)
 	if strings.TrimSpace(clientRequestedModel) == "" {
 		clientRequestedModel = requestedModel
@@ -3367,7 +3386,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	}
 	if scheduler == nil {
 		_, migrating := OpenAIRouteMigrationFromContext(ctx)
-		requiresOwner := platform == PlatformOpenAI && requiredCapability != OpenAIEndpointCapabilityEmbeddings && strings.TrimSpace(previousResponseID) != "" && !previousResponseCanMove
+		requiresOwner := (platform == PlatformOpenAI || platform == PlatformPrism) && requiredCapability != OpenAIEndpointCapabilityEmbeddings && strings.TrimSpace(previousResponseID) != "" && (!previousResponseCanMove || platform == PlatformPrism)
 		if migrating || decision.SchedulingPolicy != "" || priorityRulesActive || requiresOwner {
 			scheduler = s.persistentOpenAIAccountScheduler()
 		}
@@ -3550,32 +3569,33 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	}
 
 	return scheduler.Select(ctx, OpenAIAccountScheduleRequest{
-		accountPriorityIndex:     priorityReq.accountPriorityIndex,
-		accountPriorityResolved:  priorityReq.accountPriorityResolved,
-		accountPriorityActive:    priorityReq.accountPriorityActive,
-		accountPriorityPool:      priorityReq.accountPriorityPool,
-		GroupID:                  groupID,
-		Platform:                 platform,
-		SessionHash:              sessionHash,
-		StickyAccountID:          stickyAccountID,
-		GuardianParentAccountID:  guardianParentAccountID,
-		StickyPreviousAccountID:  stickyPreviousAccountID,
-		StickyWeighted:           stickyWeighted,
-		SubscriptionPriority:     subscriptionPriority,
-		PreserveStickyBinding:    preserveGuardianParentBinding,
-		RequirePrivacySet:        s.openAIGroupRequiresPrivacySet(ctx, groupID),
-		PreviousResponseID:       previousResponseID,
-		PreviousResponseCanMove:  previousResponseCanMove,
-		UseUpstreamTokenCost:     useUpstreamTokenCost,
-		RequestedModel:           requestedModel,
-		ClientRequestedModel:     clientRequestedModel,
-		RequestedReasoningEffort: requestedReasoningEffort,
-		SchedulingPolicy:         decision.SchedulingPolicy,
-		RequiredTransport:        requiredTransport,
-		RequiredCapability:       requiredCapability,
-		RequiredImageCapability:  requiredImageCapability,
-		RequireCompact:           requireCompact,
-		ExcludedIDs:              excludedIDs,
+		accountPriorityIndex:              priorityReq.accountPriorityIndex,
+		accountPriorityResolved:           priorityReq.accountPriorityResolved,
+		accountPriorityActive:             priorityReq.accountPriorityActive,
+		accountPriorityPool:               priorityReq.accountPriorityPool,
+		accountPriorityResolutionFallback: priorityReq.accountPriorityResolutionFallback,
+		GroupID:                           groupID,
+		Platform:                          platform,
+		SessionHash:                       sessionHash,
+		StickyAccountID:                   stickyAccountID,
+		GuardianParentAccountID:           guardianParentAccountID,
+		StickyPreviousAccountID:           stickyPreviousAccountID,
+		StickyWeighted:                    stickyWeighted,
+		SubscriptionPriority:              subscriptionPriority,
+		PreserveStickyBinding:             preserveGuardianParentBinding,
+		RequirePrivacySet:                 s.openAIGroupRequiresPrivacySet(ctx, groupID),
+		PreviousResponseID:                previousResponseID,
+		PreviousResponseCanMove:           previousResponseCanMove,
+		UseUpstreamTokenCost:              useUpstreamTokenCost,
+		RequestedModel:                    requestedModel,
+		ClientRequestedModel:              clientRequestedModel,
+		RequestedReasoningEffort:          requestedReasoningEffort,
+		SchedulingPolicy:                  decision.SchedulingPolicy,
+		RequiredTransport:                 requiredTransport,
+		RequiredCapability:                requiredCapability,
+		RequiredImageCapability:           requiredImageCapability,
+		RequireCompact:                    requireCompact,
+		ExcludedIDs:                       excludedIDs,
 	})
 }
 

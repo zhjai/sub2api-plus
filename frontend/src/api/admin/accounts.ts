@@ -230,6 +230,21 @@ export interface OpenAIEvalSchedulingPolicyRule {
  * Admits matching accounts before all others, lowest priority number first;
  * the scheduling policy orders accounts within one priority.
  */
+export type OpenAIEvalAccountRuleConditionMetric = 'quality_ratio' | 'error_rate' | 'ttft_ms' | 'price' | 'load_rate'
+export type OpenAIEvalAccountRuleConditionOperator = 'gte' | 'gt' | 'lte' | 'lt' | 'eq'
+
+/**
+ * When an account priority rule applies. Rates (quality_ratio, error_rate)
+ * are 0–1, load_rate is 0–100, ttft_ms is milliseconds and price is the
+ * account's actual rate multiplier. An account without data for the metric
+ * does not match.
+ */
+export interface OpenAIEvalAccountRuleCondition {
+  metric: OpenAIEvalAccountRuleConditionMetric
+  operator: OpenAIEvalAccountRuleConditionOperator
+  threshold: number
+}
+
 export interface OpenAIEvalAccountPriorityRule {
   account_id: number
   priority: number
@@ -237,11 +252,19 @@ export interface OpenAIEvalAccountPriorityRule {
   requested_models?: string[]
   /** Omitted means enabled. A disabled rule is kept but not applied. */
   enabled?: boolean
+  /**
+   * Omitted or null means unconditional. A model-specific rule whose condition
+   * does not match falls back to the account's all-models rule, if any.
+   */
+  condition?: OpenAIEvalAccountRuleCondition | null
 }
 
 /**
- * Runtime limits of one ranking policy. An account whose real requests exceed
- * either one is moved behind the accounts within both; it is never disabled.
+ * Runtime limits of one ranking policy. After the policy's base order, an
+ * account whose real requests exceed either one swaps with the next account
+ * (at most one position). Under avoid_degradation it never crosses into a
+ * lower pass-rate tier. It is never disabled; custom balance and the system
+ * default apply no runtime threshold.
  */
 export interface OpenAIEvalPolicyThreshold {
   /** Ratio 0–1 inclusive. 0 is a real setting: any failure counts. */
@@ -452,6 +475,10 @@ export interface OpenAIStateProbeResult {
   request_count: number
   mint_status?: number
   continue_status?: number
+  /** Length of the first request's ticket in the last chain; omitted when 0. The ticket itself is never returned. */
+  ticket_length?: number
+  /** Length of the ticket the linked request returned in the last chain; omitted when 0 (none issued). */
+  continue_ticket_length?: number
   new_ticket: boolean
   reported_model?: string
   latency_ms: number
@@ -485,7 +512,8 @@ export interface OpenAIEvalModelCatalog {
   evaluation_notice: string
   reasoning_efforts: string[]
   fingerprint_modes: Array<{ id: string; samples: number }>
-  modeltrace: { requests: number; bank_revision: string; candidate_count: number; scheduling: string }
+  /** `models`: baseline-covered actual model IDs; absent on older servers. */
+  modeltrace: { requests: number; bank_revision: string; candidate_count: number; scheduling: string; models?: string[] }
 }
 
 // ---------------------------------------------------------------------------
@@ -583,8 +611,8 @@ export interface OpenAIEvalRankedAccount {
    * Runtime thresholds of the policy in force that this account's own real
    * requests exceeded, as computed at evaluation time: 'error_rate_threshold',
    * 'ttft_threshold', or a code a newer server adds. It is a soft ordering
-   * exception — the account moves behind the accounts within both thresholds —
-   * and never an exclusion. Absent for the system default policy, which uses
+   * exception — the account moves back one position, within its pass-rate
+   * tier under avoid_degradation — and never an exclusion. Absent for the system default policy, which uses
    * no thresholds, and for custom balance, which is ordered by its weights.
    */
   threshold_reasons?: string[]

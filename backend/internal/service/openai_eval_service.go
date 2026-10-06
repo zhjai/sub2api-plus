@@ -247,7 +247,7 @@ func (s *OpenAIEvalService) SaveConfig(ctx context.Context, config *OpenAIEvalCo
 	}
 	for i := range config.Policies {
 		rule := &config.Policies[i]
-		if strings.TrimSpace(rule.RequestedModel) == "" || !isOpenAIEvalSupportedModel(rule.RequestedModel) {
+		if strings.TrimSpace(rule.RequestedModel) == "" || len(rule.RequestedModel) > 200 || strings.ContainsAny(rule.RequestedModel, "\x00\r\n\t") {
 			return fmt.Errorf("invalid scheduling policy rule at index %d", i)
 		}
 		if rule.ReasoningEffort != "" && !isAllowedOpenAIEvalReasoningEffort(rule.ReasoningEffort) {
@@ -279,10 +279,14 @@ func (s *OpenAIEvalService) SaveConfig(ctx context.Context, config *OpenAIEvalCo
 		item.DirectOAuthEligible = false // derived from the current account, never persisted
 		item.BPSMode = normalizeOpenAIEvalBPSMode(item.BPSMode, item.BPSAuto)
 		item.BPSAuto = item.BPSMode == OpenAIEvalBPSModeAuto
-		if item.AccountID <= 0 || !isOpenAIEvalSupportedModel(item.RequestedModel) {
+		prismRoute, prismErr := s.validatePrismEvalRoute(ctx, item.AccountID, item.RequestedModel, item.ReasoningEffort)
+		if prismErr != nil {
+			return fmt.Errorf("Prism evaluation route %d: %w", i, prismErr)
+		}
+		if item.AccountID <= 0 || (!prismRoute && !isOpenAIEvalSupportedModel(item.RequestedModel)) {
 			return fmt.Errorf("invalid evaluation route at index %d", i)
 		}
-		if effort := strings.TrimSpace(item.ReasoningEffort); effort != "" && !isAllowedOpenAIEvalReasoningEffort(effort) {
+		if effort := strings.TrimSpace(item.ReasoningEffort); !prismRoute && effort != "" && !isAllowedOpenAIEvalReasoningEffort(effort) {
 			return fmt.Errorf("invalid reasoning effort %q", effort)
 		}
 		key := openAIEvalRouteKey(item.AccountID, item.RequestedModel, item.ReasoningEffort)
@@ -423,7 +427,11 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 	request.TestType = strings.ToLower(strings.TrimSpace(request.TestType))
 	request.RequestedModel = strings.TrimSpace(request.RequestedModel)
 	request.ReasoningEffort = strings.TrimSpace(request.ReasoningEffort)
-	if request.AccountID <= 0 || !isOpenAIEvalSupportedModel(request.RequestedModel) {
+	prismRoute, prismErr := s.validatePrismEvalRoute(ctx, request.AccountID, request.RequestedModel, request.ReasoningEffort)
+	if prismErr != nil {
+		return nil, prismErr
+	}
+	if request.AccountID <= 0 || (!prismRoute && !isOpenAIEvalSupportedModel(request.RequestedModel)) {
 		return nil, errors.New("a supported OpenAI model and account are required")
 	}
 	// Account-scoped automatic BPS probes use an internal scheduler sentinel,
@@ -433,7 +441,7 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 	if isBPSAccountProbe {
 		request.ReasoningEffort = ""
 	}
-	if request.ReasoningEffort != "" && !isAllowedOpenAIEvalReasoningEffort(request.ReasoningEffort) {
+	if !prismRoute && request.ReasoningEffort != "" && !isAllowedOpenAIEvalReasoningEffort(request.ReasoningEffort) {
 		return nil, fmt.Errorf("unsupported reasoning effort %q", request.ReasoningEffort)
 	}
 	if request.TestType != OpenAIEvalTypeCandy && request.TestType != OpenAIEvalTypeFingerprint && request.TestType != OpenAIEvalTypeModelTrace && request.TestType != OpenAIEvalTypeStateProbe {
@@ -533,6 +541,9 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 	}
 	if request.TestType == OpenAIEvalTypeStateProbe && !isOpenAIStateProbeTarget(target) {
 		return nil, errors.New("State Probe requires a direct OpenAI OAuth account")
+	}
+	if prismRoute && !prismEvalBaselineSupported(request.TestType, target.UpstreamModel) {
+		return nil, errors.New("unsupported Prism evaluation: requested model has no applicable versioned baseline")
 	}
 	start := time.Now().UTC()
 	expectedSamples := request.SampleCount
@@ -725,7 +736,7 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 				trace.Samples[i].Text = ""
 			}
 			run.CompletedSamples = len(run.Samples)
-			run.Outcome = modelTraceSchedulingOutcome(run.RequestedModel, trace, traceErr)
+			run.Outcome = modelTraceSchedulingOutcome(openAIEvalBaselineModel(target, run.RequestedModel), trace, traceErr)
 			run.Status = run.Outcome.Status
 		}
 		if traceErr != nil && (trace == nil || trace.UsedOutputs == 0) {
@@ -787,7 +798,7 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 			}
 		}
 	}
-	result := ScoreOpenAIEvalFingerprint(request.RequestedModel, samples, OpenAIEvalFingerprintBaselines, required)
+	result := ScoreOpenAIEvalFingerprint(openAIEvalBaselineModel(target, request.RequestedModel), samples, OpenAIEvalFingerprintBaselines, required)
 	run.Outcome = OpenAIEvalOutcome{Status: result.Status, Reason: result.Reason, SampleCount: result.ValidSamples, ExpectedCount: required, Confidence: "low", Scheduling: "alert_only", Fingerprint: &result}
 	run.Status = result.Status
 	return finish(nil)

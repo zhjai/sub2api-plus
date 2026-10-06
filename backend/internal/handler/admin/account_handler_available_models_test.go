@@ -112,6 +112,17 @@ func TestAccountHandlerGetAvailableModels_GrokUsesXAIModels(t *testing.T) {
 	require.Equal(t, "grok-4.3", resp.Data[0].ID)
 }
 
+func TestAccountHandlerGetAvailableModels_PrismCatalogFailureHasNoStaticFallback(t *testing.T) {
+	svc := &availableModelsAdminService{stubAdminService: newStubAdminService(), account: service.Account{ID: 99, Platform: service.PlatformPrism, Type: service.AccountTypeOAuth, Credentials: map[string]any{}}}
+	router := setupAvailableModelsRouter(svc)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/99/models", nil))
+	require.NotEqual(t, http.StatusOK, rec.Code)
+	require.NotContains(t, rec.Body.String(), "claude-")
+	require.NotContains(t, rec.Body.String(), "gpt-")
+	require.Contains(t, rec.Body.String(), "message")
+}
+
 func TestAccountHandlerGetAvailableModels_GrokDefaultsToXAIModelsWithoutMapping(t *testing.T) {
 	svc := &availableModelsAdminService{
 		stubAdminService: newStubAdminService(),
@@ -525,4 +536,37 @@ func TestAccountHandlerSyncUpstreamModels_MetadataEnrichmentFailureReturnsWarnin
 	require.Equal(t, []string{"x-preview-f-free"}, resp.Data.Models)
 	require.Len(t, resp.Data.Warnings, 1)
 	require.Equal(t, "upstream_model_metadata_incomplete", resp.Data.Warnings[0].Code)
+}
+
+func TestAccountHandlerGetAvailableModels_TypeSafeOnlyReturnsJev(t *testing.T) {
+	for _, credentials := range []map[string]any{
+		{"api_key": "ts-secret"},
+		{"api_key": "ts-secret", "model_mapping": map[string]any{"jev-latest": "jev-latest"}},
+	} {
+		svc := &availableModelsAdminService{
+			stubAdminService: newStubAdminService(),
+			account: service.Account{
+				ID:          46,
+				Name:        "typesafe",
+				Platform:    service.PlatformTypeSafe,
+				Type:        service.AccountTypeAPIKey,
+				Status:      service.StatusActive,
+				Credentials: credentials,
+			},
+		}
+		router := setupAvailableModelsRouter(svc)
+
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/46/models", nil))
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		var resp struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.Len(t, resp.Data, 1)
+		require.Equal(t, "jev-latest", resp.Data[0].ID)
+	}
 }

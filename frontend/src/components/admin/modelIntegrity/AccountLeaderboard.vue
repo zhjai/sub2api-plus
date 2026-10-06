@@ -54,7 +54,7 @@
               <p class="lb-account-sub">
                 <span>#{{ row.account_id }}</span>
                 <span v-for="name in groupNames(row)" :key="name" class="lb-group">{{ name }}</span>
-                <!-- Why this account sits behind the rest: its own real requests
+                <!-- Why this account moved back one position: its own real requests
                      exceeded the policy's runtime threshold. Not an exclusion. -->
                 <span
                   v-for="reason in row.threshold_reasons ?? []"

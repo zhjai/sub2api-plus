@@ -3,7 +3,9 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -109,6 +111,89 @@ func TestOpenAIEvalAccountPriorityRulesSnapshotAndConfigRoundTrip(t *testing.T) 
 	require.False(t, matched)
 	_, err = normalizeOpenAIEvalAccountPriorityRules(restored.AccountPriorityRules)
 	require.NoError(t, err)
+}
+
+func TestOpenAIEvalAccountPriorityConditionMatchesKnownEvidence(t *testing.T) {
+	known := OpenAIEvalRankingFactors{
+		Quality:   OpenAIEvalRankingQuality{OpenAIEvalFactorMeta: rankingKnown(1, time.Now()), Ratio: rankingPtr(1.0)},
+		ErrorRate: OpenAIEvalRankingErrorRate{OpenAIEvalFactorMeta: rankingKnown(0.95, time.Now()), Value: rankingPtr(0.05)},
+		TTFT:      OpenAIEvalRankingTTFT{OpenAIEvalFactorMeta: rankingKnown(.5, time.Now()), MS: rankingPtr(7000.)},
+		Price:     OpenAIEvalRankingPrice{OpenAIEvalFactorMeta: rankingKnown(.5, time.Now()), RateMultiplier: rankingPtr(0.06)},
+		Load:      OpenAIEvalRankingLoad{OpenAIEvalFactorMeta: rankingKnown(.5, time.Now()), LoadRate: rankingPtr(20)},
+	}
+	for _, tc := range []struct {
+		name      string
+		condition OpenAIEvalAccountPriorityCondition
+		want      bool
+	}{
+		{"quality", OpenAIEvalAccountPriorityCondition{Metric: "quality_ratio", Operator: "gte", Threshold: 1}, true},
+		{"error strict", OpenAIEvalAccountPriorityCondition{Metric: "error_rate", Operator: "lt", Threshold: .05}, false},
+		{"ttft", OpenAIEvalAccountPriorityCondition{Metric: "ttft_ms", Operator: "lte", Threshold: 8000}, true},
+		{"price", OpenAIEvalAccountPriorityCondition{Metric: "price", Operator: "eq", Threshold: .06}, true},
+		{"load", OpenAIEvalAccountPriorityCondition{Metric: "load_rate", Operator: "lt", Threshold: 25}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, openAIEvalAccountPriorityConditionMatches(&tc.condition, known))
+		})
+	}
+	unknown := known
+	unknown.Quality.Known = false
+	unknown.Quality.Ratio = nil
+	require.False(t, openAIEvalAccountPriorityConditionMatches(&OpenAIEvalAccountPriorityCondition{Metric: "quality_ratio", Operator: "gte", Threshold: 0}, unknown))
+}
+
+func TestOpenAIEvalAccountPriorityConditionValidation(t *testing.T) {
+	for _, condition := range []OpenAIEvalAccountPriorityCondition{
+		{Metric: "nope", Operator: "gte", Threshold: 1},
+		{Metric: "quality_ratio", Operator: "gte", Threshold: 2},
+		{Metric: "error_rate", Operator: "lt", Threshold: -0.1},
+		{Metric: "load_rate", Operator: "lt", Threshold: 101},
+		{Metric: "price", Operator: "unknown", Threshold: 1},
+		{Metric: "price", Operator: "lt", Threshold: math.Inf(1)},
+		{Metric: "ttft_ms", Operator: "gte", Threshold: math.NaN()},
+	} {
+		require.Error(t, validateOpenAIEvalAccountPriorityCondition(condition))
+	}
+}
+
+func TestOpenAIEvalAccountPriorityDisabledConditionDoesNotMatch(t *testing.T) {
+	disabled := false
+	index, err := buildOpenAIEvalAccountPriorityIndex([]OpenAIEvalAccountPriorityRule{{
+		AccountID: 1, Priority: 0, Enabled: &disabled,
+		Condition: &OpenAIEvalAccountPriorityCondition{Metric: "load_rate", Operator: "lte", Threshold: 100},
+	}})
+	require.NoError(t, err)
+	f := emptyOpenAIEvalRankingFactors()
+	f.Load = OpenAIEvalRankingLoad{OpenAIEvalFactorMeta: rankingKnown(1, time.Now()), LoadRate: rankingPtr(0)}
+	_, matched := openAIEvalAccountPriorityFromIndex(index, 1, "gpt-6-astra", f)
+	require.False(t, matched)
+	require.False(t, openAIEvalAccountPriorityConditionMatches(&OpenAIEvalAccountPriorityCondition{Metric: "load_rate", Operator: "lte", Threshold: 100}, emptyOpenAIEvalRankingFactors()))
+}
+
+func TestOpenAIEvalAccountPriorityConditionalModelFallsBack(t *testing.T) {
+	condition := &OpenAIEvalAccountPriorityCondition{Metric: "quality_ratio", Operator: "gte", Threshold: 1}
+	rules := []OpenAIEvalAccountPriorityRule{{AccountID: 1, Priority: 5}, {AccountID: 1, Priority: 0, RequestedModels: []string{"gpt-6-astra"}, Condition: condition}}
+	index, err := buildOpenAIEvalAccountPriorityIndex(rules)
+	require.NoError(t, err)
+	condition.Threshold = 0 // published index owns a deep copy
+	f := emptyOpenAIEvalRankingFactors()
+	for _, model := range []string{"gpt-6-astra", "gpt-6.1-sol"} {
+		priority, matched := openAIEvalAccountPriorityFromIndex(index, 1, model, f)
+		require.True(t, matched)
+		require.Equal(t, 5, priority)
+	}
+	f.Quality = OpenAIEvalRankingQuality{OpenAIEvalFactorMeta: rankingKnown(1, time.Now()), Ratio: rankingPtr(1.)}
+	priority, matched := openAIEvalAccountPriorityFromIndex(index, 1, "gpt-6-astra", f)
+	require.True(t, matched)
+	require.Zero(t, priority)
+	priority, matched = openAIEvalAccountPriorityFromIndex(index, 1, "gpt-6.1-sol", f)
+	require.True(t, matched)
+	require.Equal(t, 5, priority)
+	data, err := json.Marshal(rules)
+	require.NoError(t, err)
+	var restored []OpenAIEvalAccountPriorityRule
+	require.NoError(t, json.Unmarshal(data, &restored))
+	require.Equal(t, rules, restored)
 }
 
 func TestOpenAIEvalDisabledModelRuleDoesNotAffectPolicyOrWeights(t *testing.T) {

@@ -16,6 +16,12 @@
             @refresh="handleManualRefresh"
             @create="showCreate = true"
           >
+            <template #beforeCreate>
+              <button type="button" class="btn btn-secondary" data-testid="prism-add" @click="openPrismDialog(null)">
+                <PlatformIcon platform="prism" size="sm" class="mr-1.5 text-fuchsia-600 dark:text-fuchsia-300" />
+                {{ t('admin.accounts.prism.addButton') }}
+              </button>
+            </template>
             <template #after>
               <!-- Auto Refresh Dropdown -->
               <div class="relative" ref="autoRefreshDropdownRef">
@@ -380,8 +386,12 @@
               @probe="handleProbeUpstreamBilling(row)"
             />
           </template>
-          <template #cell-priority="{ value }">
-            <span class="text-sm text-gray-700 dark:text-gray-300">{{ value }}</span>
+          <template #cell-priority="{ row }">
+            <AccountPriorityCell
+              :account="row"
+              @updated="handleAccountUpdated"
+              @error="(message: string) => appStore.showError(message)"
+            />
           </template>
           <template #cell-scheduler_score="{ row }">
             <div v-if="getSchedulerScoreRows(row).length" class="flex min-w-[7rem] flex-col gap-0.5 font-mono text-[11px] leading-4">
@@ -446,13 +456,15 @@
       </template>
       <template #pagination><Pagination v-if="pagination.total > 0" :page="pagination.page" :total="pagination.total" :page-size="pagination.page_size" @update:page="handlePageChange" @update:pageSize="handlePageSizeChange" /></template>
     </TablePageLayout>
-    <CreateAccountModal :show="showCreate" :proxies="proxies" :groups="groups" @close="showCreate = false" @created="reload" />
+    <CreateAccountModal :show="showCreate" :proxies="proxies" :groups="groups" @close="showCreate = false" @created="reload" @prism="switchCreateToPrism" />
+    <PrismAccountDialog :show="showPrismDialog" :account="prismReloginAcc" :proxies="proxies" :groups="groups" @close="closePrismDialog" @changed="prismDialogChanged = true" />
+    <PrismCatalogDialog :show="showPrismCatalog" :account="prismCatalogAcc" @close="showPrismCatalog = false; prismCatalogAcc = null" @updated="handleAccountUpdated" @relogin="openPrismDialogFromCatalog" />
     <EditAccountModal :show="showEdit" :account="edAcc" :proxies="proxies" :groups="groups" @close="showEdit = false" @updated="handleAccountUpdated" />
     <ReAuthAccountModal :show="showReAuth" :account="reAuthAcc" @close="closeReAuthModal" @reauthorized="handleAccountUpdated" />
     <AccountTestModal :show="showTest" :account="testingAcc" @close="closeTestModal" />
     <AccountStatsModal :show="showStats" :account="statsAcc" @close="closeStatsModal" />
     <ScheduledTestsPanel :show="showSchedulePanel" :account-id="scheduleAcc?.id ?? null" :model-options="scheduleModelOptions" @close="closeSchedulePanel" />
-    <AccountActionMenu :show="menu.show" :account="menu.acc" :anchor-rect="menu.anchorRect" @close="menu.show = false" @test="handleTest" @stats="handleViewStats" @schedule="handleSchedule" @duplicate="handleDuplicateAccount" @reauth="handleReAuth" @refresh-token="handleRefresh" @recover-state="handleRecoverState" @reset-quota="handleResetQuota" @set-privacy="handleSetPrivacy" @create-spark-shadow="handleCreateSparkShadow" />
+    <AccountActionMenu :show="menu.show" :account="menu.acc" :anchor-rect="menu.anchorRect" @close="menu.show = false" @test="handleTest" @stats="handleViewStats" @schedule="handleSchedule" @duplicate="handleDuplicateAccount" @reauth="handleReAuth" @refresh-token="handleRefresh" @recover-state="handleRecoverState" @reset-quota="handleResetQuota" @set-privacy="handleSetPrivacy" @create-spark-shadow="handleCreateSparkShadow" @prism-models="openPrismCatalog" @prism-relogin="openPrismDialog" @prism-refresh="handlePrismRefresh" />
     <SyncFromCrsModal :show="showSync" @close="showSync = false" @synced="reload" />
     <ImportDataModal :show="showImportData" @close="showImportData = false" @imported="handleDataImported" />
     <BulkEditAccountModal
@@ -501,6 +513,11 @@ import Pagination from '@/components/common/Pagination.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import { CreateAccountModal, EditAccountModal, BulkEditAccountModal, SyncFromCrsModal, TempUnschedStatusModal } from '@/components/account'
 import AccountTableActions from '@/components/admin/account/AccountTableActions.vue'
+import PrismAccountDialog from '@/components/account/prism/PrismAccountDialog.vue'
+import PlatformIcon from '@/components/common/PlatformIcon.vue'
+import PrismCatalogDialog from '@/components/account/prism/PrismCatalogDialog.vue'
+import { prismAPI } from '@/api/admin/prism'
+import { prismErrorText, prismRequestErrorText } from '@/components/account/prism/prismText'
 import AccountTableFilters from '@/components/admin/account/AccountTableFilters.vue'
 import AccountBulkActionsBar from '@/components/admin/account/AccountBulkActionsBar.vue'
 import AccountActionMenu from '@/components/admin/account/AccountActionMenu.vue'
@@ -516,6 +533,7 @@ import AccountTodayStatsCell from '@/components/account/AccountTodayStatsCell.vu
 import AccountGroupsCell from '@/components/account/AccountGroupsCell.vue'
 import AccountCapacityCell from '@/components/account/AccountCapacityCell.vue'
 import UpstreamBillingRateCell from '@/components/account/UpstreamBillingRateCell.vue'
+import AccountPriorityCell from '@/components/account/AccountPriorityCell.vue'
 import PlatformTypeBadge from '@/components/common/PlatformTypeBadge.vue'
 import Icon from '@/components/icons/Icon.vue'
 import ErrorPassthroughRulesModal from '@/components/admin/ErrorPassthroughRulesModal.vue'
@@ -530,7 +548,7 @@ import { getFloatingPanelPosition } from '@/utils/floatingPanel'
 import { formatMultiplier } from '@/utils/formatters'
 import type { Account, AccountListItem, AccountPlatform, AccountSchedulerGroupScore, AccountType, AccountUsageInfo, Proxy as AccountProxy, AdminGroup, WindowStats, ClaudeModel, UpstreamBillingProbeSnapshot } from '@/types'
 
-const { t } = useI18n()
+const { t, te } = useI18n()
 const appStore = useAppStore()
 const authStore = useAuthStore()
 
@@ -599,6 +617,11 @@ const showTest = ref(false)
 const showStats = ref(false)
 const showErrorPassthrough = ref(false)
 const showTLSFingerprintProfiles = ref(false)
+const showPrismDialog = ref(false)
+const prismReloginAcc = ref<Account | null>(null)
+const prismDialogChanged = ref(false)
+const showPrismCatalog = ref(false)
+const prismCatalogAcc = ref<Account | null>(null)
 const edAcc = ref<Account | null>(null)
 const tempUnschedAcc = ref<Account | null>(null)
 const deletingAcc = ref<Account | null>(null)
@@ -1365,7 +1388,9 @@ const isAnyModalOpen = computed(() => {
     showStats.value ||
     showSchedulePanel.value ||
     showErrorPassthrough.value ||
-    showTLSFingerprintProfiles.value
+    showTLSFingerprintProfiles.value ||
+    showPrismDialog.value ||
+    showPrismCatalog.value
   )
 })
 
@@ -2331,6 +2356,46 @@ const handleSchedule = async (a: Account) => {
 }
 const closeSchedulePanel = () => { showSchedulePanel.value = false; scheduleAcc.value = null; scheduleModelOptions.value = [] }
 const handleReAuth = (a: Account) => { reAuthAcc.value = a; showReAuth.value = true }
+const openPrismDialog = (a: Account | null) => {
+  prismReloginAcc.value = a
+  prismDialogChanged.value = false
+  showPrismDialog.value = true
+}
+const switchCreateToPrism = () => {
+  showCreate.value = false
+  openPrismDialog(null)
+}
+const closePrismDialog = () => {
+  showPrismDialog.value = false
+  prismReloginAcc.value = null
+  if (prismDialogChanged.value) {
+    prismDialogChanged.value = false
+    reload()
+  }
+}
+const openPrismCatalog = (a: Account) => {
+  prismCatalogAcc.value = a
+  showPrismCatalog.value = true
+}
+const openPrismDialogFromCatalog = (a: Account) => {
+  showPrismCatalog.value = false
+  prismCatalogAcc.value = null
+  openPrismDialog(a)
+}
+const handlePrismRefresh = async (a: Account) => {
+  try {
+    const result = await prismAPI.refreshAccount(a.id)
+    if (result.code) {
+      appStore.showError(prismErrorText(t, te, result.code, result.message))
+      return
+    }
+    patchAccountInList(await adminAPI.accounts.getById(a.id))
+    enterAutoRefreshSilentWindow()
+    appStore.showSuccess(t('admin.accounts.prism.catalog.credentialsRefreshed'))
+  } catch (error) {
+    appStore.showError(prismRequestErrorText(t, te, error))
+  }
+}
 const duplicatingAccountIDs = new Set<number>()
 const handleDuplicateAccount = async (a: Account) => {
   if (duplicatingAccountIDs.has(a.id)) return

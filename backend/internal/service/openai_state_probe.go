@@ -13,7 +13,7 @@ import (
 	"github.com/google/uuid"
 )
 
-const openAIStateProbeVersion = "codex-turn-state-v1"
+const openAIStateProbeVersion = "codex-turn-state-v2"
 
 // OpenAIStateProbeResult deliberately excludes bearer, ticket, cookies and output.
 // A changed ticket is routing evidence, not proof of a model capability change.
@@ -120,7 +120,7 @@ func (s *AccountTestService) RunOpenAIStateProbeAttempts(ctx context.Context, ta
 			result.LastFailureStep = "continue"
 			if continued.failure == "" {
 				result.Failure, result.LastFailureStep = "", ""
-				result.NewTicket = continued.ticket != mint.ticket
+				result.NewTicket = continued.ticket != "" && continued.ticket != mint.ticket
 				result.Verdict = "healthy"
 				if result.NewTicket {
 					result.Verdict = "degraded"
@@ -313,7 +313,9 @@ func (s *AccountTestService) openAIStateProbeSingleSend(ctx context.Context, acc
 	} else {
 		out.terminal = true
 	}
-	if out.failure == "" && out.terminal && out.ticket == "" {
+	// Mint must supply a ticket; a completed continuation may keep the old
+	// ticket without issuing a replacement header.
+	if out.failure == "" && out.terminal && ticket == "" && out.ticket == "" {
 		out.failure = "missing_ticket"
 		out.retryable = true
 	}

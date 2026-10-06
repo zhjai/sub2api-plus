@@ -25,6 +25,10 @@ func TestListOpenAIEvalModelsOnlyAdvertisesTextCatalogAndSampleCosts(t *testing.
 		Items []struct {
 			ID string `json:"id"`
 		} `json:"items"`
+		ModelTrace struct {
+			Models         []string `json:"models"`
+			CandidateCount int      `json:"candidate_count"`
+		} `json:"modeltrace"`
 	}
 	_ = json.Unmarshal(response.Body.Bytes(), &payload)
 	require.NotEmpty(t, payload.Items)
@@ -33,6 +37,8 @@ func TestListOpenAIEvalModelsOnlyAdvertisesTextCatalogAndSampleCosts(t *testing.
 		require.NotContains(t, item.ID, "embedding")
 	}
 	require.Len(t, payload.Items, len(service.OpenAIEvalSupportedModels()))
+	require.Equal(t, service.OpenAIEvalModelTraceModels(), payload.ModelTrace.Models)
+	require.Len(t, payload.ModelTrace.Models, payload.ModelTrace.CandidateCount)
 }
 
 func TestMergeOpenAIEvalRouteBPSFieldsPreservesOmittedLegacyFields(t *testing.T) {
@@ -163,6 +169,43 @@ func TestMergeOpenAIEvalConfigPreservesAccountPriorityRulesAndDisabledState(t *t
 	require.False(t, *incoming.AccountPriorityRules[0].Enabled)
 	require.NotNil(t, incoming.AccountPriorityRules[1].Enabled)
 	require.False(t, *incoming.AccountPriorityRules[1].Enabled)
+}
+
+func TestOpenAIEvalAccountPriorityConditionCloneAndMergeKey(t *testing.T) {
+	rule := service.OpenAIEvalAccountPriorityRule{AccountID: 7, Priority: 1, Condition: &service.OpenAIEvalAccountPriorityCondition{Metric: "quality_ratio", Operator: "gte", Threshold: 1}}
+	copy := cloneOpenAIEvalAccountPriorityRules([]service.OpenAIEvalAccountPriorityRule{rule})
+	require.NotSame(t, rule.Condition, copy[0].Condition)
+	require.Equal(t, openAIEvalAccountPriorityRuleMergeKey(rule), openAIEvalAccountPriorityRuleMergeKey(copy[0]))
+	copy[0].Condition.Threshold = .5
+	require.Equal(t, 1., rule.Condition.Threshold)
+	require.NotEqual(t, openAIEvalAccountPriorityRuleMergeKey(rule), openAIEvalAccountPriorityRuleMergeKey(copy[0]))
+}
+
+func TestMergeOpenAIEvalConfigPreservesOmittedLegacyCondition(t *testing.T) {
+	disabled := false
+	current := &service.OpenAIEvalConfig{AccountPriorityRules: []service.OpenAIEvalAccountPriorityRule{
+		{AccountID: 7, Priority: 1, RequestedModels: []string{"gpt-6.1-sol"}, Enabled: &disabled,
+			Condition: &service.OpenAIEvalAccountPriorityCondition{Metric: "quality_ratio", Operator: "gte", Threshold: 1}},
+	}}
+	incoming := &service.OpenAIEvalConfig{AccountPriorityRules: []service.OpenAIEvalAccountPriorityRule{{
+		AccountID: 7, Priority: 4, RequestedModels: []string{"gpt-6.1-sol"},
+	}}}
+	mergeOpenAIEvalConfigOmittedFields(incoming, current, map[string]json.RawMessage{
+		"account_priority_rules": json.RawMessage(`[{"account_id":7,"priority":4,"requested_models":["gpt-6.1-sol"]}]`),
+	})
+	require.NotNil(t, incoming.AccountPriorityRules[0].Condition)
+	require.Equal(t, "quality_ratio", incoming.AccountPriorityRules[0].Condition.Metric)
+	require.NotNil(t, incoming.AccountPriorityRules[0].Enabled)
+	require.False(t, *incoming.AccountPriorityRules[0].Enabled)
+
+	// An explicit null remains a deliberate request to clear the condition.
+	incoming = &service.OpenAIEvalConfig{AccountPriorityRules: []service.OpenAIEvalAccountPriorityRule{{
+		AccountID: 7, Priority: 4, RequestedModels: []string{"gpt-6.1-sol"},
+	}}}
+	mergeOpenAIEvalConfigOmittedFields(incoming, current, map[string]json.RawMessage{
+		"account_priority_rules": json.RawMessage(`[{"account_id":7,"priority":4,"requested_models":["gpt-6.1-sol"],"condition":null}]`),
+	})
+	require.Nil(t, incoming.AccountPriorityRules[0].Condition)
 }
 
 func TestMergeOpenAIEvalConfigPreservesDisabledModelRuleForOlderClients(t *testing.T) {

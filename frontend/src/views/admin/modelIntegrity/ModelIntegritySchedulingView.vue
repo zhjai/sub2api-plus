@@ -46,7 +46,9 @@
               name="default-policy"
               :label="t('admin.modelIntegrity.scheduling.policy.defaultLabel')"
               :custom-balance="config.custom_balance"
+              :thresholds="config.scheduling_thresholds"
             />
+            <p class="sched-note" data-testid="mixer-legend">{{ t('admin.modelIntegrity.scheduling.policy.meter.legend') }}</p>
             <div v-if="defaultPolicy === 'custom_balance'" class="custom-balance" data-testid="custom-balance">
               <div class="custom-balance-head">
                 <h3 class="sched-h3">{{ t('admin.modelIntegrity.scheduling.policy.custom.title') }}</h3>
@@ -262,8 +264,52 @@
                       <span>{{ model.label }}</span>
                     </label>
                   </fieldset>
+                  <!-- One condition per rule, read left to right as [metric] [operator] [value]. -->
+                  <fieldset class="rule-condition rule-dim" data-testid="account-rule-condition">
+                    <legend class="rule-label">{{ t('admin.modelIntegrity.scheduling.accountRules.condition.label') }}</legend>
+                    <div class="condition-boxes">
+                      <select
+                        :value="rule.condition?.metric ?? ''"
+                        class="input rule-input condition-metric"
+                        :aria-label="t('admin.modelIntegrity.scheduling.accountRules.condition.metricAria')"
+                        data-testid="account-rule-condition-metric"
+                        @change="setConditionMetric(rule, ($event.target as HTMLSelectElement).value as OpenAIEvalAccountRuleConditionMetric | '')"
+                      >
+                        <option value="">{{ t('admin.modelIntegrity.scheduling.accountRules.condition.none') }}</option>
+                        <option v-for="metric in CONDITION_METRICS" :key="metric" :value="metric">{{ t(`admin.modelIntegrity.scheduling.accountRules.condition.metrics.${metric}`) }}</option>
+                      </select>
+                      <template v-if="rule.condition">
+                        <select
+                          v-model="rule.condition.operator"
+                          class="input rule-input condition-operator"
+                          :aria-label="t('admin.modelIntegrity.scheduling.accountRules.condition.operatorAria')"
+                          data-testid="account-rule-condition-operator"
+                        >
+                          <option v-for="operator in CONDITION_OPERATORS" :key="operator" :value="operator">{{ t(`admin.modelIntegrity.scheduling.accountRules.condition.operators.${operator}`) }}</option>
+                        </select>
+                        <span class="condition-value">
+                          <input
+                            :value="conditionText(rule)"
+                            type="number"
+                            min="0"
+                            :max="conditionMax(rule.condition.metric)"
+                            step="any"
+                            inputmode="decimal"
+                            class="input rule-input condition-input tabular-nums"
+                            :aria-label="t('admin.modelIntegrity.scheduling.accountRules.condition.valueAria')"
+                            :aria-invalid="isValidAccountRuleCondition(rule.condition) ? undefined : 'true'"
+                            data-testid="account-rule-condition-value"
+                            @input="updateConditionValue(rule, ($event.target as HTMLInputElement).value)"
+                            @change="settleConditionValue(rule)"
+                          />
+                          <span class="condition-unit" aria-hidden="true">{{ t(`admin.modelIntegrity.scheduling.accountRules.condition.units.${CONDITION_UNITS[rule.condition.metric]}`) }}</span>
+                        </span>
+                      </template>
+                    </div>
+                    <p class="condition-note">{{ t(rule.condition ? 'admin.modelIntegrity.scheduling.accountRules.condition.unknownNote' : 'admin.modelIntegrity.scheduling.accountRules.condition.noneNote') }}</p>
+                  </fieldset>
                   <p v-if="!isRuleEnabled(rule)" class="rule-off" data-testid="account-rule-off">{{ t('admin.modelIntegrity.scheduling.rules.off') }}</p>
-                  <p v-if="accountRuleIssues.has(index)" class="rule-error" role="alert" data-testid="account-rule-error">{{ t(`admin.modelIntegrity.scheduling.accountRules.errors.${accountRuleIssues.get(index)}`) }}</p>
+                  <p v-if="accountRuleIssues.has(index)" class="rule-error" role="alert" data-testid="account-rule-error">{{ accountRuleIssueText(rule, accountRuleIssues.get(index)!) }}</p>
                 </li>
               </ul>
             </div>
@@ -489,7 +535,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { onBeforeRouteLeave } from 'vue-router'
 import AppLayout from '@/components/layout/AppLayout.vue'
@@ -504,12 +550,12 @@ import EvaluationRecords from '@/components/admin/modelIntegrity/EvaluationRecor
 import BpsAccountDialog from '@/components/admin/modelIntegrity/BpsAccountDialog.vue'
 import PolicyWeightsEditor from '@/components/admin/modelIntegrity/PolicyWeightsEditor.vue'
 import SchedulingThresholdsEditor from '@/components/admin/modelIntegrity/SchedulingThresholdsEditor.vue'
-import { accountsAPI, listSchedulerDecisions, type OpenAIEvalAccountOverview, type OpenAIEvalAccountPriorityRule, type OpenAIEvalBPSAccountConfig, type OpenAIEvalRankingSummary, type OpenAIEvalSchedulingPolicy, type OpenAIEvalSchedulingPolicyRule, type SchedulerDecisionTrace } from '@/api/admin/accounts'
+import { accountsAPI, listSchedulerDecisions, type OpenAIEvalAccountOverview, type OpenAIEvalAccountPriorityRule, type OpenAIEvalAccountRuleConditionMetric, type OpenAIEvalBPSAccountConfig, type OpenAIEvalRankingSummary, type OpenAIEvalSchedulingPolicy, type OpenAIEvalSchedulingPolicyRule, type SchedulerDecisionTrace } from '@/api/admin/accounts'
 import groupsAPI from '@/api/admin/groups'
 import type { AdminGroup } from '@/types'
 import { useAppStore } from '@/stores/app'
 import { extractApiErrorMessage } from '@/utils/apiError'
-import { CUSTOM_FACTORS, CUSTOM_INTERVAL, DAY, EFFECTIVE_KEYS, HOUR, MAX_INTERVAL_MINUTES, QUALITY_REFRESH_INTERVALS, THRESHOLD_POLICIES, absolutePriorities, accountPriorityRuleIssues, customBalanceIssue, customBalanceIssueKey, invalidThresholdFields,bpsAccountLane, bpsDisabledKey, bpsModeOf, canResetBPSAccount, customBalanceShares, effectiveTone as effectiveToneOf, hasNoPositiveWeight, isDirectOAuthRoute, isInactiveStatus, isRuleEnabled, isValidCustomBalance, normalizeBPSAccount, normalizeCustomBalance, normalizeQualityRefreshInterval, rankingErrorText, rankingTriggerKey, type BPSLane, type RankingReadOutcome } from './modelIntegrity'
+import { CONDITION_METRICS, CONDITION_OPERATORS, CONDITION_UNITS, CUSTOM_FACTORS, CUSTOM_INTERVAL, DAY, EFFECTIVE_KEYS, HOUR, MAX_INTERVAL_MINUTES, QUALITY_REFRESH_INTERVALS, THRESHOLD_POLICIES, absolutePriorities, accountPriorityRuleIssues, conditionDisplayText, conditionStoredValue, isValidAccountRuleCondition, parseThresholdInput, CONDITION_DEFAULTS, type AccountPriorityRuleIssue, customBalanceIssue, customBalanceIssueKey, invalidThresholdFields,bpsAccountLane, bpsDisabledKey, bpsModeOf, canResetBPSAccount, customBalanceShares, effectiveTone as effectiveToneOf, hasNoPositiveWeight, isDirectOAuthRoute, isInactiveStatus, isRuleEnabled, isValidCustomBalance, normalizeBPSAccount, normalizeCustomBalance, normalizeQualityRefreshInterval, rankingErrorText, rankingTriggerKey, type BPSLane, type RankingReadOutcome } from './modelIntegrity'
 import { useModelIntegrityConfig } from './useModelIntegrityConfig'
 
 /** Records read per request; the server filters its retained window before applying it. */
@@ -839,6 +885,47 @@ function removeAccountRule(index: number) {
   if (picking >= 0) pickingModels.value.splice(picking, 1)
 }
 
+/**
+ * Text typed into a condition value, kept while it is being edited so the
+ * field is not rewritten mid-typing ("0." → "0"). Blank or unreadable text is
+ * stored as NaN, never 0, so the row is flagged and the save is blocked. Keyed
+ * by rule object, so a reload's fresh rules start without drafts.
+ */
+const conditionDrafts = reactive(new WeakMap<OpenAIEvalAccountPriorityRule, string>())
+
+function conditionText(rule: OpenAIEvalAccountPriorityRule) {
+  return conditionDrafts.get(rule) ?? (rule.condition ? conditionDisplayText(rule.condition) : '')
+}
+
+function conditionMax(metric: OpenAIEvalAccountRuleConditionMetric) {
+  return CONDITION_UNITS[metric] === 'percent' ? 100 : undefined
+}
+
+/** Picking a metric starts from its usual reading (通过率 ≥ 100 %, 错误率 < 5 % …); 无条件 clears it. */
+function setConditionMetric(rule: OpenAIEvalAccountPriorityRule, metric: OpenAIEvalAccountRuleConditionMetric | '') {
+  conditionDrafts.delete(rule)
+  rule.condition = metric ? { ...CONDITION_DEFAULTS[metric] } : null
+}
+
+function updateConditionValue(rule: OpenAIEvalAccountPriorityRule, text: string) {
+  if (!rule.condition) return
+  conditionDrafts.set(rule, text)
+  rule.condition.threshold = conditionStoredValue(rule.condition.metric, parseThresholdInput(text))
+}
+
+function settleConditionValue(rule: OpenAIEvalAccountPriorityRule) {
+  if (isValidAccountRuleCondition(rule.condition)) conditionDrafts.delete(rule)
+}
+
+/** A condition error names the range the chosen metric accepts. */
+function accountRuleIssueText(rule: OpenAIEvalAccountPriorityRule | undefined, issue: AccountPriorityRuleIssue) {
+  if (issue !== 'condition' || !rule?.condition) return t(`admin.modelIntegrity.scheduling.accountRules.errors.${issue}`)
+  return t('admin.modelIntegrity.scheduling.accountRules.errors.condition', {
+    metric: t(`admin.modelIntegrity.scheduling.accountRules.condition.metrics.${rule.condition.metric}`),
+    range: t(`admin.modelIntegrity.scheduling.accountRules.condition.ranges.${CONDITION_UNITS[rule.condition.metric]}`)
+  })
+}
+
 // useModelIntegrityConfig always initialises bps_accounts to an array.
 const bpsAccounts = computed(() => config.bps_accounts as OpenAIEvalBPSAccountConfig[])
 /** Accounts that can be added: OpenAI OAuth accounts not listed yet. The server rejects shadow/agent identities. */
@@ -977,9 +1064,9 @@ async function handleSave() {
     return
   }
   // The server rejects the whole save on any of these, so stop and point at the row.
-  const accountIssue = accountRuleIssues.value.values().next().value
+  const accountIssue = accountRuleIssues.value.entries().next().value
   if (accountIssue) {
-    appStore.showError(t(`admin.modelIntegrity.scheduling.accountRules.errors.${accountIssue}`))
+    appStore.showError(accountRuleIssueText(accountRules.value[accountIssue[0]], accountIssue[1]))
     return
   }
   // Only fills a rule that never had weights; existing rule weights are kept as edited.
@@ -1105,6 +1192,17 @@ onMounted(initialLoad)
 .rule-models legend { @apply float-left mb-1 w-full; }
 .model-chip { @apply inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-gray-200 bg-white px-2 py-1 text-xs text-gray-700 has-[:checked]:border-primary-400 has-[:checked]:bg-primary-50 has-[:checked]:text-primary-900 has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-primary-500 dark:border-dark-600 dark:bg-dark-800 dark:text-gray-300 dark:has-[:checked]:border-primary-500 dark:has-[:checked]:bg-primary-950/40 dark:has-[:checked]:text-primary-100; }
 .model-chip-input { @apply rounded border-gray-300 text-primary-600 focus:ring-0 focus:ring-offset-0 dark:border-dark-500; }
+/* Its own full-width line under the row, so the three boxes never squeeze the account and priority fields. */
+.rule-condition { @apply min-w-0 space-y-1.5 border-t border-gray-200 pt-3 dark:border-dark-700 sm:col-span-5; }
+.rule-condition legend { @apply float-left mb-1 w-full; }
+.condition-boxes { @apply clear-both flex flex-wrap items-center gap-2; }
+.condition-metric { @apply w-auto min-w-[8.5rem]; }
+.condition-operator { @apply w-auto min-w-[6.5rem]; }
+.condition-value { @apply relative block w-32; }
+.condition-input { @apply pr-10; }
+.condition-input[aria-invalid='true'] { @apply border-rose-400 dark:border-rose-500; }
+.condition-unit { @apply pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-500 dark:text-gray-400; }
+.condition-note { @apply text-xs leading-relaxed text-gray-500 dark:text-gray-400; }
 .rule-field { @apply flex min-w-0 flex-col gap-1; }
 .rule-label { @apply text-xs text-gray-500 dark:text-gray-400; }
 .rule-input { @apply h-9 py-1 text-sm; }

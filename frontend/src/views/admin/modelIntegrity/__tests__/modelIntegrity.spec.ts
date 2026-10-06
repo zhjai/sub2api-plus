@@ -6,6 +6,11 @@ import en from '@/i18n/locales/en'
 import zhLocale from '@/i18n/locales/zh'
 import {
   absolutePriorities,
+  conditionDisplayValue,
+  conditionStoredValue,
+  isValidAccountRuleCondition,
+  normalizeAccountPriorityRule,
+  policyMeters,
   activeScheduleCount,
   attributionReinterpretation,
   boardOrderingKey,
@@ -270,8 +275,8 @@ describe('save payload', () => {
       ]
     })
     expect(payload.account_priority_rules).toEqual([
-      { account_id: 3, priority: 0, enabled: true },
-      { account_id: 4, priority: -2, requested_models: ['gpt-5'], enabled: false }
+      { account_id: 3, priority: 0, enabled: true, condition: null },
+      { account_id: 4, priority: -2, requested_models: ['gpt-5'], enabled: false, condition: null }
     ])
     // A config from an older server has no rules and saves none.
     expect(toSavePayload({ effects_enabled: false, bps_auto_enabled: false, accounts: [] }).account_priority_rules).toEqual([])
@@ -287,6 +292,96 @@ describe('save payload', () => {
       { account_id: 7, priority: 1, requested_models: [] }
     ], rule => rule.account_id === 7)
     expect([...issues.entries()]).toEqual([[0, 'account'], [1, 'priority'], [4, 'overlap'], [5, 'models']])
+  })
+
+  it('keeps rule conditions through load and save, and sends unconditional rules as an explicit null', () => {
+    const loaded = normalizeAccountPriorityRule({ account_id: 3, priority: 1, condition: { metric: 'error_rate', operator: 'lt', threshold: 0.05 } })
+    expect(loaded.condition).toEqual({ metric: 'error_rate', operator: 'lt', threshold: 0.05 })
+    expect(normalizeAccountPriorityRule({ account_id: 3, priority: 1, condition: null })).not.toHaveProperty('condition')
+    const payload = toSavePayload({
+      effects_enabled: false,
+      bps_auto_enabled: false,
+      accounts: [],
+      account_priority_rules: [
+        loaded,
+        { account_id: 4, priority: 2, requested_models: ['gpt-5'], enabled: false, condition: { metric: 'quality_ratio', operator: 'gte', threshold: 1 } },
+        { account_id: 5, priority: 3, condition: null }
+      ]
+    })
+    expect(payload.account_priority_rules).toEqual([
+      { account_id: 3, priority: 1, enabled: true, condition: { metric: 'error_rate', operator: 'lt', threshold: 0.05 } },
+      { account_id: 4, priority: 2, requested_models: ['gpt-5'], enabled: false, condition: { metric: 'quality_ratio', operator: 'gte', threshold: 1 } },
+      // Omitted would make the server keep a stored condition; null clears it.
+      { account_id: 5, priority: 3, enabled: true, condition: null }
+    ])
+    expect(payload.account_priority_rules![2]).toHaveProperty('condition', null)
+  })
+
+  it('converts condition values between storage and the editor units', () => {
+    expect(conditionDisplayValue('error_rate', 0.05)).toBe(5)
+    expect(conditionDisplayValue('quality_ratio', 1)).toBe(100)
+    expect(conditionDisplayValue('ttft_ms', 8000)).toBe(8)
+    expect(conditionDisplayValue('price', 0.5)).toBe(0.5)
+    expect(conditionDisplayValue('load_rate', 80)).toBe(80)
+    expect(conditionStoredValue('error_rate', 7)).toBe(0.07)
+    expect(conditionStoredValue('ttft_ms', 1.5)).toBe(1500)
+    expect(conditionStoredValue('load_rate', 80)).toBe(80)
+    expect(conditionStoredValue('error_rate', NaN)).toBeNaN()
+  })
+
+  it('validates a condition the way the server does', () => {
+    expect(isValidAccountRuleCondition(null)).toBe(true)
+    expect(isValidAccountRuleCondition(undefined)).toBe(true)
+    expect(isValidAccountRuleCondition({ metric: 'quality_ratio', operator: 'gte', threshold: 1 })).toBe(true)
+    expect(isValidAccountRuleCondition({ metric: 'quality_ratio', operator: 'gte', threshold: 1.01 })).toBe(false)
+    expect(isValidAccountRuleCondition({ metric: 'error_rate', operator: 'lt', threshold: -0.01 })).toBe(false)
+    expect(isValidAccountRuleCondition({ metric: 'load_rate', operator: 'lt', threshold: 100 })).toBe(true)
+    expect(isValidAccountRuleCondition({ metric: 'load_rate', operator: 'lt', threshold: 101 })).toBe(false)
+    expect(isValidAccountRuleCondition({ metric: 'ttft_ms', operator: 'lte', threshold: 120000 })).toBe(true)
+    expect(isValidAccountRuleCondition({ metric: 'price', operator: 'eq', threshold: 0 })).toBe(true)
+    // A blank entry is NaN, never coerced to 0.
+    expect(isValidAccountRuleCondition({ metric: 'price', operator: 'lte', threshold: NaN })).toBe(false)
+    expect(isValidAccountRuleCondition({ metric: 'ttft_ms', operator: 'lte', threshold: Infinity })).toBe(false)
+    expect(isValidAccountRuleCondition({ metric: 'speed' as never, operator: 'lte', threshold: 1 })).toBe(false)
+    expect(isValidAccountRuleCondition({ metric: 'price', operator: 'ne' as never, threshold: 1 })).toBe(false)
+    const issues = accountPriorityRuleIssues([
+      { account_id: 1, priority: 1, condition: { metric: 'error_rate', operator: 'lt', threshold: NaN } },
+      { account_id: 2, priority: 1, condition: { metric: 'error_rate', operator: 'lt', threshold: 0.05 } }
+    ], () => false)
+    expect([...issues.entries()]).toEqual([[0, 'condition']])
+  })
+})
+
+describe('policy meters', () => {
+  const roles = (meters: ReturnType<typeof policyMeters>) => Object.fromEntries(meters.map(meter => [meter.factor, `${meter.role}:${meter.level}`]))
+
+  it('draws presets by their real order: price sorts, thresholds gate, pass rate tiers', () => {
+    expect(roles(policyMeters('cost_first'))).toEqual({ quality: 'ignored:0', price: 'sort:4', errors: 'gate_standard:2', speed: 'gate_standard:2' })
+    // Stability is the same price sort with stricter thresholds, never a weighted error score.
+    expect(roles(policyMeters('stability_first'))).toEqual({ quality: 'ignored:0', price: 'sort:4', errors: 'gate_strict:3', speed: 'gate_strict:3' })
+    expect(roles(policyMeters('avoid_degradation'))).toEqual({ quality: 'tier:0', price: 'sort_in_tier:3', errors: 'gate_standard:2', speed: 'gate_standard:2' })
+    expect(roles(policyMeters(''))).toEqual({ quality: 'ignored:0', price: 'system:1', errors: 'system:2', speed: 'system:2' })
+  })
+
+  it('follows the edited thresholds', () => {
+    const meters = policyMeters('cost_first', null, {
+      cost_first: { error_rate: 0.5, ttft_seconds: 5 },
+      stability_first: { error_rate: 0.05, ttft_seconds: 8 },
+      avoid_degradation: { error_rate: 0.2, ttft_seconds: 15 },
+      custom_balance: { error_rate: 0.2, ttft_seconds: 15 },
+      min_error_samples: 10,
+      min_ttft_samples: 20
+    })
+    expect(roles(meters)).toMatchObject({ errors: 'gate_loose:1', speed: 'gate_strict:3' })
+    expect(meters.find(meter => meter.factor === 'errors')?.value).toBe(0.5)
+  })
+
+  it('shows custom priorities as named steps and weights as shares, listing load only when it counts', () => {
+    const plain = policyMeters('custom_balance', { cost: 0.5, error_rate: 0.5, ttft: 0, load: 0, quality: 0 })
+    expect(roles(plain)).toEqual({ quality: 'ignored:0', price: 'weight:2', errors: 'weight:2', speed: 'ignored:0' })
+    const ranked = policyMeters('custom_balance', { cost: 0, error_rate: 0.6, ttft: 0, load: 0.4, quality: 0, absolute_priorities: ['quality'] })
+    expect(roles(ranked)).toEqual({ quality: 'priority:0', price: 'ignored:0', errors: 'weight:3', speed: 'ignored:0', load: 'weight:2' })
+    expect(ranked[0].value).toBe(1)
   })
 
   it('keeps fields the page does not edit and strips read-only runtime state', () => {
@@ -596,6 +691,11 @@ describe('official admin wording', () => {
     expect(zhT('admin.modelIntegrity.scheduling.policy.title')).toBe('排序策略')
     expect(zhT('admin.modelIntegrity.scheduling.rules.policy')).toBe('策略')
     expect(zhT('admin.modelIntegrity.scheduling.rules.hint')).toContain('规则优先于默认策略')
+    // Account rules never lift a lower pass-rate tier under avoid-degradation.
+    const accountRules = zhT('admin.modelIntegrity.scheduling.accountRules.hint')
+    expect(accountRules).toContain('「避免降智」下通过率分档始终在前，规则只在同一通过率档内调整顺序')
+    expect(accountRules).toContain('数字越小越优先')
+    expect(accountRules).toContain('同一账号的指定模型规则优先于全部模型规则')
     expect(zhT('admin.modelIntegrity.scheduling.gates.title')).toBe('调度条件')
     expect(zhT('admin.modelIntegrity.scheduling.policy.options.stability_first.effect')).toContain('不参考降智通过率')
   })

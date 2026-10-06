@@ -16,10 +16,11 @@ import (
 
 type rankingTestRepo struct {
 	OpenAIEvalRepository
-	mu     sync.Mutex
-	config OpenAIEvalConfig
-	runs   []OpenAIEvalRun
-	audits []string
+	mu           sync.Mutex
+	config       OpenAIEvalConfig
+	runs         []OpenAIEvalRun
+	audits       []string
+	beforeLatest func()
 }
 
 func (r *rankingTestRepo) GetConfig(context.Context) (*OpenAIEvalConfig, error) {
@@ -44,6 +45,9 @@ func (r *rankingTestRepo) RecordAuditEvent(_ context.Context, _ int64, action st
 	return nil
 }
 func (r *rankingTestRepo) LatestCompletedRuns(_ context.Context, keys []OpenAIEvalEvidenceKey) ([]OpenAIEvalRun, error) {
+	if r.beforeLatest != nil {
+		r.beforeLatest()
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var result []OpenAIEvalRun

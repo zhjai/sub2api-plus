@@ -63,14 +63,22 @@ func (s *defaultOpenAIAccountScheduler) explicitRanking(ctx context.Context, req
 		r.mu.Lock()
 		if r.config == nil || r.config.Revision != cfg.Revision {
 			r.mu.Unlock()
-			return nil, trace, ErrOpenAIEvalRankingSuperseded
+			if req.priorityConditionEvidence {
+				return nil, trace, ErrOpenAIEvalRankingSuperseded
+			}
+			// Do not mix evidence from different revisions or fail a live
+			// request because an administrator saved a configuration. Keep the
+			// captured policy and score current runtime factors without the
+			// superseded evaluation/monitoring evidence. Admission remains live.
+			trace.RankingFallbackReason = rankingPtr("config_revision_changed")
+			return s.scoreLiveExplicitRanking(ctx, req, accounts, loads, cfg, nil, nil, nil, now), trace, nil
 		}
 		gen := r.current
 		readErr := errors.Join(latestErr, monitorErr)
 		if readErr == nil && r.lastError == nil {
 			priors = accountQualityPriors(gen, cfg, groupID, model, effort, configuredAccounts, latest, now)
 		}
-		if prior, ok := s.overviewPriorLocked(r, gen, cfg, req, accounts, loads, latest, monitoring, readErr, now); ok {
+		if prior, ok := s.overviewPriorLocked(r, gen, cfg, req, accounts, loads, latest, monitoring, readErr, now); ok && !req.priorityConditionEvidence {
 			trace.RankingBasis, trace.RankingFallbackReason = "overview_prior", nil
 			trace.EvaluationID, trace.SnapshotEvaluatedAt = rankingPtr(gen.summary.EvaluationID), rankingPtr(gen.summary.EvaluatedAt)
 			r.mu.Unlock()
@@ -84,7 +92,7 @@ func (s *defaultOpenAIAccountScheduler) explicitRanking(ctx context.Context, req
 			trace.RankingFallbackReason = rankingPtr("evaluation_error")
 		} else if gen != nil && cfg.Revision != gen.summary.ConfigRevision {
 			trace.RankingFallbackReason = rankingPtr("config_revision_changed")
-		} else if gen != nil {
+		} else if gen != nil && !req.priorityConditionEvidence {
 			key := rankingDimensionKey(groupID, model, effort)
 			index, found := gen.byKey[key]
 			if !found {
@@ -157,6 +165,11 @@ func (s *defaultOpenAIAccountScheduler) explicitRanking(ctx context.Context, req
 		}
 		r.mu.Unlock()
 	}
+	return s.scoreLiveExplicitRanking(ctx, req, accounts, loads, cfg, latest, monitoring, priors, now), trace, nil
+}
+
+func (s *defaultOpenAIAccountScheduler) scoreLiveExplicitRanking(ctx context.Context, req OpenAIAccountScheduleRequest, accounts []Account, loads map[int64]*AccountLoadInfo, cfg *OpenAIEvalConfig, latest map[OpenAIEvalEvidenceKey]OpenAIEvalRun, monitoring []openAIRankingMonitorEvidence, priors map[int64]*OpenAIEvalAccountQualityPrior, now time.Time) []OpenAIEvalRankedAccount {
+	model, effort := openAIClientModelForSchedule(req), normalizeOpenAIAccountRuntimeRoutePart(req.RequestedReasoningEffort, 64)
 	policy, weights := openAIEvalRankingWeights(cfg, model, effort)
 	if req.SchedulingPolicy != "" && policy == "" {
 		cfg.SchedulingPolicy = req.SchedulingPolicy
@@ -168,7 +181,7 @@ func (s *defaultOpenAIAccountScheduler) explicitRanking(ctx context.Context, req
 		f := s.stats.rankingFactors(a.ID, model, effort, now)
 		f.Quality = qualityFromLatestRuns(cfg, a.ID, model, effort, latest, now)
 		applyRankingMonitor(&f, monitoring, a.ID, a.GetMappedModel(req.RequestedModel), effort, now)
-		if r == nil {
+		if s.service.evalRanking == nil {
 			if q, ok := openAIEvalQualitySnapshots.lookup(a.ID, model, effort, now); ok {
 				f.Quality = OpenAIEvalRankingQuality{OpenAIEvalFactorMeta: rankingKnown(q.Ratio(), now), State: "assessed", Pass: q.PassCount, SuspectedPass: q.SuspectedPassCount, Selected: q.EvaluatedCount, Evaluated: q.EvaluatedCount, Ratio: rankingPtr(q.Ratio()), ExpiresAt: rankingPtr(q.ExpiresAt)}
 			}
@@ -179,7 +192,7 @@ func (s *defaultOpenAIAccountScheduler) explicitRanking(ctx context.Context, req
 		compatible := a.Platform == NormalizeOpenAICompatiblePlatform(req.Platform) && a.IsOpenAICompatible() && a.IsModelSupported(req.RequestedModel)
 		inputs = append(inputs, openAIEvalRankingInput{account: a, factors: f, compatible: compatible, upstream: []string{a.GetMappedModel(req.RequestedModel)}})
 	}
-	return scoreOpenAIEvalRankingWithThresholds(policy, weights, inputs, now, s.service.openAIOAuthSchedulingRateMultiplier(ctx), openAIEvalSchedulingThresholds(cfg), priors), trace, nil
+	return scoreOpenAIEvalRankingWithThresholds(policy, weights, inputs, now, s.service.openAIOAuthSchedulingRateMultiplier(ctx), openAIEvalSchedulingThresholds(cfg), priors)
 }
 
 // Called after live admission filters; the overview never supplies current-model quality.
@@ -403,8 +416,19 @@ func (s *defaultOpenAIAccountScheduler) selectByExplicitRanking(ctx context.Cont
 	budget.enableLimit()
 	if openAIAccountPriorityRulesActive(req) && !req.DisableStickyEscape {
 		budget.limit = max(openAIAccountSelectionProbeLimit, min(10000, 2*len(order)))
-		// Rule layers precede the frozen policy order without changing scores.
+		// Avoid-degradation quality tiers are absolute, including when an
+		// administrator configures account priorities. Rules break ties within
+		// a tier; they must not promote an assessed lower-quality account.
+		qualityRows := make(map[int64]OpenAIEvalRankedAccount, len(rows))
+		for _, row := range rows {
+			qualityRows[row.AccountID] = row
+		}
 		sort.SliceStable(order, func(i, j int) bool {
+			if openAIEffectiveSchedulingPolicy(req) == OpenAIEvalSchedulingPolicyAvoidDegradation {
+				if cmp := compareRankingEffectiveQuality(qualityRows[order[i].account.ID], qualityRows[order[j].account.ID]); cmp != 0 {
+					return cmp > 0
+				}
+			}
 			return openAIAccountPriorityLess(req, order[i].account.ID, order[j].account.ID)
 		})
 	}

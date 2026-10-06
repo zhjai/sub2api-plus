@@ -100,9 +100,6 @@ func rankingPolicyLess(policy string, a, b OpenAIEvalRankedAccount) bool {
 	if (a.PriorityScore == nil) != (b.PriorityScore == nil) {
 		return a.PriorityScore != nil
 	}
-	if policy != "" && (len(a.ThresholdReasons) > 0) != (len(b.ThresholdReasons) > 0) {
-		return len(a.ThresholdReasons) == 0
-	}
 	if a.PriorityScore != nil && policy == OpenAIEvalSchedulingPolicyAvoidDegradation {
 		if cmp := compareRankingEffectiveQuality(a, b); cmp != 0 {
 			return cmp > 0
@@ -120,4 +117,24 @@ func rankingPolicyLess(policy string, a, b OpenAIEvalRankedAccount) bool {
 		return *a.PriorityScore > *b.PriorityScore
 	}
 	return a.AccountID < b.AccountID
+}
+
+// Demote each threshold-breaching account by at most one position from the
+// base policy order. This is a post-sort operation, not a nontransitive sort
+// comparator. Quality tiers remain absolute under avoid-degradation.
+func demoteRankingThresholdsOnePosition(policy string, length int, row func(int) OpenAIEvalRankedAccount, swap func(int, int)) {
+	if policy != OpenAIEvalSchedulingPolicyCostFirst && policy != OpenAIEvalSchedulingPolicyStabilityFirst && policy != OpenAIEvalSchedulingPolicyAvoidDegradation {
+		return
+	}
+	for i := 0; i+1 < length; i++ {
+		a, b := row(i), row(i+1)
+		if a.PriorityScore == nil || b.PriorityScore == nil || len(a.ThresholdReasons) == 0 || !a.Eligible || !b.Eligible {
+			continue
+		}
+		if policy == OpenAIEvalSchedulingPolicyAvoidDegradation && compareRankingEffectiveQuality(a, b) != 0 {
+			continue
+		}
+		swap(i, i+1)
+		i++
+	}
 }

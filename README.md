@@ -40,7 +40,9 @@ Install commands below point to this fork. For upstream issues and releases, use
 
 Fork releases are published at [zhjai/sub2api-plus/releases](https://github.com/zhjai/sub2api-plus/releases). The commands below use this fork's installer, source tree, and container images.
 
-Versioning follows the upstream baseline without impersonating upstream releases. The current fork line is `0.2.11-zhjai.16`: `0.2.11` identifies the upstream baseline and `-zhjai.16` identifies this fork revision. The updater only considers releases with this derived suffix; legacy unqualified fork tags are not treated as current releases.
+Versioning follows the upstream baseline without impersonating upstream releases. The current fork line is `0.2.13-zhjai.17`: `0.2.13` identifies the upstream baseline and `-zhjai.17` identifies this fork revision. The updater only considers releases with this derived suffix; legacy unqualified fork tags are not treated as current releases.
+
+The native Prism channel supports Cookie import, authorization login and account-specific model catalogs with existing groups and scheduling policies, without an additional proxy service. See [Prism channel configuration and limits](docs/PRISM_CHANNEL.md).
 
 ## Sponsorship
 
@@ -153,7 +155,7 @@ curl -sSL https://raw.githubusercontent.com/zhjai/sub2api-plus/main/deploy/insta
 To install or roll back to a specific fork release:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/zhjai/sub2api-plus/main/deploy/install.sh | sudo bash -s -- upgrade -v v0.2.11-zhjai.16
+curl -sSL https://raw.githubusercontent.com/zhjai/sub2api-plus/main/deploy/install.sh | sudo bash -s -- upgrade -v v0.2.13-zhjai.17
 ```
 
 The upgrade command replaces the binary and restarts the service. It does not remove `/etc/sub2api`, PostgreSQL data, or Redis data; make a database/config backup before upgrading and keep the previous release available for rollback.
@@ -721,6 +723,31 @@ xAI quota is passive. Sub2API does not invent subscription quota values; it reco
 New Grok image and video generation requests use a media-specific eligibility check. API-key accounts remain eligible. OAuth accounts with explicit Free or forbidden billing evidence are excluded from new media generation. Missing or malformed observations are probed before dispatch; a successful but incomplete billing response is treated as `billing_inconclusive` and remains eligible for backwards compatibility, because an unknown billing schema is not proof that the account lacks media entitlement. Operators can quarantine a known-bad account with `extra.grok_media_eligible=false` or force-enable a verified account with `true`. Imports run the billing-first quota probe proactively. Chat requests and video status lookups are not affected by this media-only quarantine. If no eligible account remains, the media endpoint returns HTTP `503` with error type `grok_media_no_eligible_account`.
 
 Administrators can override automatic media eligibility through the account create/update API by setting `extra.grok_media_eligible` to `false` (exclude) or `true` (force eligible). On update, set it to `null` to remove the override and return to automatic probe-based behavior; omitting the field preserves the current override. A weekly allowance period alone is not treated as a paid tier signal. Successful image responses must contain at least one actual image output; empty HTTP `200` responses trigger account failover instead of being counted and returned as successful generations.
+
+---
+
+## TypeSafe / Jev Support
+
+Sub2API supports TypeSafe API-key accounts through Jev's native, non-streaming System One protocol.
+
+- Platform: `typesafe`; account type: API Key
+- Default upstream: `https://api.typesafe.ai`
+- Public endpoint: `POST /v1/systemone`
+- Model: `jev-latest`, also returned by `/v1/models` for TypeSafe groups
+- Questions: `noul`, `choice`, and `score`
+
+Requests and successful responses retain the native System One JSON structure. This endpoint is not compatible with Chat Completions, Responses, Anthropic Messages, or streaming clients.
+
+Question validation follows the TypeSafe OpenAPI wire schema (also used by SDK v0.5.7). `instructions` may be omitted or `null` for all question types. Noul `criteria` may be omitted or `null`; its `true`/`false` descriptions and Choice descriptions accept strings, objects, arrays, or `null`. Score `criteria` must be a non-empty array of string, object, or array descriptions; a single level is valid. SDK integer-keyed Score maps are normalized to arrays by the SDK before sending.
+
+```bash
+curl https://your-sub2api.example.com/v1/systemone \
+  -H 'Authorization: Bearer sk-your-sub2api-key' \
+  -H 'Content-Type: application/json' \
+  --data '{"model":"jev-latest","state":"Text to evaluate","questions":{"safety":{"type":"noul","instructions":"Evaluate whether the text is unsafe"}}}'
+```
+
+The built-in `jev-latest` price is `$0.042` per million input tokens and `$0` for output tokens. Channel pricing can override both values. Credential, billing, permission, rate-limit, overload, server, and network failures (`401`, `402`, `403`, `429`, `529`, `5xx`, transport errors) use the existing account error policy (including custom error codes and temporary-unschedulable rules) and fail over to another account; request errors (`400`, `413`, and `422`) are returned without retrying another account and never change account state. TypeSafe groups (and Composite requests routed to TypeSafe) reject Messages, Chat Completions, Responses, and count_tokens requests with `404`.
 
 ---
 

@@ -57,6 +57,23 @@ class ReleaseMatrixTest(unittest.TestCase):
         self.assertNotIn({'goos': 'windows', 'goarch': 'arm64'}, full)
         self.assertEqual(release.targets(True), [{'goos': 'linux', 'goarch': 'amd64'}])
 
+    def test_prism_notice_is_retained_in_archives_and_image_inputs(self):
+        license_path = Path('backend/resources/licenses/prism/LICENSE')
+        self.assertEqual((ROOT / license_path).read_bytes(),
+                         (ROOT / 'backend/internal/pkg/prismbridge/LICENSE').read_bytes())
+        self.assertIn(b'Copyright (c) 2026 alanbulan', (ROOT / license_path).read_bytes())
+        self.assertEqual((ROOT / license_path.with_name('NOTICE.md')).read_bytes(),
+                         (ROOT / 'backend/internal/pkg/prismbridge/NOTICE.md').read_bytes())
+        for simple in (False, True):
+            data = release.config(simple)
+            for docker in data['dockers']:
+                self.assertIn('backend/resources', docker['extra_files'])
+            if not simple:
+                files = data['archives'][0]['files']
+                self.assertIn('backend/resources/licenses/**', files)
+                self.assertIn('NOTICE.md', files)
+                self.assertIn('docs/PRISM_THIRD_PARTY.md', files)
+
     def test_leaf_keeps_packaging_and_selects_only_one_target(self):
         original = release.config()
         release.generate_config(argparse.Namespace(mode='build', simple=False, goos='darwin', goarch='arm64', output='leaf.yaml'))
@@ -126,17 +143,29 @@ class ReleaseMatrixTest(unittest.TestCase):
             release.verify(args)
 
     def test_linux_context_preserves_binary_executable_mode(self):
-        args = self.fixture_artifacts()
         Path('Dockerfile.goreleaser').write_text('FROM scratch\nCOPY sub2api /sub2api\n')
         Path('deploy').mkdir()
         Path('deploy/docker-entrypoint.sh').write_text('#!/bin/sh\nexec /app/sub2api\n')
         Path('backend/resources').mkdir()
         Path('backend/resources/data').write_text('fixture')
-        release.contexts(args)
-        for arch in ('amd64', 'arm64'):
-            binary = Path('contexts') / arch / 'sub2api'
-            self.assertEqual(binary.read_bytes(), b'fixture')
-            self.assertEqual(binary.stat().st_mode & 0o777, 0o755)
+        license_path = Path('backend/resources/licenses/prism/LICENSE')
+        license_path.parent.mkdir(parents=True)
+        shutil.copyfile(ROOT / license_path, license_path)
+        for simple in (False, True):
+            with self.subTest(simple=simple):
+                if Path('release-input').exists():
+                    shutil.rmtree('release-input')
+                args = self.fixture_artifacts(simple)
+                release.contexts(args)
+                for target in release.targets(simple):
+                    if target['goos'] != 'linux':
+                        continue
+                    directory = Path('contexts') / target['goarch']
+                    binary = directory / 'sub2api'
+                    self.assertEqual(binary.read_bytes(), b'fixture')
+                    self.assertEqual(binary.stat().st_mode & 0o777, 0o755)
+                    self.assertEqual((directory / license_path).read_bytes(),
+                                     (ROOT / license_path).read_bytes())
 
     def test_plan_requires_a_tag_for_publication(self):
         args = argparse.Namespace(ref='main', dry_run=False, simple=False)

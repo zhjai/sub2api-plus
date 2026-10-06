@@ -2,6 +2,7 @@ import { flushPromises, mount, RouterLinkStub } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { OpenAIEvalConfig } from '@/api/admin/accounts'
 import { zhT } from './zhT'
+import { evalConfigServer } from './evalConfigServer'
 
 const api = vi.hoisted(() => ({
   getOpenAIEvalModels: vi.fn(),
@@ -542,7 +543,9 @@ describe('ModelIntegrityTestsView target editing', () => {
       min_error_samples: 50,
       min_ttft_samples: 100
     }
-    api.getOpenAIEvalConfig.mockResolvedValue({ ...editableConfig(), scheduling_thresholds: thresholds })
+    // Account rule conditions are edited on the scheduling page and must survive this page's save.
+    const accountRules = [{ account_id: 1, priority: 1, enabled: true, condition: { metric: 'error_rate' as const, operator: 'lt' as const, threshold: 0.05 } }]
+    api.getOpenAIEvalConfig.mockResolvedValue({ ...editableConfig(), scheduling_thresholds: thresholds, account_priority_rules: accountRules })
     const wrapper = mountView()
     await flushPromises()
 
@@ -552,7 +555,58 @@ describe('ModelIntegrityTestsView target editing', () => {
     await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
     await flushPromises()
     expect((api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig).scheduling_thresholds).toEqual(thresholds)
+    expect((api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig).account_priority_rules).toEqual(accountRules)
     wrapper.unmount()
+  })
+
+  it('keeps configured rule conditions through a tests-page save, server merge and reload', async () => {
+    const server = evalConfigServer({
+      ...editableConfig(),
+      account_priority_rules: [
+        { account_id: 11, priority: 1, enabled: true, condition: { metric: 'ttft_ms', operator: 'lte', threshold: 2500 } },
+        { account_id: 12, priority: 2, requested_models: ['gpt-5'], enabled: false, condition: { metric: 'price', operator: 'lt', threshold: 0.5 } },
+        { account_id: 13, priority: 3, enabled: true }
+      ]
+    })
+    api.getOpenAIEvalConfig.mockImplementation(server.read)
+    api.saveOpenAIEvalConfig.mockImplementation(server.save)
+    const wrapper = mountView()
+    await flushPromises()
+
+    await openEdit(wrapper)
+    await choose('[data-testid="edit-effort"]', '')
+    await apply()
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+
+    // Every rule states its condition on the wire, so the server never has to guess.
+    const sent = (api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig).account_priority_rules!
+    expect(sent.map(rule => rule.condition)).toEqual([
+      { metric: 'ttft_ms', operator: 'lte', threshold: 2500 },
+      { metric: 'price', operator: 'lt', threshold: 0.5 },
+      null
+    ])
+    const expected = [
+      { account_id: 11, priority: 1, enabled: true, condition: { metric: 'ttft_ms', operator: 'lte', threshold: 2500 } },
+      { account_id: 12, priority: 2, requested_models: ['gpt-5'], enabled: false, condition: { metric: 'price', operator: 'lt', threshold: 0.5 } },
+      { account_id: 13, priority: 3, enabled: true }
+    ]
+    expect(server.stored().account_priority_rules).toEqual(expected)
+    wrapper.unmount()
+
+    // A second, different tests-page edit after reopening sends the re-read rules back unchanged.
+    const reopened = mountView()
+    await flushPromises()
+    await reopened.findAll('[data-testid="target"]')[1].trigger('click')
+    await reopened.get('[data-testid="edit-target"]').trigger('click')
+    await flushPromises()
+    await choose('[data-testid="edit-effort"]', 'high')
+    await apply()
+    await reopened.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    expect(api.saveOpenAIEvalConfig).toHaveBeenCalledTimes(2)
+    expect(server.stored().account_priority_rules).toEqual(expected)
+    reopened.unmount()
   })
 
   it('keeps the State Probe schedule and eligibility when a direct OAuth target moves to an explicit effort', async () => {
@@ -1238,8 +1292,8 @@ describe('ModelIntegrityTestsView State Probe diagnostics', () => {
     expect(rows[0].querySelector('[data-testid="sample-attempt"]')).toBeNull()
     const metric = $$('p').find(node => node.textContent?.includes('两次请求状态码'))!.textContent!
     expect(metric).toContain('503 / —')
-    expect(metric).toContain('未能判断线路是否切换')
-    expect(metric).not.toContain('线路未变')
+    expect(metric).toContain('未能根据票据判断线路是否切换')
+    expect(metric).not.toContain('票据未显示切换')
     wrapper.unmount()
   })
 
@@ -1334,7 +1388,7 @@ describe('ModelIntegrityTestsView State Probe diagnostics', () => {
     wrapper.unmount()
   })
 
-  it('shows a successful probe without inventing an error', async () => {
+  it('shows a successful pre-v2 probe without inventing an error or a ticket observation', async () => {
     api.listOpenAIEvalRuns.mockResolvedValue({
       items: [probeRun({ verdict: 'healthy', request_count: 2, mint_status: 200, continue_status: 200 }, { samples: [mint(), linked()] })]
     })
@@ -1342,7 +1396,8 @@ describe('ModelIntegrityTestsView State Probe diagnostics', () => {
     await flushPromises()
     const panel = wrapper.get('[data-testid="test-state_probe"]')
     expect(panel.get('[data-testid="latest-status"]').text()).toBe('正常')
-    expect(panel.get('[data-testid="latest-explanation"]').text()).toBe('两次请求使用同一线路。')
+    // No ticket lengths were recorded, so neither absence nor sameness is claimed.
+    expect(panel.get('[data-testid="latest-explanation"]').text()).toBe('关联请求已完成，票据未显示线路切换。')
 
     await openProbe(wrapper)
     const rows = $$('[data-testid="sample"]')
@@ -1351,7 +1406,135 @@ describe('ModelIntegrityTestsView State Probe diagnostics', () => {
     expect($('[data-testid="sample-error"]')).toBeNull()
     expect($('[data-testid="sample-answer"]')).toBeNull()
     expect($$('[data-testid="sample-completed"]')).toHaveLength(2)
-    expect($$('p').find(node => node.textContent?.includes('两次请求状态码'))!.textContent).toContain('200 / 200，线路未变')
+    const metric = $$('p').find(node => node.textContent?.includes('两次请求状态码'))!.textContent!
+    expect(metric).toContain('200 / 200，票据未显示切换')
+    expect(metric).not.toContain('未签发新票据')
+    expect(metric).not.toContain('相同票据')
+    expect(document.body.textContent).not.toContain('同一线路')
     wrapper.unmount()
+  })
+
+  describe('codex-turn-state-v2 ticket observations', () => {
+    const v2 = (probe: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
+      probeRun({ version: 'codex-turn-state-v2', retry_policy: 'fresh_linked_ticket_chain', attempts: 1, max_attempts: 3, ...probe }, extra)
+    const metricText = () => $$('p').find(node => node.textContent?.includes('两次请求状态码'))!.textContent!
+
+    it.each([
+      ['none', { verdict: 'healthy', ticket_length: 36 }, '正常', '关联请求已完成，未签发新票据。', '未签发新票据'],
+      ['same', { verdict: 'healthy', ticket_length: 36, continue_ticket_length: 36 }, '正常', '关联请求已完成，返回相同票据。', '返回相同票据'],
+      ['different', { verdict: 'degraded', ticket_length: 36, continue_ticket_length: 40, new_ticket: true }, '异常', '关联请求返回不同票据', '返回不同票据']
+    ])('reports a %s ticket from the linked request', async (_, probe, status, explanation, metric) => {
+      api.listOpenAIEvalRuns.mockResolvedValue({
+        items: [v2({ request_count: 2, mint_status: 200, continue_status: 200, ...probe }, { samples: [mint({ probe_id: 'state-probe-1-mint' }), linked({ probe_id: 'state-probe-1-continue' })] })]
+      })
+      const wrapper = mountView()
+      await flushPromises()
+      const panel = wrapper.get('[data-testid="test-state_probe"]')
+      expect(panel.get('[data-testid="latest-status"]').text()).toBe(status)
+      expect(panel.get('[data-testid="latest-explanation"]').text()).toContain(explanation)
+      expect(panel.get('[data-testid="latest-explanation"]').text()).not.toContain('同一线路')
+
+      await openProbe(wrapper)
+      expect(metricText()).toContain(`200 / 200，${metric}`)
+      expect($$('[data-testid="sample-state"]').map(node => node.textContent)).toEqual(['已完成', '已完成'])
+      expect($('[data-testid="sample-error"]')).toBeNull()
+      wrapper.unmount()
+    })
+
+    it('keeps a completed first request without a ticket as inconclusive, not as a failed request', async () => {
+      api.listOpenAIEvalRuns.mockResolvedValue({
+        items: [v2({ failure: 'missing_ticket', last_failure_step: 'mint', request_count: 1, mint_status: 200 }, {
+          samples: [mint({ probe_id: 'state-probe-1-mint', valid: false, error_code: 'missing_ticket', error_message: 'missing ticket', attempt_errors: [{ attempt: 1, code: 'missing_ticket', message: 'missing ticket', http_status: 200 }] })]
+        })]
+      })
+      const wrapper = mountView()
+      await flushPromises()
+      const panel = wrapper.get('[data-testid="test-state_probe"]')
+      expect(panel.get('[data-testid="latest-status"]').text()).toBe('证据不足')
+      const explanation = panel.get('[data-testid="latest-explanation"]').text()
+      expect(explanation).toBe('请求已完成，但未取得首次票据，无法继续判定。')
+      expect(explanation).not.toContain('失败')
+
+      await openProbe(wrapper)
+      const row = $$('[data-testid="sample"]')[0]
+      expect(row.querySelector('.sample-index')!.textContent).toBe('首次请求')
+      expect(row.querySelector('[data-testid="sample-state"]')!.textContent).toBe('已完成')
+      expect(row.querySelector('.sample-brief')!.textContent).toBe('HTTP 200')
+      expect(row.querySelector('details')!.open).toBe(false)
+      expect(row.querySelector('[data-testid="sample-ticket-missing"]')).not.toBeNull()
+      expect(row.querySelector('[data-testid="sample-error"]')).toBeNull()
+      expect($('[data-testid="detail-status"]')!.textContent).toBe('证据不足')
+      expect(metricText()).toContain('未能根据票据判断线路是否切换')
+      expect(document.body.textContent).not.toContain('旧版探针结果')
+      wrapper.unmount()
+    })
+
+    it('still shows an HTTP 200 stream that broke as a failed linked request', async () => {
+      api.listOpenAIEvalRuns.mockResolvedValue({
+        items: [v2({ failure: 'missing_terminal', last_failure_step: 'continue', request_count: 2, mint_status: 200, continue_status: 200, ticket_length: 36 }, {
+          samples: [
+            mint({ probe_id: 'state-probe-1-mint' }),
+            linked({ probe_id: 'state-probe-1-continue', valid: false, error_code: 'missing_terminal', error_message: 'premature EOF before response.completed' })
+          ]
+        })]
+      })
+      const wrapper = mountView()
+      await flushPromises()
+      const explanation = wrapper.get('[data-testid="test-state_probe"] [data-testid="latest-explanation"]').text()
+      expect(explanation).toContain('关联请求失败：premature EOF before response.completed')
+      expect(explanation).not.toContain('旧版探针结果')
+
+      await openProbe(wrapper)
+      expect($$('[data-testid="sample-state"]').map(node => node.textContent)).toEqual(['已完成', '请求失败'])
+      expect($('[data-testid="sample-ticket-missing"]')).toBeNull()
+      wrapper.unmount()
+    })
+  })
+
+  describe('pre-v2 missing_ticket records', () => {
+    const linkedMissing = (probeId: string) => linked({ probe_id: probeId, valid: false, error_code: 'missing_ticket', error_message: 'missing ticket' })
+
+    it.each([
+      ['an absent version and last_failure_step', { version: undefined, last_failure_step: 'continue' }, 'state-probe-1'],
+      ['codex-turn-state-v1 with numbered records only', { version: 'codex-turn-state-v1' }, 'state-probe-1'],
+      ['an unnumbered legacy chain', { version: 'v1' }, 'state-probe']
+    ])('keeps a linked missing_ticket from %s and asks for a new test', async (_, probe, prefix) => {
+      const run = probeRun({ failure: 'missing_ticket', request_count: 2, mint_status: 200, continue_status: 200, ...probe }, {
+        samples: [mint({ probe_id: `${prefix}-mint` }), linkedMissing(`${prefix}-continue`)]
+      })
+      const before = JSON.parse(JSON.stringify(run))
+      api.listOpenAIEvalRuns.mockResolvedValue({ items: [run] })
+      const wrapper = mountView()
+      await flushPromises()
+      const panel = wrapper.get('[data-testid="test-state_probe"]')
+      expect(panel.get('[data-testid="latest-status"]').text()).toBe('证据不足')
+      const explanation = panel.get('[data-testid="latest-explanation"]').text()
+      expect(explanation).toContain('上游未返回线路票据')
+      expect(explanation).toContain('旧版探针结果，请重新测试。')
+
+      await openProbe(wrapper)
+      // The stored failure is shown as recorded, not reread under v2.
+      expect($$('[data-testid="sample-state"]').map(node => node.textContent)).toEqual(['已完成', '请求失败'])
+      expect($('[data-testid="detail-status"]')!.textContent).toBe('证据不足')
+      expect(document.body.textContent).not.toContain('未签发新票据')
+      expect(run).toEqual(before)
+      wrapper.unmount()
+    })
+
+    it('does not call an old first-request missing_ticket a linked-request result', async () => {
+      const run = probeRun({ version: 'codex-turn-state-v1', failure: 'missing_ticket', last_failure_step: 'mint', request_count: 1, mint_status: 200 }, {
+        samples: [mint({ probe_id: 'state-probe-1-mint', valid: false, error_code: 'missing_ticket', error_message: 'missing ticket' })]
+      })
+      const before = JSON.parse(JSON.stringify(run))
+      api.listOpenAIEvalRuns.mockResolvedValue({ items: [run] })
+      const wrapper = mountView()
+      await flushPromises()
+      const explanation = wrapper.get('[data-testid="test-state_probe"] [data-testid="latest-explanation"]').text()
+      expect(explanation).toBe('请求已完成，但未取得首次票据，无法继续判定。')
+      expect(explanation).not.toContain('旧版探针结果')
+      expect(explanation).not.toContain('关联请求')
+      expect(run).toEqual(before)
+      wrapper.unmount()
+    })
   })
 })

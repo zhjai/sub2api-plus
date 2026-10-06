@@ -220,4 +220,33 @@ describe('AccountTestModal', () => {
       mode: 'compact'
     })
   })
+  it('Prism 连接测试只用账号目录的模型，不发送 compact 或媒体模式', async () => {
+    getAvailableModels.mockResolvedValue([{ id: 'prism-plain', display_name: 'Prism Plain' }])
+    global.fetch = vi.fn().mockResolvedValue(
+      createStreamResponse(['data: {"type":"test_complete","success":true}\n'])
+    ) as any
+
+    const wrapper = mountModal({ id: 51, name: 'Prism Account', platform: 'prism', type: 'oauth', status: 'active' })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('admin.accounts.openai.testMode')
+    expect(wrapper.find('textarea.textarea-stub').exists()).toBe(false)
+    const startButton = wrapper.findAll('button').find((button) => button.text().includes('admin.accounts.startTest'))
+    await startButton!.trigger('click')
+    await flushPromises()
+
+    const [, request] = (global.fetch as any).mock.calls[0]
+    expect(JSON.parse(request.body)).toEqual({ model_id: 'prism-plain', prompt: '' })
+  })
+
+  it('Prism 目录为空时不选择任何默认模型', async () => {
+    getAvailableModels.mockRejectedValue({ message: 'catalog unavailable' })
+    const wrapper = mountModal({ id: 52, name: 'Prism Empty', platform: 'prism', type: 'oauth', status: 'active' })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+    expect((wrapper.vm as any).selectedModelId).toBe('')
+    const startButton = wrapper.findAll('button').find((button) => button.text().includes('admin.accounts.startTest'))
+    expect(startButton!.attributes('disabled')).toBeDefined()
+  })
 })

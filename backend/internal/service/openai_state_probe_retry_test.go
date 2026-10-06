@@ -23,7 +23,7 @@ func TestStateProbeRetriesFreshLinkedChains(t *testing.T) {
 		case 2:
 			require.Equal(t, "old-ticket", req.Header.Get(openAICodexTurnStateHeader))
 			require.Contains(t, req.Header.Get("Cookie"), "old-cookie")
-			return stateProbeResponse("", completed, 200), nil
+			return stateProbeResponse("", `{"error":{"code":"rate_limit_exceeded"}}`, http.StatusTooManyRequests), nil
 		case 3:
 			require.Empty(t, req.Header.Get(openAICodexTurnStateHeader))
 			require.Empty(t, req.Header.Get("Cookie"))
@@ -92,7 +92,7 @@ func TestStateProbeContinueFailuresUseAtMostSixFreshRequests(t *testing.T) {
 		}
 		require.Equal(t, previousSession, req.Header.Get("session_id"))
 		require.Equal(t, previousSession, req.Header.Get(openAICodexTurnStateHeader))
-		return stateProbeResponse("", completed, 200), nil
+		return stateProbeResponse("", `{"error":{"code":"rate_limit_exceeded"}}`, http.StatusTooManyRequests), nil
 	}}
 	svc, target := evalOAuthHarness(upstream)
 	result := svc.RunOpenAIStateProbeAttempts(t.Context(), target, 10)

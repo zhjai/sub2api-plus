@@ -54,6 +54,16 @@ func OpenAIEvalModelTraceBankInfo() (revision string, candidates int) {
 	return fmt.Sprintf("sha256:%x", sha256.Sum256(modelTraceBankJSON)), len(modelTraceBank.Models)
 }
 
+// OpenAIEvalModelTraceModels exposes actual baseline coverage to the picker.
+// Return a copy so API consumers cannot mutate the scoring bank.
+func OpenAIEvalModelTraceModels() []string {
+	models := make([]string, 0, len(modelTraceBank.Models))
+	for _, model := range modelTraceBank.Models {
+		models = append(models, model.ID)
+	}
+	return models
+}
+
 func mustDecodeModelTraceJSON[T any](data []byte) T {
 	var value T
 	if err := json.Unmarshal(data, &value); err != nil {

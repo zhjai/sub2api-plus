@@ -11,7 +11,9 @@ const concretePlatforms = [
   'zhipu',
   'deepseek',
   'minimax',
-  'opencode_go'
+  'opencode_go',
+  'typesafe',
+  'prism'
 ]
 
 describe('platform option catalogs', () => {

@@ -183,7 +183,16 @@ export default {
         codexCli: 'Codex CLI',
         codexCliWs: 'Codex CLI (WebSocket)',
         grokCli: 'Grok CLI',
+        systemOne: 'System One',
         opencode: 'OpenCode'
+      },
+      prism: {
+        description: '此密钥可用于 Codex 或其他 Responses API 客户端。可用模型与推理强度以各 Prism 账号的目录为准。',
+        note: 'Codex 工具调用由本网关桥接，并非 Prism 原生执行。不支持上下文压缩，长对话会完整发送。'
+      },
+      typesafe: {
+        description: '通过 TypeSafe 原生 System One 端点调用 Jev。',
+        note: 'System One 不支持流式请求，也不兼容 Chat Completions、Responses、Claude Code 或 Codex 客户端。'
       },
       antigravity: {
         description: '为 Antigravity 分组配置 API 访问。请根据您使用的客户端选择对应的配置方式。',

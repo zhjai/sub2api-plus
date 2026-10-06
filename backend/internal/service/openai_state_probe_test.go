@@ -55,7 +55,7 @@ func TestOpenAIStateProbeShotClassifiesContinuationState(t *testing.T) {
 		require.NotEqual(t, first.ticket, second.ticket)
 	})
 
-	t.Run("missing second ticket is inconclusive evidence", func(t *testing.T) {
+	t.Run("completed continuation without renewal is valid", func(t *testing.T) {
 		upstream := &queuedHTTPUpstream{responses: []*http.Response{
 			stateProbeResponse("ticket-a", completed, http.StatusOK),
 			stateProbeResponse("", completed, http.StatusOK),
@@ -64,7 +64,10 @@ func TestOpenAIStateProbeShotClassifiesContinuationState(t *testing.T) {
 		first := svc.openAIStateProbeShot(t.Context(), account, credential, "probe-token", "gpt-6-astra", "", "")
 		second := svc.openAIStateProbeShot(t.Context(), account, credential, "probe-token", "gpt-6-astra", first.ticket, first.cookies)
 		require.Empty(t, first.failure)
-		require.Equal(t, "missing_ticket", second.failure)
+		require.Empty(t, second.failure)
+		require.True(t, second.terminal)
+		require.True(t, second.record.Valid)
+		require.Empty(t, second.ticket)
 	})
 
 	t.Run("429 is rate limited", func(t *testing.T) {

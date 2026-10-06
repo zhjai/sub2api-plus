@@ -43,6 +43,9 @@ archives:
       - LICENSE*
       - README*
       - deploy/*
+      - NOTICE.md
+      - docs/PRISM_THIRD_PARTY.md
+      - backend/resources/licenses/**
 
 checksum:
   name_template: 'checksums.txt'

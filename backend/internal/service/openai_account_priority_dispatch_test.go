@@ -27,6 +27,117 @@ func TestOpenAIAccountPriorityActualDispatch(t *testing.T) {
 	}
 }
 
+func TestOpenAIAccountPriorityConditionalActualDispatch(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		condition OpenAIEvalAccountPriorityCondition
+		quality   bool
+		runtime   bool
+		want      int64
+	}{
+		{"known price", OpenAIEvalAccountPriorityCondition{Metric: "price", Operator: "gte", Threshold: 3}, false, false, 2},
+		{"unmatched price", OpenAIEvalAccountPriorityCondition{Metric: "price", Operator: "lt", Threshold: 3}, false, false, 1},
+		{"known quality", OpenAIEvalAccountPriorityCondition{Metric: "quality_ratio", Operator: "gte", Threshold: 1}, true, false, 2},
+		{"unknown quality", OpenAIEvalAccountPriorityCondition{Metric: "quality_ratio", Operator: "gte", Threshold: 0}, false, false, 1},
+		{"known errors", OpenAIEvalAccountPriorityCondition{Metric: "error_rate", Operator: "lt", Threshold: .05}, false, true, 2},
+		{"known latency", OpenAIEvalAccountPriorityCondition{Metric: "ttft_ms", Operator: "lte", Threshold: 8000}, false, true, 2},
+		{"unknown errors", OpenAIEvalAccountPriorityCondition{Metric: "error_rate", Operator: "lt", Threshold: .05}, false, false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eval, repo, _, gateway := rankingHarness(t)
+			repo.config.AccountPriorityRules = []OpenAIEvalAccountPriorityRule{{AccountID: 2, Priority: 0, Condition: &tc.condition}}
+			if tc.quality {
+				// rankingHarness has already adopted revision 1. Bump the
+				// repository revision so the changed evidence is visible to the
+				// ranking service during this request-local dispatch test.
+				repo.config.Revision++
+				repo.config.Accounts = []OpenAIEvalAccountConfig{{AccountID: 2, RequestedModel: "gpt-6.1-sol", CandySchedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 300, SampleCount: 1}}}
+				repo.runs = []OpenAIEvalRun{{ID: 1, AccountID: 2, RequestedModel: "gpt-6.1-sol", TestType: OpenAIEvalTypeCandy, TriggerSource: "manual", DataVersion: OpenAIEvalDataVersion, Status: "pass", FinishedAt: time.Now(), Samples: []OpenAIEvalSampleRecord{{Valid: true, Answer: "21"}}}}
+			}
+			require.NoError(t, eval.Initialize(context.Background()))
+			if tc.runtime {
+				gateway.persistentOpenAIAccountScheduler().ReportResultForRequest(2, "gpt-6.1-sol", "", true, rankingPtr(7000))
+			}
+			selection, _, err := gateway.SelectAccountWithScheduler(context.Background(), rankingPtr(int64(7)), "", "", "gpt-6.1-sol", nil, OpenAIUpstreamTransportAny, false)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, selection.Account.ID)
+			selection.ReleaseFunc()
+			// A request-local resolution never overwrites shared conditional rules.
+			require.NotNil(t, openAIEvalSchedulingPolicy.Load().(*openAIEvalSchedulingPolicySnapshot).AccountPriorities[2].allModelsCondition)
+		})
+	}
+}
+
+func TestOpenAIAccountPriorityEvidenceRevisionRaceFallsBackToOrdinaryScheduling(t *testing.T) {
+	eval, repo, _, gateway := rankingHarness(t)
+	repo.config.AccountPriorityRules = []OpenAIEvalAccountPriorityRule{{
+		AccountID: 2, Priority: 0,
+		Condition: &OpenAIEvalAccountPriorityCondition{Metric: "quality_ratio", Operator: "gte", Threshold: 1},
+	}}
+	repo.config.Revision++
+	repo.config.Accounts = []OpenAIEvalAccountConfig{{AccountID: 2, RequestedModel: "gpt-6.1-sol", CandySchedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 300, SampleCount: 1}}}
+	repo.runs = []OpenAIEvalRun{{ID: 1, AccountID: 2, RequestedModel: "gpt-6.1-sol", TestType: OpenAIEvalTypeCandy, TriggerSource: "manual", DataVersion: OpenAIEvalDataVersion, Status: "pass", FinishedAt: time.Now(), Samples: []OpenAIEvalSampleRecord{{Valid: true, Answer: "21"}}}}
+	repo.beforeLatest = func() {
+		gateway.evalRanking.mu.Lock()
+		gateway.evalRanking.config.Revision++
+		gateway.evalRanking.mu.Unlock()
+	}
+	require.NoError(t, eval.Initialize(context.Background()))
+
+	selection, decision, err := gateway.SelectAccountWithScheduler(context.Background(), rankingPtr(int64(7)), "", "", "gpt-6.1-sol", nil, OpenAIUpstreamTransportAny, false)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.Equal(t, int64(1), selection.Account.ID, "unknown conditional evidence falls back to ordinary policy ordering")
+	require.Equal(t, "account_priority_condition_fallback", decision.ReasonCode)
+	require.Equal(t, "account_priority_condition_config_changed", *decision.RankingFallbackReason)
+	selection.ReleaseFunc()
+}
+
+func TestOpenAIAccountPriorityRevisionRacePreservesUnconditionalFallback(t *testing.T) {
+	eval, repo, _, gateway := rankingHarness(t)
+	repo.config.Accounts = []OpenAIEvalAccountConfig{{AccountID: 2, RequestedModel: "gpt-6.1-sol", CandySchedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 300, SampleCount: 1}}}
+	repo.config.AccountPriorityRules = []OpenAIEvalAccountPriorityRule{
+		{AccountID: 2, Priority: 1},
+		{AccountID: 2, Priority: 0, RequestedModels: []string{"gpt-6.1-sol"}, Condition: &OpenAIEvalAccountPriorityCondition{Metric: "quality_ratio", Operator: "gte", Threshold: 1}},
+	}
+	repo.config.Revision++
+	require.NoError(t, eval.Initialize(context.Background()))
+	repo.beforeLatest = func() {
+		gateway.evalRanking.mu.Lock()
+		gateway.evalRanking.config.Revision++
+		gateway.evalRanking.mu.Unlock()
+	}
+	selection, decision, err := gateway.SelectAccountWithScheduler(context.Background(), rankingPtr(int64(7)), "", "", "gpt-6.1-sol", nil, OpenAIUpstreamTransportAny, false)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	t.Cleanup(selection.ReleaseFunc)
+	require.Equal(t, int64(2), selection.Account.ID)
+	require.Equal(t, "account_priority_rule", decision.ReasonCode)
+	require.Equal(t, "account_priority_condition_config_changed", *decision.RankingFallbackReason)
+	traces := gateway.persistentOpenAIAccountScheduler().(*defaultOpenAIAccountScheduler).RecentScheduleTraces(1)
+	require.Len(t, traces, 1)
+	require.Equal(t, decision.RankingFallbackReason, traces[0].RankingFallbackReason)
+}
+
+func TestOpenAIAccountPriorityPolicyRevisionRaceKeepsDispatchAvailable(t *testing.T) {
+	eval, repo, _, gateway := rankingHarness(t)
+	repo.config.Accounts = []OpenAIEvalAccountConfig{{AccountID: 2, RequestedModel: "gpt-6.1-sol", CandySchedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 300, SampleCount: 1}}}
+	repo.config.Revision++
+	require.NoError(t, eval.Initialize(context.Background()))
+	repo.beforeLatest = func() {
+		gateway.evalRanking.mu.Lock()
+		gateway.evalRanking.config.Revision++
+		gateway.evalRanking.mu.Unlock()
+	}
+	selection, decision, err := gateway.SelectAccountWithScheduler(context.Background(), rankingPtr(int64(7)), "", "", "gpt-6.1-sol", nil, OpenAIUpstreamTransportAny, false)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	t.Cleanup(selection.ReleaseFunc)
+	require.Equal(t, int64(1), selection.Account.ID)
+	require.Equal(t, "live_fallback", decision.RankingBasis)
+	require.Equal(t, "config_revision_changed", *decision.RankingFallbackReason)
+}
+
 func TestOpenAIAccountPriorityTracePreservesPoolScores(t *testing.T) {
 	_, repo, accounts, gateway := rankingHarness(t)
 	repo.config.SchedulingPolicy = ""

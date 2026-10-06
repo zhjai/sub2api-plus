@@ -305,6 +305,7 @@ func buildAccountOverview(gen *openAIRankingGeneration, cfg *OpenAIEvalConfig, s
 	sort.Slice(gen.overview, func(i, j int) bool {
 		return rankingPolicyLess(gen.policy, gen.overview[i].OpenAIEvalRankedAccount, gen.overview[j].OpenAIEvalRankedAccount)
 	})
+	demoteRankingThresholdsOnePosition(gen.policy, len(gen.overview), func(i int) OpenAIEvalRankedAccount { return gen.overview[i].OpenAIEvalRankedAccount }, func(i, j int) { gen.overview[i], gen.overview[j] = gen.overview[j], gen.overview[i] })
 	tier := 0
 	gen.overviewByID = make(map[int64]int, len(gen.overview))
 	for i := range gen.overview {

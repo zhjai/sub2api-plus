@@ -75,7 +75,8 @@
               <div class="sample-body">
                 <p v-if="item.legacy" class="text-gray-500 dark:text-gray-400" data-testid="sample-legacy">{{ t('admin.modelIntegrity.tests.samples.legacy') }}</p>
                 <template v-else>
-                  <p v-if="isProbe && item.state !== 'error' && !item.answer" class="text-gray-500 dark:text-gray-400" data-testid="sample-completed">{{ t('admin.modelIntegrity.tests.samples.stateProbe.completedNote') }}</p>
+                  <p v-if="item.ticketMissing" class="text-gray-500 dark:text-gray-400" data-testid="sample-ticket-missing">{{ t('admin.modelIntegrity.tests.samples.stateProbe.ticketMissingNote') }}</p>
+                  <p v-else-if="isProbe && item.state !== 'error' && !item.answer" class="text-gray-500 dark:text-gray-400" data-testid="sample-completed">{{ t('admin.modelIntegrity.tests.samples.stateProbe.completedNote') }}</p>
                   <!-- Candy: the full reply is an annotation, collapsed even when the sample itself is open. -->
                   <details v-else-if="isCandy && item.reply" class="sample-reply" data-testid="sample-reply">
                     <summary class="sample-reply-summary">{{ t('admin.modelIntegrity.tests.samples.fullModelReply') }}</summary>
@@ -129,7 +130,7 @@ import { useI18n } from 'vue-i18n'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import type { OpenAIEvalModelCatalog, OpenAIEvalRun } from '@/api/admin/accounts'
 import { candyExpectedAnswer, candyExtractedAnswer, candyFullReply, isAttributionRun, isHistoricalDataVersion, redactSecrets, resultTone, sampleAnswer, sampleLacksDetail, sampleState, type EvalTestType } from '@/views/admin/modelIntegrity/modelIntegrity'
-import { diagnosticSamples, reinterpretationText, runExplanation, runStatusLabel, sampleErrorHeadline, stateProbeChainCount, stateProbeRequestName } from '@/views/admin/modelIntegrity/runText'
+import { diagnosticSamples, reinterpretationText, runExplanation, runStatusLabel, sampleErrorHeadline, stateProbeChainCount, stateProbeRequestName, stateProbeSampleTicketMissing, stateProbeTicketObservation } from '@/views/admin/modelIntegrity/runText'
 
 const props = defineProps<{
   run: OpenAIEvalRun | null
@@ -161,10 +162,15 @@ const technical = computed(() => {
 const isProbe = computed(() => props.run?.test_type === 'state_probe')
 const isCandy = computed(() => props.run?.test_type === 'candy')
 const probeChains = computed(() => (props.run && isProbe.value ? stateProbeChainCount(props.run) : 1))
-/** Only a probe that reached a verdict may say whether the route changed; a failed one says nothing. */
+/**
+ * What the last chain's tickets showed. Only a probe that reached a verdict
+ * says anything; records without ticket lengths keep the neutral wording.
+ */
 const probeTicket = computed(() => {
   const probe = props.run?.outcome.state_probe
   if (!probe || probe.failure || (probe.verdict !== 'healthy' && probe.verdict !== 'degraded')) return t('admin.modelIntegrity.tests.detail.ticketUnknown')
+  const observation = stateProbeTicketObservation(probe)
+  if (observation) return t(`admin.modelIntegrity.tests.detail.ticket.${observation}`)
   return probe.new_ticket ? t('admin.modelIntegrity.tests.detail.newTicket') : t('admin.modelIntegrity.tests.detail.sameTicket')
 })
 // Every string below is rendered with text interpolation (escaped); never v-html.
@@ -174,17 +180,20 @@ const samples = computed(() => {
   const probe = run.test_type === 'state_probe'
   const chains = probe ? stateProbeChainCount(run) : 1
   return diagnosticSamples(run).map((sample, index) => {
-    const state = sampleState(sample, run.test_type as EvalTestType)
+    // A first request that completed without a ticket was not a failed request; the run stays inconclusive.
+    const ticketMissing = probe && stateProbeSampleTicketMissing(sample)
+    const state = ticketMissing ? 'valid' : sampleState(sample, run.test_type as EvalTestType)
     return {
       index,
       sample,
       state,
+      ticketMissing,
       title: (probe && stateProbeRequestName(t, sample, chains)) || t('admin.modelIntegrity.tests.samples.index', { n: index + 1 }),
       stateLabel: probe && state === 'valid' ? t('admin.modelIntegrity.tests.samples.stateProbe.completed') : t(`admin.modelIntegrity.tests.samples.state.${state}`),
       answer: sampleAnswer(sample),
       extracted: candyExtractedAnswer(sample, expectedAnswer.value),
       reply: redactSecrets(candyFullReply(sample)),
-      message: sample.error_message ? redactSecrets(sample.error_message) : '',
+      message: sample.error_message && !ticketMissing ? redactSecrets(sample.error_message) : '',
       legacy: sampleLacksDetail(sample)
     }
   })

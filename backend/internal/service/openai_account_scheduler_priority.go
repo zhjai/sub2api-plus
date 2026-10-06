@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"time"
 )
@@ -26,6 +27,9 @@ func (s *defaultOpenAIAccountScheduler) resolveAccountPriorityRules(ctx context.
 		return err
 	}
 	req.accountPriorityPool = accounts
+	if err := s.resolveAccountPriorityConditions(ctx, req, accounts); err != nil {
+		return err
+	}
 	for i := range accounts {
 		a := &accounts[i]
 		if _, matched := openAIEvalAccountPriorityFromIndex(req.accountPriorityIndex, a.ID, openAIClientModelForSchedule(*req)); !matched {
@@ -51,6 +55,70 @@ func (s *defaultOpenAIAccountScheduler) resolveAccountPriorityRules(ctx context.
 		req.accountPriorityActive = true
 		break
 	}
+	return nil
+}
+
+// Resolve conditions once per request into a private, unconditional index.
+// All subsequent sorting, affinity and diagnostics use the same decision;
+// the shared configuration snapshot remains immutable.
+func (s *defaultOpenAIAccountScheduler) resolveAccountPriorityConditions(ctx context.Context, req *OpenAIAccountScheduleRequest, accounts []Account) error {
+	hasConditions, needsLoad := false, false
+	for _, entry := range req.accountPriorityIndex {
+		conditions := []*OpenAIEvalAccountPriorityCondition{entry.allModelsCondition}
+		for _, condition := range entry.modelConditions {
+			conditions = append(conditions, condition)
+		}
+		for _, condition := range conditions {
+			if condition != nil {
+				hasConditions = true
+				needsLoad = needsLoad || condition.Metric == "load_rate"
+			}
+		}
+	}
+	if !hasConditions {
+		return nil
+	}
+	var loads map[int64]*AccountLoadInfo
+	if needsLoad && s.service.concurrencyService != nil {
+		loadReq := make([]AccountWithConcurrency, 0, len(accounts))
+		for _, account := range accounts {
+			loadReq = append(loadReq, AccountWithConcurrency{ID: account.ID, MaxConcurrency: account.EffectiveLoadFactor()})
+		}
+		loads, _ = s.service.concurrencyService.GetAccountsLoadBatchFresh(ctx, loadReq)
+	}
+	evidenceReq := *req
+	evidenceReq.priorityConditionEvidence = true
+	rows, _, err := s.explicitRanking(ctx, evidenceReq, accounts, loads)
+	if err != nil {
+		// Evidence is an optional condition gate. A concurrent config save or a
+		// transient ranking read failure must not turn a normal user request into
+		// an unavailable-account error. Unknown evidence deliberately matches no
+		// condition, so the ordinary scheduler remains the safe fallback.
+		resolved := make(map[int64]openAIEvalAccountPriorityIndex)
+		for _, account := range accounts {
+			// Unknown evidence skips conditional rules, not unconditional ones.
+			if priority, matched := openAIEvalAccountPriorityFromIndex(req.accountPriorityIndex, account.ID, openAIClientModelForSchedule(*req)); matched {
+				value := priority
+				resolved[account.ID] = openAIEvalAccountPriorityIndex{allModelsPriority: &value}
+			}
+		}
+		req.accountPriorityIndex = resolved
+		req.accountPriorityActive = false
+		if errors.Is(err, ErrOpenAIEvalRankingSuperseded) {
+			req.accountPriorityResolutionFallback = "account_priority_condition_config_changed"
+		} else {
+			req.accountPriorityResolutionFallback = "account_priority_condition_evidence_unavailable"
+		}
+		return nil
+	}
+	resolved := make(map[int64]openAIEvalAccountPriorityIndex)
+	for _, row := range rows {
+		if priority, matched := openAIEvalAccountPriorityFromIndex(req.accountPriorityIndex, row.AccountID, openAIClientModelForSchedule(*req), row.Factors); matched {
+			value := priority
+			resolved[row.AccountID] = openAIEvalAccountPriorityIndex{allModelsPriority: &value}
+		}
+	}
+	req.accountPriorityIndex = resolved
 	return nil
 }
 

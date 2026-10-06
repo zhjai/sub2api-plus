@@ -138,13 +138,17 @@ export function useModelIntegrityConfig() {
     loading.value = true
     loadError.value = ''
     try {
-      const [meta, saved, accountPage] = await Promise.all([
+      const [meta, saved, accountPage, prismPage] = await Promise.all([
         accountsAPI.getOpenAIEvalModels(),
         accountsAPI.getOpenAIEvalConfig(),
-        accountsAPI.list(1, 500, { platform: 'openai', lite: '1' })
+        accountsAPI.list(1, 500, { platform: 'openai', lite: '1' }),
+        // Prism accounts are native quality-test targets; a failure here must
+        // not hide the OpenAI targets, so it degrades to an empty list.
+        accountsAPI.list(1, 500, { platform: 'prism', lite: '1' }).catch(() => ({ items: [] as AccountListItem[] }))
       ])
       catalog.value = meta
-      accounts.value = accountPage.items
+      const prismAccounts = (prismPage?.items ?? []).filter(item => item.platform === 'prism')
+      accounts.value = [...accountPage.items.filter(item => item.platform !== 'prism'), ...prismAccounts]
       apply(saved)
       conflict.value = false
       loaded.value = true

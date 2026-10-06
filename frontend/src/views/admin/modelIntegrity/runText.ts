@@ -19,11 +19,16 @@ export function runExplanation(t: Translate, run: OpenAIEvalRun, catalog?: OpenA
   if (run.test_type === 'state_probe' && run.outcome.state_probe) {
     const verdict = run.outcome.state_probe.verdict
     const failure = run.outcome.state_probe.failure
+    // The first request completed but carried no ticket: inconclusive evidence, not a failed request.
+    if (stateProbeMintTicketMissing(run)) return t('admin.modelIntegrity.reason.stateProbe.mintMissingTicket')
     if (failure) {
       const base = reasonText(t, failure, run, catalog)
       const detail = stateProbeFailureDetail(t, run)
-      return detail ? joinSentences(base, detail) : base
+      const text = detail ? joinSentences(base, detail) : base
+      return stateProbeLegacyLinkedMissingTicket(run) ? joinSentences(text, t('admin.modelIntegrity.reason.stateProbe.legacyLinkedMissingTicket')) : text
     }
+    const observation = stateProbeTicketObservation(run.outcome.state_probe)
+    if (observation) return t(`admin.modelIntegrity.reason.stateProbe.ticket.${observation}`)
     const key = `admin.modelIntegrity.reason.stateProbe.${verdict}`
     const text = t(key)
     return text === key ? statusLabel(t, verdict) : text
@@ -139,6 +144,68 @@ export function stateProbeRecordStep(sample: OpenAIEvalSampleRecord): { step: 'm
   return { step: match[2] as 'mint' | 'continue', chain: match[1] ? Number(match[1]) : 1 }
 }
 
+type StateProbe = NonNullable<OpenAIEvalRun['outcome']['state_probe']>
+
+/**
+ * v2 and later read a completed linked request without a ticket as valid
+ * (the upstream kept the old one) instead of failing it. Records without a
+ * version predate that.
+ */
+export function isStateProbeV2(probe: StateProbe | undefined): boolean {
+  const match = /^codex-turn-state-v(\d+)$/.exec(probe?.version ?? '')
+  return Boolean(match) && Number(match![1]) >= 2
+}
+
+/**
+ * What the linked request of the last chain returned, only when the record
+ * says so: v2 omits a zero continue_ticket_length, so its absence means no
+ * ticket was issued. Older records without lengths say nothing either way.
+ */
+export function stateProbeTicketObservation(probe: StateProbe | undefined): 'none' | 'same' | 'different' | null {
+  if (!probe || probe.failure || (probe.verdict !== 'healthy' && probe.verdict !== 'degraded')) return null
+  const length = Number(probe.continue_ticket_length) || 0
+  if (!isStateProbeV2(probe) && length <= 0) return null
+  if (length <= 0) return 'none'
+  return probe.new_ticket ? 'different' : 'same'
+}
+
+/**
+ * Step of the last chain that failed: the server's last_failure_step, or the
+ * last failed record's step on records that predate it.
+ */
+export function stateProbeFailureStep(run: OpenAIEvalRun): 'mint' | 'continue' | null {
+  const probe = run.outcome.state_probe
+  if (!probe?.failure) return null
+  if (probe.last_failure_step === 'mint' || probe.last_failure_step === 'continue') return probe.last_failure_step
+  const sample = diagnosticSamples(run).filter(sampleFailed).at(-1)
+  return sample ? stateProbeRecordStep(sample)?.step ?? null : null
+}
+
+/** A first request that completed (HTTP 200) without returning a ticket, so the chain could not continue. */
+export function stateProbeSampleTicketMissing(sample: OpenAIEvalSampleRecord): boolean {
+  return sample.error_code === 'missing_ticket' && sample.http_status === 200 && stateProbeRecordStep(sample)?.step === 'mint'
+}
+
+/** The probe stopped because the first request of its last chain completed without a ticket. */
+export function stateProbeMintTicketMissing(run: OpenAIEvalRun): boolean {
+  return run.outcome.state_probe?.failure === 'missing_ticket' && stateProbeFailureStep(run) === 'mint'
+}
+
+/**
+ * Before v2 a linked request that completed without a new ticket was failed
+ * as missing_ticket; v2 reads it as valid. The stored result is kept as is,
+ * with a note to run the probe again.
+ */
+export function stateProbeLegacyLinkedMissingTicket(run: OpenAIEvalRun): boolean {
+  const probe = run.outcome.state_probe
+  return probe?.failure === 'missing_ticket' && !isStateProbeV2(probe) && stateProbeFailureStep(run) === 'continue'
+}
+
+/** A failed State Probe request; a completed first request without a ticket is inconclusive, not failed. */
+export function stateProbeSampleFailed(sample: OpenAIEvalSampleRecord): boolean {
+  return sampleFailed(sample) && !stateProbeSampleTicketMissing(sample)
+}
+
 /** Chains the run actually sent, read from its records when the outcome omits the count. */
 export function stateProbeChainCount(run: OpenAIEvalRun): number {
   const reported = Number(run.outcome.state_probe?.attempts)
@@ -167,7 +234,7 @@ export function stateProbeRequestName(t: Translate, sample: OpenAIEvalSampleReco
  * earlier chain's failure was already superseded by the retry.
  */
 function stateProbeFailureDetail(t: Translate, run: OpenAIEvalRun): string {
-  const sample = diagnosticSamples(run).filter(sampleFailed).at(-1)
+  const sample = diagnosticSamples(run).filter(stateProbeSampleFailed).at(-1)
   if (!sample) return ''
   const parts: string[] = []
   if (sample.http_status && sample.http_status >= 400) parts.push(t('admin.modelIntegrity.tests.samples.http', { status: sample.http_status }))

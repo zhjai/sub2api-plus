@@ -37,9 +37,16 @@ export default {
     },
     reason: {
       stateProbe: {
-        healthy: 'Both requests used the same route.',
-        degraded: 'The route changed between the two requests. This result does not change BPS state; automatic BPS switching for an account is driven by that account’s independent probe under Scheduling policy.',
-        inconclusive: 'Could not determine whether the route changed.'
+        healthy: 'The linked request completed; its ticket showed no route change.',
+        degraded: 'The linked request returned a changed ticket, so the route may have switched. This result does not change BPS state; automatic BPS switching for an account is driven by that account’s independent probe under Scheduling policy.',
+        inconclusive: 'The tickets could not show whether the route changed.',
+        ticket: {
+          none: 'The linked request completed without issuing a new ticket.',
+          same: 'The linked request completed and returned the same ticket.',
+          different: 'The linked request returned a different ticket, so the route may have switched. This result does not change BPS state; automatic BPS switching for an account is driven by that account’s independent probe under Scheduling policy.'
+        },
+        mintMissingTicket: 'The request completed but returned no first ticket, so the probe could not continue.',
+        legacyLinkedMissingTicket: 'Result from an older probe version; run the test again.'
       },
       running: 'Test in progress. Refresh later to see the result.',
       noDetail: 'No additional details for this result.',
@@ -128,7 +135,7 @@ export default {
         },
         state_probe: {
           name: 'State probe',
-          what: 'Sends two linked requests — first a mint, then a continue — to detect whether the route switches mid-way; on failure it starts a fresh chain, at most 3 chains and 6 requests. The result is not part of the integrity pass rate and does not change BPS state; automatic BPS switching is driven by the account probe under Scheduling policy.'
+          what: 'Sends two linked requests — first a mint, then a continue — and compares the returned tickets to infer whether the route switches mid-way; tickets reflect routing only, not model quality. On failure it starts a fresh chain, at most 3 chains and 6 requests. The result is not part of the integrity pass rate and does not change BPS state; automatic BPS switching is driven by the account probe under Scheduling policy.'
         }
       },
       runNow: 'Test now',
@@ -234,9 +241,14 @@ export default {
         attributionNote: 'Attribution is inferred from response behavior and does not prove the actual route. When this test is set to run automatically, its latest completed attribution counts toward the integrity pass rate, manual or automatic. ModelTrace can attribute from one valid output, with failed requests kept for diagnosis; Fingerprint attributes only when every planned sample is valid.',
         stateProbeMetric: 'Status codes {mint} / {cont}, {ticket}',
         stateProbeMetricChains: '{chains} chains sent; last chain status codes {mint} / {cont}, {ticket}',
-        newTicket: 'route switched',
-        sameTicket: 'route unchanged',
-        ticketUnknown: 'route change not determined',
+        newTicket: 'ticket changed',
+        sameTicket: 'ticket showed no route change',
+        ticketUnknown: 'route change not determined from tickets',
+        ticket: {
+          none: 'no new ticket issued',
+          same: 'same ticket returned',
+          different: 'different ticket returned'
+        },
         logicalSamples: 'Valid / planned samples',
         physicalRequests: 'Upstream requests (incl. retries)',
         expected: 'Expected answer',
@@ -278,6 +290,7 @@ export default {
           inChain: '{request} of chain {chain}',
           completed: 'Completed',
           completedNote: 'The request completed. This check compares route tickets only, so no answer text is stored.',
+          ticketMissingNote: 'The request completed, but the upstream returned no ticket, so the linked request could not be sent.',
           notSent: 'Not sent',
           failure: '{request} failed: {error}.',
           notSentFailure: 'No request was sent: {error}.'
@@ -287,6 +300,19 @@ export default {
         title: 'Add test targets',
         accounts: 'Accounts',
         accountsHint: 'Multiple selection supported. Only OpenAI accounts are listed.',
+        prismAccountsHint: 'Multiple selection supported. Models and efforts come from the selected accounts’ own Prism catalogs.',
+        noPrismAccounts: 'No Prism accounts found.',
+        source: 'Account type',
+        prismPickAccountFirst: 'Select accounts first',
+        prismLoadingModels: 'Loading the account’s Prism models…',
+        prismCatalogLoading: 'Loading models…',
+        prismCatalogError: 'Models unavailable',
+        prismCatalogCount: '{count} models',
+        prismCatalogFailed: 'Could not load the Prism models for {accounts}. Retry, or refresh the account credentials on the Accounts page.',
+        prismNoSharedModels: 'The selected accounts have no model in common. Select fewer accounts.',
+        prismNoModels: 'This account has no selectable Prism model right now. Check its aliases and catalog on the Accounts page.',
+        prismDefaultEffort: 'Default ({effort})',
+        prismNote: 'Prism targets run Candy on any catalog model; Fingerprint and ModelTrace only when a versioned baseline covers the model. State Probe and BPS do not apply.',
         searchAccounts: 'Search by account name or ID',
         noAccounts: 'No OpenAI accounts found.',
         model: 'Requested model',
@@ -299,6 +325,8 @@ export default {
       },
       edit: {
         open: 'Edit',
+        prismCatalogFailed: 'Could not load this account’s Prism models.',
+        prismNotInCatalog: '{model} (not in the account’s catalog)',
         title: 'Edit test target',
         account: 'Account',
         submit: 'Apply',
@@ -306,6 +334,18 @@ export default {
         duplicate: 'This account already has a {target} test target.',
         hint: 'Automatic test plans stay the same; the change applies to future tests only. History keeps the original model and reasoning effort.',
         stateProbeDefault: 'State probe keeps running on the account\'s default reasoning effort; its automatic plan is unchanged.'
+      },
+      prism: {
+        target: 'Prism account. Models and efforts follow its own catalog.',
+        targetAlias: 'Prism account. This name is an alias for {model}; tests evaluate that model.',
+        targetLoading: 'Prism account. Loading its model catalog…',
+        targetCatalogError: 'Prism account. Its model catalog could not be loaded; the server still checks every run.',
+        noFingerprintBaseline: 'No versioned Fingerprint baseline covers {model}, so this test does not run for this target.',
+        stateProbeUnsupported: 'Prism does not support the Codex state probe or BPS.',
+        unsupported: 'Not available for Prism targets.',
+        noModelTraceBaseline: 'The ModelTrace bank does not cover {model}, so this test does not run for this target.',
+        modelTraceCoverageUnknown: 'This server does not report which models the ModelTrace bank covers; an uncovered run is rejected before any request is sent.',
+        notInCatalog: '{model} is not a selectable model on this account right now. Runs will be rejected until the target is edited.'
       },
       baselineNote: 'Fingerprint reference version {version}.'
     },
@@ -321,9 +361,27 @@ export default {
           quality: 'Integrity pass rate',
           price: 'Price',
           errors: 'Error rate',
-          speed: 'First-token latency'
+          speed: 'First-token latency',
+          load: 'Concurrency load'
         },
         levelAria: '{factor}: {level} of 4',
+        /** A bar shows how strongly a factor decides the order, not a fixed backend weight. */
+        meter: {
+          legend: 'Bars show how strongly each factor decides the order, not fixed backend weights. Hover a row to see its exact role in that policy.',
+          aria: '{factor}: {role}',
+          system: 'Scheduling weight from system settings',
+          sort: 'Sort key: ordered from lowest price',
+          sort_in_tier: 'Ordered from lowest price within a pass-rate tier',
+          gate_strict: 'Strict threshold ({limit}): an account over it moves back one position; not weighted',
+          gate_standard: 'Standard threshold ({limit}): an account over it moves back one position; not weighted',
+          gate_loose: 'Loose threshold ({limit}): an account over it moves back one position; not weighted',
+          weight: 'Custom weight {share}%',
+          tier: 'Grouped by pass rate first; a higher tier always wins and price cannot offset it',
+          priority: 'Priority {n}: compared strictly before the weights',
+          ignored: 'Does not affect the order',
+          percent: '{value}%',
+          seconds: '{value} s'
+        },
         qualityMode: {
           tier: 'Compared first',
           ignored: 'Not used'
@@ -354,7 +412,7 @@ export default {
           },
           cost_first: {
             name: 'Lowest cost first',
-            effect: 'Orders accounts by price, cheapest first. An account whose real requests exceed this policy’s error rate or first-token latency threshold moves behind the rest.'
+            effect: 'Orders accounts by price, cheapest first. An account whose real requests exceed this policy’s error rate or first-token latency threshold moves back one position, swapping with the next account.'
           },
           stability_first: {
             name: 'Stability first',
@@ -362,7 +420,7 @@ export default {
           },
           avoid_degradation: {
             name: 'Avoid degradation',
-            effect: 'The integrity pass rate tier always comes first, and accounts within a tier are ordered by price. If the best tier has no account within the thresholds, the next tier is tried.'
+            effect: 'The integrity pass rate always comes first: every account in a higher tier is tried before any account in a lower tier. Within a tier, accounts are ordered by price, and an account over a threshold moves back one position inside its tier, never into a lower tier.'
           },
           custom_balance: {
             name: 'Custom balance',
@@ -409,12 +467,12 @@ export default {
             summaryJoin: ', then '
           }
         },
-        avoidNote: 'The integrity pass rate is counted per test: of the selected Candy, Fingerprint and ModelTrace tests, how many had a passed or likely passed verdict in their latest completed run, divided by the number selected. A test is selected when it is set to run automatically; its latest result counts whether that run was manual or automatic, and a run still in progress does not replace it. Two selected with one passing is 50%; three selected with one passing is 33.3%. Each test counts once by its final verdict, whatever its sample count or retries. If the latest result of any selected test has no valid verdict (no valid output, a failed or cancelled run, or expired), the rate is unknown and counts as neither passed nor degraded; an older passing result is not used instead. “Avoid degradation” always chooses from the best pass rate tier first and orders it by price; if that tier has no account within the thresholds or no available capacity, the next tier is tried. Accounts with an unknown pass rate are tried after every assessed account. Account disabling, model support, capacity and continued-response account binding are still checked live.',
+        avoidNote: 'The integrity pass rate is counted per test: of the selected Candy, Fingerprint and ModelTrace tests, how many had a passed or likely passed verdict in their latest completed run, divided by the number selected. A test is selected when it is set to run automatically; its latest result counts whether that run was manual or automatic, and a run still in progress does not replace it. Two selected with one passing is 50%; three selected with one passing is 33.3%. Each test counts once by its final verdict, whatever its sample count or retries. If the latest result of any selected test has no valid verdict (no valid output, a failed or cancelled run, or expired), the rate is unknown and counts as neither passed nor degraded; an older passing result is not used instead. “Avoid degradation” always chooses from the best pass rate tier first and orders it by price; the next tier is tried only when no account in that tier can serve the request. A runtime threshold moves an account back at most one position within its own tier and never places a lower tier first. Accounts with an unknown pass rate are tried after every assessed account. Account disabling, model support, capacity and continued-response account binding are still checked live.',
         sharedNote: 'With any policy other than “System default” in force, the published order replaces account priority, the system scheduling weights and movable session affinity. Only a required binding, such as continuing a previous response, still keeps a request on its account. Load weight is adjustable only under “Custom balance”; the other policies use a fixed weight.'
       },
       thresholds: {
         title: 'Runtime thresholds',
-        hint: 'When an account’s real requests exceed its policy’s error rate or first-token latency threshold, it moves behind the accounts within both. It is not disabled: owner, group and capacity checks still decide which accounts can serve. “System default” uses no thresholds, and “Custom balance” is ordered by its own priorities and weights, so neither has a row here.',
+        hint: 'When an account’s real requests exceed its policy’s error rate or first-token latency threshold, it moves back one position, swapping with the account after it; it is not sent to the end. Under “Avoid degradation” it moves only within its pass rate tier. It is not disabled: owner, group and capacity checks still decide which accounts can serve. “System default” uses no thresholds, and “Custom balance” is ordered by its own priorities and weights, so neither has a row here.',
         columns: {
           errorRate: 'Error rate above',
           ttft: 'First-token latency above'
@@ -424,7 +482,7 @@ export default {
         },
         inUse: 'In use',
         fieldAria: '{policy}: {field}',
-        zeroNote: 'An error rate of 0% moves an account back after any failed request, once it has the minimum samples.',
+        zeroNote: 'An error rate of 0% moves an account back one position after any failed request, once it has the minimum samples.',
         samples: {
           title: 'Minimum real samples, shared by all policies',
           min_error_samples: 'Requests before the error rate counts',
@@ -473,7 +531,7 @@ export default {
       },
       accountRules: {
         title: 'Account priority rules',
-        hint: 'Accounts that match a rule are scheduled before other accounts, lower numbers first. Accounts with the same priority are ordered by the scheduling policy. For one account, a rule for specific models takes precedence over a rule for all models.',
+        hint: 'Accounts that match a rule are scheduled before other accounts, lower numbers first. Accounts with the same priority are ordered by the scheduling policy. Under “Avoid degradation”, pass rate tiers always come first and rules only reorder accounts within the same tier. For one account, a rule for specific models takes precedence over a rule for all models.',
         empty: 'No rules configured. Accounts are ordered by the scheduling policy.',
         add: 'Add account rule',
         remove: 'Delete account rule',
@@ -485,10 +543,44 @@ export default {
         someModels: 'Specific models',
         models: 'Public models this rule applies to',
         enableLabel: 'Enable the priority rule for {account}',
+        condition: {
+          label: 'Applies when',
+          none: 'Always',
+          metricAria: 'Condition metric',
+          operatorAria: 'Comparison',
+          valueAria: 'Condition value',
+          metrics: {
+            quality_ratio: 'Pass rate',
+            error_rate: 'Error rate',
+            ttft_ms: 'First-token latency',
+            price: 'Price multiplier',
+            load_rate: 'Load'
+          },
+          operators: {
+            gte: 'at least',
+            gt: 'above',
+            lte: 'at most',
+            lt: 'below',
+            eq: 'equal to'
+          },
+          units: {
+            percent: '%',
+            seconds: 's',
+            multiplier: '×'
+          },
+          ranges: {
+            percent: 'a number from 0 to 100',
+            seconds: 'a number of 0 or more',
+            multiplier: 'a number of 0 or more'
+          },
+          noneNote: 'The rule always applies.',
+          unknownNote: 'Applies only while the account’s current data meets the condition; an account without that data does not meet it. When a specific-models rule does not apply, the account’s all-models rule is used instead, or the scheduling policy if there is none.'
+        },
         errors: {
           account: 'Select an account.',
           priority: 'Priority must be a whole number.',
           models: 'Select at least one model.',
+          condition: 'The {metric} value must be {range}.',
           overlap: 'This account already has an enabled rule covering the same model.'
         }
       },
@@ -840,16 +932,16 @@ export default {
         modelsKnown: '{known} of {models} models known',
         compositeOf: 'out of 100',
         /**
-         * Why an account sits behind the others: its real requests exceeded a
-         * runtime threshold of the policy in force. Codes are listed in
+         * Why an account moved back one position: its real requests exceeded
+         * a runtime threshold of the policy in force. Codes are listed in
          * THRESHOLD_REASONS; an unknown one is shown as sent.
          */
         threshold: {
-          label: 'Behind the threshold',
+          label: 'Moved back for threshold',
           error_rate_threshold: 'Error rate',
           ttft_threshold: 'First output',
           other: 'Code: {code}',
-          hint: 'Real requests from this account exceeded the policy’s runtime threshold, so it is ordered behind the accounts within both. It is not disabled, and the owner, group and capacity checks still decide what can serve.',
+          hint: 'Real requests from this account exceeded the policy’s runtime threshold, so it moved back one position. Under “Avoid degradation” it stays within its pass rate tier. It is not disabled, and the owner, group and capacity checks still decide what can serve.',
           evidence: 'Computed from this account’s real requests, not from this evaluation.'
         },
         ineligible: 'Unavailable at evaluation',
@@ -906,7 +998,7 @@ export default {
           other: 'The server reported an unlisted source. It is not treated as a measurement.'
         },
         ordering: {
-          price_asc: 'Ordered by price, cheapest first; accounts whose real requests exceeded a runtime threshold come last.',
+          price_asc: 'Ordered by price, cheapest first; an account whose real requests exceeded a runtime threshold moves back one position.',
           score_desc: 'Ordered by score, highest first; ties by account ID.',
           priorities_then_score: 'Ordered by your priority factors in turn, with missing evidence for a factor ranked below known evidence; remaining ties by score, highest first, then by account ID.',
           quality_then_score: 'Ordered by pass rate, highest first, with unknown after every known rate. Equal pass rates are ordered by the operational score (price, errors, first output and load), then by account ID.',

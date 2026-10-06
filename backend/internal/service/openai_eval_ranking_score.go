@@ -188,6 +188,7 @@ func scoreOpenAIEvalRankingWithThresholds(policy string, weights OpenAIEvalRanki
 		}
 		return rankingPolicyLess(policy, rows[i], rows[j])
 	})
+	demoteRankingThresholdsOnePosition(policy, len(rows), func(i int) OpenAIEvalRankedAccount { return rows[i] }, func(i, j int) { rows[i], rows[j] = rows[j], rows[i] })
 	tier := 0
 	for i := range rows {
 		if rows[i].PriorityScore == nil {

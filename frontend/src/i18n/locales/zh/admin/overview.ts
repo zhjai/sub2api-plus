@@ -986,6 +986,8 @@ export default {
         deepseek: 'DeepSeek',
         minimax: 'MiniMax',
         opencode_go: 'OpenCode',
+        typesafe: 'TypeSafe / Jev',
+        prism: 'Prism',
         composite: 'Composite',
       },
       saving: '保存中...',

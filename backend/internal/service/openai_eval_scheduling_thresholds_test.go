@@ -90,7 +90,7 @@ func TestSchedulingThresholdPriceOrderSampleFloorAndQuality(t *testing.T) {
 	p, w := openAIEvalRankingWeights(&OpenAIEvalConfig{SchedulingPolicy: OpenAIEvalSchedulingPolicyAvoidDegradation}, "", "")
 	require.EqualValues(t, 2, scoreOpenAIEvalRanking(p, w, inputs, now, nil)[0].AccountID)
 	inputs[1].factors.TTFT = OpenAIEvalRankingTTFT{OpenAIEvalFactorMeta: rankingKnown(.1, now), MS: rankingPtr(16000.), SampleCount: 20}
-	require.EqualValues(t, 1, scoreOpenAIEvalRanking(p, w, inputs, now, nil)[0].AccountID)
+	require.EqualValues(t, 2, scoreOpenAIEvalRanking(p, w, inputs, now, nil)[0].AccountID, "quality remains ahead of runtime threshold penalties")
 	thresholds := defaultOpenAIEvalSchedulingThresholds()
 	thresholds.AvoidDegradation.TTFTSeconds = 20
 	require.EqualValues(t, 2, scoreOpenAIEvalRankingWithThresholds(p, w, inputs, now, nil, thresholds)[0].AccountID)

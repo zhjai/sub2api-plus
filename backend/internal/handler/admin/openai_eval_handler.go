@@ -126,15 +126,31 @@ func mergeOpenAIEvalConfigOmittedFields(incoming, current *service.OpenAIEvalCon
 		// an explicitly disabled saved rule instead of silently re-enabling it.
 		var rawRules []map[string]json.RawMessage
 		if json.Unmarshal(raw, &rawRules) == nil {
-			previousEnabled := make(map[string]*bool, len(current.AccountPriorityRules))
+			previousRules := make(map[string]service.OpenAIEvalAccountPriorityRule, len(current.AccountPriorityRules))
+			previousByBase := make(map[string]service.OpenAIEvalAccountPriorityRule, len(current.AccountPriorityRules))
 			for _, rule := range current.AccountPriorityRules {
-				previousEnabled[openAIEvalAccountPriorityRuleMergeKey(rule)] = cloneBoolPointer(rule.Enabled)
+				previousRules[openAIEvalAccountPriorityRuleMergeKey(rule)] = rule
+				previousByBase[openAIEvalAccountPriorityRuleBaseKey(rule)] = rule
 			}
 			for i := range incoming.AccountPriorityRules {
-				if _, present := rawRules[i]["enabled"]; present {
-					continue
+				rawRule := rawRoutesField(rawRules, i)
+				previous, hasPrevious := previousRules[openAIEvalAccountPriorityRuleMergeKey(incoming.AccountPriorityRules[i])]
+				if _, conditionPresent := rawRule["condition"]; !conditionPresent {
+					// Cached clients from before conditional rules existed omit the
+					// field entirely. Preserve the stored condition by base identity;
+					// an explicit JSON null below remains a deliberate clear.
+					if fallback, ok := previousByBase[openAIEvalAccountPriorityRuleBaseKey(incoming.AccountPriorityRules[i])]; ok {
+						previous = fallback
+						hasPrevious = true
+						if fallback.Condition != nil {
+							condition := *fallback.Condition
+							incoming.AccountPriorityRules[i].Condition = &condition
+						}
+					}
 				}
-				incoming.AccountPriorityRules[i].Enabled = cloneBoolPointer(previousEnabled[openAIEvalAccountPriorityRuleMergeKey(incoming.AccountPriorityRules[i])])
+				if _, enabledPresent := rawRule["enabled"]; !enabledPresent && hasPrevious {
+					incoming.AccountPriorityRules[i].Enabled = cloneBoolPointer(previous.Enabled)
+				}
 			}
 		}
 	}
@@ -206,17 +222,33 @@ func cloneOpenAIEvalAccountPriorityRules(rules []service.OpenAIEvalAccountPriori
 		cloned[i] = rule
 		cloned[i].RequestedModels = append([]string(nil), rule.RequestedModels...)
 		cloned[i].Enabled = cloneBoolPointer(rule.Enabled)
+		if rule.Condition != nil {
+			condition := *rule.Condition
+			cloned[i].Condition = &condition
+		}
 	}
 	return cloned
 }
 
 func openAIEvalAccountPriorityRuleMergeKey(rule service.OpenAIEvalAccountPriorityRule) string {
+	return openAIEvalAccountPriorityRuleBaseKey(rule) + "|" + openAIEvalAccountPriorityRuleConditionKey(rule)
+}
+
+func openAIEvalAccountPriorityRuleBaseKey(rule service.OpenAIEvalAccountPriorityRule) string {
 	models := make([]string, 0, len(rule.RequestedModels))
 	for _, model := range rule.RequestedModels {
 		models = append(models, strings.ToLower(strings.TrimSpace(model)))
 	}
 	sort.Strings(models)
 	return strconv.FormatInt(rule.AccountID, 10) + "|" + strings.Join(models, ",")
+}
+
+func openAIEvalAccountPriorityRuleConditionKey(rule service.OpenAIEvalAccountPriorityRule) string {
+	condition := ""
+	if rule.Condition != nil {
+		condition = rule.Condition.Metric + ":" + rule.Condition.Operator + ":" + strconv.FormatFloat(rule.Condition.Threshold, 'g', -1, 64)
+	}
+	return condition
 }
 
 func mergeOpenAIEvalQualityWeight(incoming *service.OpenAIEvalPolicyWeights, current service.OpenAIEvalPolicyWeights, raw json.RawMessage) {
@@ -376,7 +408,7 @@ func (h *AccountHandler) ListOpenAIEvalModels(c *gin.Context) {
 			return out
 		}(),
 		"candy":             gin.H{"expected_answer": service.OpenAIEvalCandyExpectedAnswer, "confidence": "low", "scheduling": "automatic_quality"},
-		"modeltrace":        gin.H{"requests": service.OpenAIEvalModelTraceRequests, "bank_revision": bankRevision, "candidate_count": candidateCount, "scheduling": "automatic_quality"},
+		"modeltrace":        gin.H{"requests": service.OpenAIEvalModelTraceRequests, "bank_revision": bankRevision, "candidate_count": candidateCount, "models": service.OpenAIEvalModelTraceModels(), "scheduling": "automatic_quality"},
 		"evaluation_notice": "Valid automatic results contribute observed quality fractions when evaluation effects are enabled. Manual diagnostics and operational failures do not become routing evidence. Behavioral attribution does not prove model identity.",
 		"reasoning_efforts": []string{"", "minimal", "low", "medium", "high", "xhigh", "max"},
 		"fingerprint_modes": []gin.H{

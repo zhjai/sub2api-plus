@@ -2,6 +2,9 @@
 // They only describe what the backend already enforces; keep numbers here in
 // sync with backend/internal/service/openai_eval*.go instead of inventing them.
 import type {
+  OpenAIEvalAccountRuleCondition,
+  OpenAIEvalAccountRuleConditionMetric,
+  OpenAIEvalAccountRuleConditionOperator,
   OpenAIEvalAccountPriorityRule,
   OpenAIEvalBPSAccountConfig,
   OpenAIEvalBPSMode,
@@ -242,28 +245,90 @@ export function normalizeAccountPriorityRule(rule: OpenAIEvalAccountPriorityRule
     account_id: rule.account_id,
     priority: rule.priority,
     requested_models: [...(rule.requested_models ?? [])],
-    enabled: isRuleEnabled(rule)
+    enabled: isRuleEnabled(rule),
+    // Kept exactly as loaded, even when out of range: validation reports it.
+    ...(rule.condition ? { condition: { ...rule.condition } } : {})
   }
 }
 
-/** An empty model list is sent as omitted, which the server reads as every model. */
+/**
+ * An empty model list is sent as omitted, which the server reads as every
+ * model. The condition is always sent, as null when unconditional: the server
+ * keeps the stored condition when the field is missing (for clients older
+ * than conditions), so null is the only way to clear one.
+ */
 function accountPriorityRulePayload(rule: OpenAIEvalAccountPriorityRule): OpenAIEvalAccountPriorityRule {
   const models = (rule.requested_models ?? []).map(model => model.trim()).filter(Boolean)
   return {
     account_id: rule.account_id,
     priority: rule.priority,
     ...(models.length ? { requested_models: models } : {}),
-    enabled: isRuleEnabled(rule)
+    enabled: isRuleEnabled(rule),
+    condition: rule.condition ? { metric: rule.condition.metric, operator: rule.condition.operator, threshold: rule.condition.threshold } : null
   }
 }
 
-export type AccountPriorityRuleIssue = 'account' | 'priority' | 'models' | 'overlap'
+// -- Account rule conditions --------------------------------------------------
+
+export const CONDITION_METRICS: OpenAIEvalAccountRuleConditionMetric[] = ['quality_ratio', 'error_rate', 'ttft_ms', 'price', 'load_rate']
+export const CONDITION_OPERATORS: OpenAIEvalAccountRuleConditionOperator[] = ['gte', 'gt', 'lte', 'lt', 'eq']
+
+/** How a metric is typed in the editor: rates as percent, first-token time in seconds, price as the multiplier. */
+export type ConditionUnit = 'percent' | 'seconds' | 'multiplier'
+export const CONDITION_UNITS: Record<OpenAIEvalAccountRuleConditionMetric, ConditionUnit> = {
+  quality_ratio: 'percent',
+  error_rate: 'percent',
+  ttft_ms: 'seconds',
+  price: 'multiplier',
+  load_rate: 'percent'
+}
+
+/** A sensible starting point when a metric is picked, e.g. 通过率 ≥ 100 % or 错误率 < 5 %. */
+export const CONDITION_DEFAULTS: Record<OpenAIEvalAccountRuleConditionMetric, OpenAIEvalAccountRuleCondition> = {
+  quality_ratio: { metric: 'quality_ratio', operator: 'gte', threshold: 1 },
+  error_rate: { metric: 'error_rate', operator: 'lt', threshold: 0.05 },
+  ttft_ms: { metric: 'ttft_ms', operator: 'lte', threshold: 8000 },
+  price: { metric: 'price', operator: 'lte', threshold: 1 },
+  load_rate: { metric: 'load_rate', operator: 'lt', threshold: 80 }
+}
+
+/** Stored value → the number shown in the editor (0.05 → 5, 8000 ms → 8 s). */
+export function conditionDisplayValue(metric: OpenAIEvalAccountRuleConditionMetric, threshold: number): number {
+  if (metric === 'quality_ratio' || metric === 'error_rate') return Number((threshold * 100).toFixed(6))
+  if (metric === 'ttft_ms') return Number((threshold / 1000).toFixed(6))
+  return threshold
+}
+
+/** Typed number → stored value; NaN stays NaN so an unreadable entry blocks the save. */
+export function conditionStoredValue(metric: OpenAIEvalAccountRuleConditionMetric, display: number): number {
+  if (metric === 'quality_ratio' || metric === 'error_rate') return Number((display / 100).toFixed(8))
+  if (metric === 'ttft_ms') return Number((display * 1000).toFixed(6))
+  return display
+}
+
+export function conditionDisplayText(condition: OpenAIEvalAccountRuleCondition): string {
+  return Number.isFinite(condition.threshold) ? String(conditionDisplayValue(condition.metric, condition.threshold)) : ''
+}
+
+/** Mirrors the server's checks: a known metric and operator, and a finite value inside the metric's range. */
+export function isValidAccountRuleCondition(condition: OpenAIEvalAccountRuleCondition | null | undefined): boolean {
+  if (!condition) return true
+  if (!CONDITION_METRICS.includes(condition.metric) || !CONDITION_OPERATORS.includes(condition.operator)) return false
+  const value = condition.threshold
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return false
+  if (condition.metric === 'quality_ratio' || condition.metric === 'error_rate') return value <= 1
+  if (condition.metric === 'load_rate') return value <= 100
+  return true
+}
+
+export type AccountPriorityRuleIssue = 'account' | 'priority' | 'models' | 'condition' | 'overlap'
 
 /**
  * Mirrors the server's checks so a save is blocked where the server would
  * reject it: an account, a whole-number priority, at least one model when
- * models are chosen, and no two enabled rules for one account covering the
- * same model. Like the server, the later rule of an overlapping pair is flagged.
+ * models are chosen, a valid condition, and no two enabled rules for one
+ * account covering the same model. Like the server, the later rule of an
+ * overlapping pair is flagged.
  */
 export function accountPriorityRuleIssues(rules: OpenAIEvalAccountPriorityRule[], pickingModels: (rule: OpenAIEvalAccountPriorityRule) => boolean): Map<number, AccountPriorityRuleIssue> {
   const issues = new Map<number, AccountPriorityRuleIssue>()
@@ -273,6 +338,7 @@ export function accountPriorityRuleIssues(rules: OpenAIEvalAccountPriorityRule[]
     if (!(rule.account_id > 0)) issues.set(index, 'account')
     else if (typeof rule.priority !== 'number' || !Number.isSafeInteger(rule.priority)) issues.set(index, 'priority')
     else if (pickingModels(rule) && !models.length) issues.set(index, 'models')
+    else if (!isValidAccountRuleCondition(rule.condition)) issues.set(index, 'condition')
     if (!isRuleEnabled(rule) || !(rule.account_id > 0)) return
     const taken = scopes.get(rule.account_id) ?? new Set<string>()
     scopes.set(rule.account_id, taken)
@@ -507,8 +573,9 @@ export function customBalanceShares(weights?: OpenAIEvalPolicyWeights): Record<C
 // ---------------------------------------------------------------------------
 // Runtime thresholds (scheduling_thresholds)
 //
-// Exceeding a threshold moves an account behind the accounts within it; it
-// never disables the account. Only real requests count, and only once the
+// Exceeding a threshold moves an account back one position (one adjacent swap,
+// within its pass-rate tier under avoid_degradation); it never disables the
+// account. Only real requests count, and only once the
 // shared minimum sample counts are reached.
 // ---------------------------------------------------------------------------
 
@@ -621,15 +688,19 @@ export function requestsPerRun(route: OpenAIEvalRouteConfig, type: EvalTestType,
 }
 
 /** Average upstream requests per day for one automatic schedule (0 when off). */
-export function dailyRequests(route: OpenAIEvalRouteConfig, type: EvalTestType, catalog?: OpenAIEvalModelCatalog | null): number {
+/** Whether a test can run for a target; the default only knows the State Probe rule. */
+export type TestApplicability = (route: OpenAIEvalRouteConfig, type: EvalTestType) => boolean
+const defaultApplicability: TestApplicability = (route, type) => type !== 'state_probe' || isDirectOAuthRoute(route)
+
+export function dailyRequests(route: OpenAIEvalRouteConfig, type: EvalTestType, catalog?: OpenAIEvalModelCatalog | null, applies: TestApplicability = defaultApplicability): number {
   const schedule = scheduleOf(route, type)
   if (!schedule?.enabled || !(schedule.interval_seconds > 0)) return 0
-  if (type === 'state_probe' && !isDirectOAuthRoute(route)) return 0
+  if (!applies(route, type)) return 0
   return (requestsPerRun(route, type, catalog) * DAY) / schedule.interval_seconds
 }
 
-export function totalDailyRequests(routes: OpenAIEvalRouteConfig[], catalog?: OpenAIEvalModelCatalog | null): number {
-  return routes.reduce((sum, route) => sum + TEST_TYPES.reduce((inner, type) => inner + dailyRequests(route, type, catalog), 0), 0)
+export function totalDailyRequests(routes: OpenAIEvalRouteConfig[], catalog?: OpenAIEvalModelCatalog | null, applies: TestApplicability = defaultApplicability): number {
+  return routes.reduce((sum, route) => sum + TEST_TYPES.reduce((inner, type) => inner + dailyRequests(route, type, catalog, applies), 0), 0)
 }
 
 /**
@@ -644,13 +715,13 @@ export function maxRequestsPerRun(route: OpenAIEvalRouteConfig, type: EvalTestTy
 }
 
 /** Daily upper bound for all automatic schedules if every sample used all attempts. */
-export function totalDailyMaxRequests(routes: OpenAIEvalRouteConfig[], maxAttempts: number, catalog?: OpenAIEvalModelCatalog | null): number {
+export function totalDailyMaxRequests(routes: OpenAIEvalRouteConfig[], maxAttempts: number, catalog?: OpenAIEvalModelCatalog | null, applies: TestApplicability = defaultApplicability): number {
   const attempts = normalizeMaxRequestAttempts(maxAttempts)
-  return routes.reduce((sum, route) => sum + TEST_TYPES.reduce((inner, type) => inner + dailyRequests(route, type, catalog) * (type === 'state_probe' ? stateProbeChains(attempts) : attempts), 0), 0)
+  return routes.reduce((sum, route) => sum + TEST_TYPES.reduce((inner, type) => inner + dailyRequests(route, type, catalog, applies) * (type === 'state_probe' ? stateProbeChains(attempts) : attempts), 0), 0)
 }
 
-export function activeScheduleCount(routes: OpenAIEvalRouteConfig[]): number {
-  return routes.reduce((sum, route) => sum + TEST_TYPES.filter(type => scheduleOf(route, type)?.enabled && (type !== 'state_probe' || isDirectOAuthRoute(route))).length, 0)
+export function activeScheduleCount(routes: OpenAIEvalRouteConfig[], applies: TestApplicability = defaultApplicability): number {
+  return routes.reduce((sum, route) => sum + TEST_TYPES.filter(type => scheduleOf(route, type)?.enabled && applies(route, type)).length, 0)
 }
 
 /**
@@ -906,6 +977,87 @@ export const QUALITY_MODE: Record<string, 'tier' | 'weighted' | 'ignored'> = {
 
 export function policyKey(policy: string | undefined): string {
   return policy ? policy : 'legacy'
+}
+
+/**
+ * The role a factor plays on one policy card, drawn with the same
+ * four-segment bar as “System default”. A bar is a reading aid for how
+ * strongly the factor decides the order, never a weight the server
+ * multiplies by:
+ * - sort: presets order by price (sort_in_tier: within a pass-rate tier);
+ * - gate_*: a runtime threshold; an account over it moves back one position, and
+ *   the bar follows how strict the configured threshold is;
+ * - weight: a custom balance share; system: the system scheduling weights.
+ * Roles without a bar are stated as text: tier (pass rate compared before
+ * anything else), priority (custom balance's strict order) and ignored.
+ */
+export type MeterRole = 'sort' | 'sort_in_tier' | 'gate_strict' | 'gate_standard' | 'gate_loose' | 'weight' | 'system' | 'tier' | 'priority' | 'ignored'
+export type MeterFactor = PolicyFactor | 'load'
+
+export interface PolicyMeter {
+  factor: MeterFactor
+  /** Filled segments, 0–4; unused for the text roles. */
+  level: number
+  role: MeterRole
+  /** Priority rank (1-based) for 'priority', whole-percent share for 'weight', the threshold for gates. */
+  value?: number
+}
+
+/** Roles stated in words rather than drawn: a strict step or no effect is not an amount. */
+export const TEXT_METER_ROLES: MeterRole[] = ['tier', 'priority', 'ignored']
+
+const METER_FACTORS: PolicyFactor[] = ['quality', 'price', 'errors', 'speed']
+const CUSTOM_METER_FACTOR: Record<MeterFactor, CustomFactor> = { quality: 'quality', price: 'cost', errors: 'error_rate', speed: 'ttft', load: 'load' }
+const GATE_LEVEL: Partial<Record<MeterRole, number>> = { gate_strict: 3, gate_standard: 2, gate_loose: 1 }
+
+/** At or under the stability defaults reads strict, at or under the shared defaults standard. */
+function gateRole(value: number, strict: number, standard: number): MeterRole {
+  if (value <= strict) return 'gate_strict'
+  return value <= standard ? 'gate_standard' : 'gate_loose'
+}
+
+/**
+ * The bars for one policy card. Presets sort by price and use error rate and
+ * first-token time only as thresholds, so those rows show how strict the
+ * configured threshold is, not a share of a score; that is how “Stability
+ * first” differs from “Cost first”. Custom balance shows its strict
+ * priorities and its real weight shares; load is listed only when it counts.
+ */
+export function policyMeters(
+  policy: OpenAIEvalSchedulingPolicy,
+  custom?: OpenAIEvalPolicyWeights | null,
+  thresholds?: OpenAIEvalSchedulingThresholds | null
+): PolicyMeter[] {
+  if (!policy) {
+    return METER_FACTORS.map(factor => {
+      const level = POLICY_EMPHASIS[''][factor]
+      return { factor, level, role: level ? 'system' : 'ignored' }
+    })
+  }
+  if (policy === 'custom_balance') {
+    const priorities = absolutePriorities(custom)
+    const shares = customBalanceShares(custom ?? undefined)
+    const meters = ([...METER_FACTORS, 'load'] as MeterFactor[]).map((factor): PolicyMeter => {
+      const key = CUSTOM_METER_FACTOR[factor]
+      const rank = priorities.indexOf(key)
+      if (rank >= 0) return { factor, level: 0, role: 'priority', value: rank + 1 }
+      const share = shares[key]
+      return share > 0 ? { factor, level: Math.min(4, Math.ceil(share / 25)), role: 'weight', value: share } : { factor, level: 0, role: 'ignored' }
+    })
+    return meters.filter(meter => meter.factor !== 'load' || meter.role !== 'ignored')
+  }
+  const limits = normalizeSchedulingThresholds(thresholds)[policy]
+  const strict = DEFAULT_SCHEDULING_THRESHOLDS.stability_first
+  const standard = DEFAULT_SCHEDULING_THRESHOLDS.cost_first
+  const errors = gateRole(limits.error_rate, strict.error_rate, standard.error_rate)
+  const speed = gateRole(limits.ttft_seconds, strict.ttft_seconds, standard.ttft_seconds)
+  const tiered = policy === 'avoid_degradation'
+  return [
+    tiered ? { factor: 'quality', level: 0, role: 'tier' } : { factor: 'quality', level: 0, role: 'ignored' },
+    tiered ? { factor: 'price', level: 3, role: 'sort_in_tier' } : { factor: 'price', level: 4, role: 'sort' },
+    { factor: 'errors', level: GATE_LEVEL[errors] ?? 0, role: errors, value: limits.error_rate },
+    { factor: 'speed', level: GATE_LEVEL[speed] ?? 0, role: speed, value: limits.ttft_seconds }
+  ]
 }
 
 // ---------------------------------------------------------------------------

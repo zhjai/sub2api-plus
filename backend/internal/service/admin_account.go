@@ -255,6 +255,9 @@ func (s *adminServiceImpl) DuplicateAccount(ctx context.Context, id int64, actor
 	if err != nil {
 		return nil, err
 	}
+	if source.Platform == PlatformPrism {
+		return nil, infraerrors.BadRequest("PRISM_DUPLICATE_IDENTITY", "Prism accounts are deduplicated by verified identity; use Prism import to update this account")
+	}
 	if source.IsCredentialShadow() {
 		return nil, infraerrors.BadRequest(
 			"ACCOUNT_DUPLICATE_SHADOW_UNSUPPORTED",
@@ -414,6 +417,9 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 	if err := ValidateAccountRPMExtra(accountExtra); err != nil {
 		return nil, err
 	}
+	if input.Platform == PlatformTypeSafe && input.Type != AccountTypeAPIKey {
+		return nil, errors.New("typesafe accounts only support apikey credentials")
+	}
 	// Probe/session state is system-managed. New accounts always start with automatic refresh disabled.
 	delete(accountExtra, UpstreamBillingProbeEnabledExtraKey)
 	delete(accountExtra, UpstreamBillingRateSyncEnabledExtraKey)
@@ -479,6 +485,11 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 }
 
 func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccountInput) (*Account, error) {
+	if input.Platform == PlatformPrism {
+		if authorized, _ := ctx.Value(verifiedPrismCredentialWriteKey{}).(bool); !authorized {
+			return nil, infraerrors.BadRequest("PRISM_VERIFIED_IMPORT_REQUIRED", "Use Prism Cookie import or Prism authorization to create an account")
+		}
+	}
 	if err := ValidateAccountRPMExtra(input.Extra); err != nil {
 		return nil, err
 	}
@@ -584,6 +595,20 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	account, err := s.accountRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
+	}
+	if account.Platform == PlatformTypeSafe && input.Type != "" && input.Type != AccountTypeAPIKey {
+		return nil, errors.New("typesafe accounts only support apikey credentials")
+	}
+	if account.Platform == PlatformPrism {
+		if input.Type != "" && input.Type != AccountTypeOAuth {
+			return nil, infraerrors.BadRequest("PRISM_OAUTH_REQUIRED", "Prism accounts use verified OAuth credentials")
+		}
+		if err := validatePrismCredentialUpdate(ctx, account.Credentials, input.Credentials); err != nil {
+			return nil, err
+		}
+		if input.Credentials != nil {
+			input.Credentials = MergeCredentials(account.Credentials, input.Credentials)
+		}
 	}
 	var normalizedExtra map[string]any
 	if input.Extra != nil {
@@ -924,6 +949,9 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	}
 
 	// 重新查询以确保返回完整数据（包括正确的 Proxy 关联对象）
+	if account.Platform == PlatformPrism {
+		InvalidatePrismAccountCatalog(account.ID)
+	}
 	updated, err := s.accountRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
@@ -1049,6 +1077,11 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	// UpdateAccount 守卫对齐)。覆盖显式 IDs 与 filter 解析出的 IDs(此处 AccountIDs 已解析完成)。
 	if len(input.Credentials) > 0 {
 		for _, acc := range cachedTargets {
+			if acc != nil && acc.Platform == PlatformPrism {
+				if err := validatePrismCredentialUpdate(ctx, acc.Credentials, input.Credentials); err != nil {
+					return nil, err
+				}
+			}
 			if acc != nil && acc.IsCredentialShadow() {
 				return nil, infraerrors.Newf(http.StatusBadRequest, "SPARK_SHADOW_NO_CREDENTIALS",
 					"spark shadow account %d cannot hold credentials; manage credentials on the parent account", acc.ID)
@@ -1310,6 +1343,7 @@ func (s *adminServiceImpl) DeleteAccount(ctx context.Context, id int64) error {
 	if err := s.accountRepo.Delete(ctx, id); err != nil {
 		return err
 	}
+	InvalidatePrismAccountCatalog(id)
 	return nil
 }
 
