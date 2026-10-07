@@ -686,7 +686,7 @@ func TestOpenAIEvalRunCandyAndFingerprintUseSafeRouteOutcomes(t *testing.T) {
 		require.False(t, run.DiagnosticOnly, "manual quality evidence must not depend on routing participation")
 	})
 
-	t.Run("Candy transport failures remain alert only when effects are enabled", func(t *testing.T) {
+	t.Run("Candy unknown transport writes remain diagnostic only when effects are enabled", func(t *testing.T) {
 		t.Cleanup(func() { SetOpenAIEvalEffectsEnabled(false) })
 		SetOpenAIEvalEffectsEnabled(true)
 		svc, _, healthRepo, upstream := newHarness("21")
@@ -694,8 +694,10 @@ func TestOpenAIEvalRunCandyAndFingerprintUseSafeRouteOutcomes(t *testing.T) {
 		upstream.err = errors.New("timeout while contacting evaluation upstream")
 		run, err := svc.Run(context.Background(), OpenAIEvalRunRequest{AccountID: 51, TestType: OpenAIEvalTypeCandy, RequestedModel: "gpt-5.4", ReasoningEffort: "high"}, 8, "scheduled")
 		require.NoError(t, err)
-		require.Equal(t, "insufficient", run.Status)
-		require.Equal(t, "alert_only", run.Outcome.Scheduling)
+		require.Equal(t, "inconclusive", run.Status)
+		require.True(t, run.DiagnosticOnly)
+		require.Equal(t, "evaluation_send_unknown", run.Error)
+		require.Equal(t, "disabled", run.Outcome.Scheduling)
 		require.Nil(t, healthRepo.updatedExtra, "diagnostic probe transport failures must not change production route eligibility")
 	})
 }

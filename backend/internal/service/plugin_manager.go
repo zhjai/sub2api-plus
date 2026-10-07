@@ -952,6 +952,11 @@ func (m *PluginManager) RoundTripOpenAIOAuth(ctx context.Context, request *http.
 	if route == nil {
 		return nil, false, nil
 	}
+	// Check after routing selection as well as at the builder: a plugin may
+	// become selected between those points. Raw identity is unsupported by v1.
+	if _, rawIdentity := ctx.Value(codexIdentityRequestKey{}).(CodexIdentityPolicy); rawIdentity {
+		return nil, true, codexIdentityError("CODEX_IDENTITY_PLUGIN_UNSUPPORTED", "preserve_client does not support the selected plugin transport")
+	}
 	// The v1 plugin owns its HTTP transport and cannot request admission for
 	// internal replays. Do not hand it a rate-limited user request until the
 	// protocol supports admission at each upstream send.
@@ -987,7 +992,9 @@ func (m *PluginManager) RoundTripOpenAIOAuth(ctx context.Context, request *http.
 		}
 		return nil, true, err
 	}
+	observe := ObserveCodexOutboundAttempt(request, "plugin")
 	response, err := route.runtime.roundTrip(ctx, request, proxyURL, account)
+	observe(response, err)
 	if err != nil {
 		route.runtime.finishRequest()
 		if route.runtime.client.Exited() {

@@ -2,15 +2,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent } from 'vue'
 import { mount } from '@vue/test-utils'
 
-const { updateAccountMock, checkMixedChannelRiskMock, authIsSimpleMode } = vi.hoisted(() => ({
+const { updateAccountMock, checkMixedChannelRiskMock, authIsSimpleMode, searchApiKeysMock, showErrorMock } = vi.hoisted(() => ({
   updateAccountMock: vi.fn(),
   checkMixedChannelRiskMock: vi.fn(),
-  authIsSimpleMode: { value: true }
+  authIsSimpleMode: { value: true },
+  searchApiKeysMock: vi.fn(),
+  showErrorMock: vi.fn()
 }))
 
 vi.mock('@/stores/app', () => ({
   useAppStore: () => ({
-    showError: vi.fn(),
+    showError: showErrorMock,
     showSuccess: vi.fn(),
     showInfo: vi.fn()
   })
@@ -36,6 +38,9 @@ vi.mock('@/api/admin', () => ({
     },
     tlsFingerprintProfiles: {
       list: vi.fn().mockResolvedValue([])
+    },
+    usage: {
+      searchApiKeys: searchApiKeysMock
     }
   }
 }))
@@ -1743,5 +1748,131 @@ describe('EditAccountModal OpenAI 自动使用重置卡', () => {
     await wrapper.get('form#edit-account-form').trigger('submit.prevent')
     expect(updateAccountMock).not.toHaveBeenCalled()
     wrapper.unmount()
+  })
+
+  describe('Codex session identifier policy', () => {
+    function oauthAccount(extra: Record<string, unknown> = {}) {
+      const account = buildAccount()
+      account.type = 'oauth'
+      account.credentials = { access_token: 'oauth-token' }
+      account.extra = extra
+      return account
+    }
+
+    function prepare(account: any) {
+      updateAccountMock.mockReset()
+      checkMixedChannelRiskMock.mockReset()
+      showErrorMock.mockReset()
+      checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+      updateAccountMock.mockResolvedValue(account)
+      return mountModal(account)
+    }
+
+    const submit = async (wrapper: ReturnType<typeof mountModal>) => {
+      await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+      await Promise.resolve()
+    }
+
+    it('explains the experiment scope, including validated continuations, when it is chosen', async () => {
+      const wrapper = prepare(oauthAccount())
+      expect(wrapper.text()).not.toContain('admin.accounts.openai.codexIdentity.supportedPaths')
+      await wrapper.get('[data-testid="codex-identity-preserve_client"]').setValue(true)
+      for (const key of ['keepsOfficial', 'scopeOnly', 'continuation', 'supportedPaths']) {
+        expect(wrapper.text()).toContain(`admin.accounts.openai.codexIdentity.${key}`)
+      }
+    })
+
+    it('defaults to account isolation and writes no identity keys', async () => {
+      const wrapper = prepare(oauthAccount())
+      expect((wrapper.get('[data-testid="codex-identity-isolated"]').element as HTMLInputElement).checked).toBe(true)
+      expect(wrapper.find('[data-testid="codex-identity-saved"]').exists()).toBe(false)
+      await submit(wrapper)
+      const extra = updateAccountMock.mock.calls[0]?.[1]?.extra
+      expect(extra).not.toHaveProperty('codex_identity_mode')
+      expect(extra).not.toHaveProperty('codex_identity_api_key_id')
+    })
+
+    it('requires an API key ID before saving the experiment and never sends a blank key as 0', async () => {
+      const wrapper = prepare(oauthAccount())
+      await wrapper.get('[data-testid="codex-identity-preserve_client"]').setValue(true)
+      await submit(wrapper)
+      expect(updateAccountMock).not.toHaveBeenCalled()
+      expect(showErrorMock).toHaveBeenCalledWith('admin.accounts.openai.codexIdentity.keyRequired')
+      expect(wrapper.get('[data-testid="codex-identity-key-error"]').text()).toBe('admin.accounts.openai.codexIdentity.keyRequired')
+
+      await wrapper.get('[data-testid="codex-identity-key-input"]').setValue('12a')
+      await submit(wrapper)
+      expect(updateAccountMock).not.toHaveBeenCalled()
+
+      await wrapper.get('[data-testid="codex-identity-key-input"]').setValue('42')
+      await submit(wrapper)
+      expect(updateAccountMock).toHaveBeenCalledTimes(1)
+      const extra = updateAccountMock.mock.calls[0]?.[1]?.extra
+      expect(extra.codex_identity_mode).toBe('preserve_client')
+      expect(extra.codex_identity_api_key_id).toBe(42)
+    })
+
+    it('blocks the experiment while fingerprint convergence is on and offers an explicit fix', async () => {
+      const wrapper = prepare(oauthAccount({ codex_fingerprint_mode: 'session' }))
+      await wrapper.get('[data-testid="codex-identity-preserve_client"]').setValue(true)
+      await wrapper.get('[data-testid="codex-identity-key-input"]').setValue('42')
+      expect(wrapper.get('[data-testid="codex-identity-conflict"]').text()).toContain('admin.accounts.openai.codexIdentity.conflict')
+      await submit(wrapper)
+      expect(updateAccountMock).not.toHaveBeenCalled()
+      expect(showErrorMock).toHaveBeenCalledWith('admin.accounts.openai.codexIdentity.conflict')
+
+      await wrapper.get('[data-testid="codex-identity-fingerprint-off"]').trigger('click')
+      expect(wrapper.find('[data-testid="codex-identity-conflict"]').exists()).toBe(false)
+      await submit(wrapper)
+      const extra = updateAccountMock.mock.calls[0]?.[1]?.extra
+      expect(extra).not.toHaveProperty('codex_fingerprint_mode')
+      expect(extra.codex_identity_mode).toBe('preserve_client')
+    })
+
+    it('shows the saved server state read-only and restores the default without touching server fields', async () => {
+      const wrapper = prepare(oauthAccount({
+        codex_identity_mode: 'preserve_client',
+        codex_identity_api_key_id: 42,
+        codex_identity_namespace: 'ns-hash',
+        codex_identity_revision: 'rev-7',
+        codex_identity_diagnostic: 'credential changed; experiment revoked',
+        codex_fingerprint_mode: 'full'
+      }))
+      expect((wrapper.get('[data-testid="codex-identity-key-input"]').element as HTMLInputElement).value).toBe('42')
+      expect(wrapper.get('[data-testid="codex-identity-revision"]').text()).toBe('rev-7')
+      expect(wrapper.get('[data-testid="codex-identity-diagnostic"]').text()).toContain('experiment revoked')
+
+      await wrapper.get('[data-testid="codex-identity-restore"]').trigger('click')
+      expect((wrapper.get('[data-testid="codex-identity-isolated"]').element as HTMLInputElement).checked).toBe(true)
+      await submit(wrapper)
+      const extra = updateAccountMock.mock.calls[0]?.[1]?.extra
+      expect(extra).not.toHaveProperty('codex_identity_mode')
+      expect(extra).not.toHaveProperty('codex_identity_api_key_id')
+      // Restoring the identity default does not silently change fingerprint convergence.
+      expect(extra.codex_fingerprint_mode).toBe('full')
+      expect(extra.codex_identity_namespace).toBe('ns-hash')
+      expect(extra.codex_identity_revision).toBe('rev-7')
+    })
+
+    it('finds a key by name and shows a server guard rejection next to the setting', async () => {
+      vi.useFakeTimers()
+      searchApiKeysMock.mockReset()
+      searchApiKeysMock.mockResolvedValue([{ id: 77, name: 'lab-key', user_id: 3 }])
+      const wrapper = prepare(oauthAccount())
+      await wrapper.get('[data-testid="codex-identity-preserve_client"]').setValue(true)
+      await wrapper.get('[data-testid="codex-identity-key-input"]').setValue('lab')
+      await vi.advanceTimersByTimeAsync(350)
+      expect(searchApiKeysMock).toHaveBeenCalledWith(undefined, 'lab')
+      await wrapper.get('[data-testid="codex-identity-key-option"]').trigger('click')
+      expect((wrapper.get('[data-testid="codex-identity-key-input"]').element as HTMLInputElement).value).toBe('77')
+      vi.useRealTimers()
+
+      updateAccountMock.mockRejectedValueOnce({ status: 409, reason: 'CODEX_IDENTITY_NAMESPACE_CONFLICT', message: 'another account row already binds this credential' })
+      await submit(wrapper)
+      await Promise.resolve()
+      await wrapper.vm.$nextTick()
+      expect(wrapper.get('[data-testid="codex-identity-server-error"]').text()).toContain('admin.accounts.openai.codexIdentity.serverRejected')
+      expect(showErrorMock).toHaveBeenCalledWith('another account row already binds this credential')
+    })
   })
 })

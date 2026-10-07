@@ -193,28 +193,25 @@ func (s *AccountTestService) openAIStateProbeSingleSend(ctx context.Context, acc
 		"stream": true, "store": false, "include": []string{"reasoning.encrypted_content"},
 	}
 	applyCodexOAuthTransform(payload, true, false)
+	session := uuid.NewString()
+	if len(sessions) > 0 {
+		session = sessions[0]
+	}
+	diagnosticIDs := prepareOpenAIOAuthDiagnosticPayload(payload, credential, session)
 	body, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(shotCtx, http.MethodPost, chatgptCodexAPIURL, bytes.NewReader(body))
 	if err != nil {
 		out.failure = "request_invalid"
 		return out
 	}
-	req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
+	req = req.WithContext(WithHTTPUpstreamProfile(withCodexDiagnosticSource(req.Context(), "state_probe"), HTTPUpstreamProfileOpenAI))
 	req.Host = "chatgpt.com"
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("OpenAI-Beta", "responses=experimental")
 	enforceCodexAcceptLanguage(req.Header)
-	session := uuid.NewString()
-	if len(sessions) > 0 {
-		session = sessions[0]
-	}
-	req.Header.Set("session_id", session)
-	setOpenAIChatGPTAccountHeaders(req.Header, credential)
-	enforceCodexIdentityHeadersWithUA(req.Header, credential.GetOpenAIUserAgent())
-	credential.ApplyHeaderOverrides(req.Header)
-	enforceCodexAcceptLanguage(req.Header)
+	finalizeOpenAIOAuthDiagnosticHeaders(req.Header, credential, session, body, diagnosticIDs)
 	if ticket != "" {
 		req.Header.Set(openAICodexTurnStateHeader, ticket)
 	}
@@ -266,9 +263,7 @@ func (s *AccountTestService) openAIStateProbeSingleSend(ctx context.Context, acc
 	stopClose := context.AfterFunc(shotCtx, func() { _ = resp.Body.Close() })
 	defer stopClose()
 	out.status = resp.StatusCode
-	if reset := parseRetryAfterResetTime(resp.Header, time.Now()); reset != nil {
-		out.retryAfter = time.Until(*reset)
-	}
+	out.retryAfter = openAIEvalRetryAfter(resp.Header, time.Now())
 	if resp.StatusCode != http.StatusOK {
 		switch resp.StatusCode {
 		case http.StatusTooManyRequests:

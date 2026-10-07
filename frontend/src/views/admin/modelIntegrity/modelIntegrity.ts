@@ -6,6 +6,7 @@ import type {
   OpenAIEvalAccountRuleConditionMetric,
   OpenAIEvalAccountRuleConditionOperator,
   OpenAIEvalAccountPriorityRule,
+  OpenAIEvalBackgroundControl,
   OpenAIEvalConfig,
   OpenAIEvalEffectiveStatus,
   OpenAIEvalModelCatalog,
@@ -390,7 +391,12 @@ export function toSavePayload(config: OpenAIEvalConfig): OpenAIEvalConfig {
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const { bps_state, direct_oauth_eligible, ...rest } = route
       return { ...rest, bps_mode: 'force_off', bps_auto: false }
-    })
+    }),
+    // Omitted when the server never sent it (older servers), so a save cannot
+    // invent an empty list; otherwise sent back with runtime stripped.
+    ...(config.background_controls !== undefined
+      ? { background_controls: config.background_controls.map(backgroundControlPayload) }
+      : {})
   }
 }
 
@@ -1573,5 +1579,160 @@ export function accountQualityReference(candidate: Pick<SchedulerDecisionCandida
     evaluatedAt: prior.evaluated_at,
     expiresAt: prior.expires_at,
     sourceModels: Array.isArray(prior.source_models) ? prior.source_models : []
+  }
+}
+
+// -- Automatic-test background controls ---------------------------------------
+
+/**
+ * Starting values when an administrator opts into the experimental limits:
+ * 60 sends per hour, one send per minute, one background run at a time and a
+ * 15-minute sampling window. They are a pressure limit, not a known upstream
+ * safety threshold, and are only applied while budget_enabled is true.
+ */
+export const BACKGROUND_DEFAULTS = {
+  max_requests_per_hour: 60,
+  min_send_interval_seconds: 60,
+  max_background_concurrency: 1,
+  sampling_window_seconds: 15 * 60
+} as const
+
+export type BackgroundLimitKey = keyof typeof BACKGROUND_DEFAULTS
+
+/** Accepted ranges; the server stays authoritative and reports its own limits. */
+export const BACKGROUND_LIMITS: Record<BackgroundLimitKey, { min: number; max: number }> = {
+  max_requests_per_hour: { min: 1, max: 1_000_000 },
+  // At least 1 s: the server turns 0 into the 60 s default while limits are on,
+  // so 0 would read as "no interval" but behave as one minute.
+  min_send_interval_seconds: { min: 1, max: DAY },
+  max_background_concurrency: { min: 1, max: 1000 },
+  sampling_window_seconds: { min: 60, max: DAY }
+}
+
+export const BACKGROUND_LIMIT_KEYS = Object.keys(BACKGROUND_DEFAULTS) as BackgroundLimitKey[]
+
+/** Pause lengths offered in the pause dialog, in seconds. */
+export const PAUSE_DURATIONS = [HOUR, 6 * HOUR, DAY, 3 * DAY, 7 * DAY]
+
+export function defaultBackgroundControl(accountID: number): OpenAIEvalBackgroundControl {
+  return { account_id: accountID, paused_until: null, pause_reason: '', budget_enabled: false, ...BACKGROUND_DEFAULTS }
+}
+
+/** An integer inside the field's range, or null when the entry is not a number. */
+export function parseBackgroundLimit(key: BackgroundLimitKey, value: unknown): number | null {
+  if (value === '' || value === null || value === undefined) return null
+  const raw = Number(value)
+  if (!Number.isFinite(raw) || !Number.isInteger(raw)) return null
+  const { min, max } = BACKGROUND_LIMITS[key]
+  return raw < min || raw > max ? null : raw
+}
+
+function limitOrDefault(key: BackgroundLimitKey, value: unknown): number {
+  return parseBackgroundLimit(key, value) ?? BACKGROUND_DEFAULTS[key]
+}
+
+/** The saved part of a control; runtime counters are read-only and never sent. */
+export function backgroundControlPayload(control: OpenAIEvalBackgroundControl): OpenAIEvalBackgroundControl {
+  const pausedUntil = control.paused_until || null
+  return {
+    account_id: control.account_id,
+    paused_until: pausedUntil,
+    pause_reason: pausedUntil ? (control.pause_reason ?? '').trim() : '',
+    budget_enabled: control.budget_enabled === true,
+    max_requests_per_hour: limitOrDefault('max_requests_per_hour', control.max_requests_per_hour),
+    min_send_interval_seconds: limitOrDefault('min_send_interval_seconds', control.min_send_interval_seconds),
+    max_background_concurrency: limitOrDefault('max_background_concurrency', control.max_background_concurrency),
+    sampling_window_seconds: limitOrDefault('sampling_window_seconds', control.sampling_window_seconds)
+  }
+}
+
+/** Copies a control as loaded, keeping its runtime for display only. */
+export function cloneBackgroundControl(control: OpenAIEvalBackgroundControl): OpenAIEvalBackgroundControl {
+  return { ...control, runtime: control.runtime ? { ...control.runtime } : control.runtime }
+}
+
+export function findBackgroundControl(controls: OpenAIEvalBackgroundControl[] | undefined, accountID: number): OpenAIEvalBackgroundControl | undefined {
+  return controls?.find(control => control.account_id === accountID)
+}
+
+/** A pause whose end time has passed (or cannot be read) no longer applies. */
+export function pausedUntil(control: Pick<OpenAIEvalBackgroundControl, 'paused_until'> | null | undefined, now = Date.now()): Date | null {
+  if (!control?.paused_until) return null
+  const until = new Date(control.paused_until)
+  return Number.isNaN(until.getTime()) || until.getTime() <= now ? null : until
+}
+
+/** True when the saved and edited controls differ in what would be sent. */
+export function sameBackgroundControl(a: OpenAIEvalBackgroundControl | undefined, b: OpenAIEvalBackgroundControl | undefined): boolean {
+  if (!a || !b) return !a && !b
+  return JSON.stringify(backgroundControlPayload(a)) === JSON.stringify(backgroundControlPayload(b))
+}
+
+export type FeasibilityLimit = 'interval' | 'hourly' | 'rpm'
+
+export interface RunFeasibility {
+  /** Planned sends for one run, before retries. */
+  nominal: number
+  /** Sends if every sample used all of its attempts. */
+  maxWithRetries: number
+  /** Most sends the limits allow inside one sampling window. */
+  capacity: number
+  /** Which limit sets the capacity. */
+  limitedBy: FeasibilityLimit
+  /** Shortest time the nominal sends need under the send interval. */
+  minDurationSeconds: number
+  /** Whole run fits the window; otherwise the server will not start it. */
+  fits: boolean
+}
+
+/**
+ * Whole-run admission estimate, mirroring openAIEvalBudgetFeasible on the
+ * server: the nominal sends must fit the hourly budget (n ≤ hourly) and the
+ * time they need, max((n − 1) × interval, floor((n − 1) / rpm) × 60), must be
+ * shorter than the sampling window. Retries need spare budget but are not part
+ * of admission. Sends already made this hour are not known here; the server's
+ * decision, which also counts them, wins.
+ */
+export function runFeasibility(
+  nominal: number,
+  maxWithRetries: number,
+  control: Pick<OpenAIEvalBackgroundControl, BackgroundLimitKey>,
+  rpmLimit?: number | null
+): RunFeasibility {
+  const window = limitOrDefault('sampling_window_seconds', control.sampling_window_seconds)
+  const interval = limitOrDefault('min_send_interval_seconds', control.min_send_interval_seconds)
+  const hourly = limitOrDefault('max_requests_per_hour', control.max_requests_per_hour)
+  const candidates: Array<[FeasibilityLimit, number]> = [
+    ['interval', interval > 0 ? Math.ceil(window / interval) : Number.POSITIVE_INFINITY],
+    ['hourly', hourly]
+  ]
+  // floor((n − 1) / rpm) × 60 < window  ⇔  n ≤ rpm × ceil(window / 60)
+  const rpm = rpmLimit && rpmLimit > 0 ? Math.trunc(rpmLimit) : 0
+  if (rpm) candidates.push(['rpm', rpm * Math.ceil(window / 60)])
+  const [limitedBy, capacity] = candidates.reduce((low, item) => (item[1] < low[1] ? item : low))
+  const sends = Math.max(0, Math.trunc(nominal))
+  const gaps = Math.max(0, sends - 1)
+  return {
+    nominal: sends,
+    maxWithRetries: Math.max(sends, Math.trunc(maxWithRetries)),
+    capacity,
+    limitedBy,
+    minDurationSeconds: Math.max(gaps * interval, rpm ? Math.floor(gaps / rpm) * 60 : 0),
+    fits: sends <= capacity
+  }
+}
+
+/** Planned automatic sends per hour for one account, nominal and with every retry used. */
+export function accountHourlyPlan(
+  routes: OpenAIEvalRouteConfig[],
+  accountID: number,
+  maxAttempts: number,
+  catalog?: OpenAIEvalModelCatalog | null,
+  applies: TestApplicability = defaultApplicability
+): { nominal: number; max: number } {
+  const own = routes.filter(route => route.account_id === accountID)
+  return {
+    nominal: totalDailyRequests(own, catalog, applies) / 24,
+    max: totalDailyMaxRequests(own, maxAttempts, catalog, applies) / 24
   }
 }

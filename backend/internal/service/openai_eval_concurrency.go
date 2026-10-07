@@ -24,18 +24,63 @@ func (s *AccountTestService) checkOpenAIEvalAutomaticAccount(ctx context.Context
 	if err != nil {
 		return &OpenAIEvalRequestError{Code: "account_lookup_unavailable", Message: "automatic evaluation account lookup failed"}
 	}
-	if latest == nil || !latest.IsActive() || !latest.Schedulable {
+	if latest == nil || !latest.IsSchedulable() {
 		return &OpenAIEvalRequestError{Code: "account_scheduling_disabled", Message: "automatic evaluation skipped: account scheduling is disabled"}
 	}
 	return ctx.Err()
 }
 
-func (s *AccountTestService) acquireOpenAIEvalAccountSlot(ctx context.Context, account *Account) (func(), error) {
+func (s *AccountTestService) acquireOpenAIEvalAccountSlot(ctx context.Context, account *Account) (release func(), failure error) {
+	releaseGate, err := openAIEvalAcquireSampleGate(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if failure != nil {
+			releaseGate()
+			return
+		}
+		releaseSlot := release
+		release = func() { defer releaseGate(); releaseSlot() }
+	}()
+	if err := openAIEvalWaitSendInterval(ctx); err != nil {
+		return nil, err
+	}
 	if err := s.checkOpenAIEvalAutomaticAccount(ctx, account); err != nil {
 		return nil, err
 	}
 	if s.openaiGatewayService == nil || s.openaiGatewayService.concurrencyService == nil {
 		return func() {}, nil
+	}
+	if automatic, _ := ctx.Value(openAIEvalAutomaticKey{}).(bool); automatic {
+		cache := s.openaiGatewayService.concurrencyService.cache
+		background, ok := cache.(interface {
+			AcquireOpenAIEvalCredentialSlot(context.Context, int64, []AccountWithConcurrency, string) (bool, error)
+		})
+		if !ok {
+			return nil, &OpenAIEvalRequestError{Code: "foreground_priority_unavailable", Message: "atomic background concurrency admission unavailable"}
+		}
+		id := generateRequestID()
+		latest, err := s.accountRepo.GetByID(ctx, account.ID)
+		if err != nil || latest == nil {
+			return nil, &OpenAIEvalRequestError{Code: "foreground_priority_unavailable", Message: "background account lookup failed"}
+		}
+		peers, err := s.openAIEvalCredentialPeers(ctx, latest)
+		if err != nil {
+			return nil, &OpenAIEvalRequestError{Code: "foreground_priority_unavailable", Message: "background credential lookup failed"}
+		}
+		acquired, err := background.AcquireOpenAIEvalCredentialSlot(ctx, account.ID, peers, id)
+		if err != nil {
+			return nil, &OpenAIEvalRequestError{Code: "concurrency_unavailable", Message: "background concurrency admission unavailable"}
+		}
+		if !acquired {
+			return nil, &OpenAIEvalRequestError{Code: "foreground_priority", Message: "background evaluation deferred for foreground capacity"}
+		}
+		return func() {
+			releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = cache.ReleaseAccountSlot(releaseCtx, account.ID, id)
+		}, nil
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()

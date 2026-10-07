@@ -37,7 +37,10 @@ func (t *accountRPMTransport) RoundTrip(req *http.Request) (*http.Response, erro
 			return accountRPMSingleSend(transport, req)
 		}
 	} else {
-		return t.base.RoundTrip(req)
+		observe := service.ObserveCodexOutboundAttempt(req, "native_http")
+		resp, err := t.base.RoundTrip(req)
+		observe(resp, err)
+		return resp, err
 	}
 	if req.Body != nil {
 		_ = req.Body.Close()
@@ -91,7 +94,9 @@ func accountRPMSingleSend(transport *http.Transport, req *http.Request) (*http.R
 			return nil, err
 		}
 	}
+	observe := service.ObserveCodexOutboundAttempt(req, "native_http")
 	resp, err := conn.RoundTrip(req)
+	observe(resp, err)
 	if err != nil {
 		_ = conn.Close()
 		return nil, err

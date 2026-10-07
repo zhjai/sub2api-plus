@@ -366,6 +366,12 @@ func (s *AccountTestService) runOpenAIEvalSampleSingleSend(ctx context.Context, 
 	if isOAuth {
 		applyCodexOAuthTransform(payload, true, false)
 	}
+	diagnosticSession := ""
+	var diagnosticIDs *codexFingerprintIDs
+	if isOAuth {
+		diagnosticSession = uuid.NewString()
+		diagnosticIDs = prepareOpenAIOAuthDiagnosticPayload(payload, credential, diagnosticSession)
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("encode OpenAI evaluation request: %w", err)
@@ -418,6 +424,9 @@ func (s *AccountTestService) runOpenAIEvalSampleSingleSend(ctx context.Context, 
 	}
 	credential.ApplyHeaderOverrides(req.Header)
 	enforceCodexAcceptLanguage(req.Header)
+	if isOAuth {
+		finalizeOpenAIOAuthDiagnosticHeaders(req.Header, credential, diagnosticSession, body, diagnosticIDs)
+	}
 	for key, values := range req.Header {
 		lower := strings.ToLower(key)
 		if strings.Contains(lower, "auth") || strings.Contains(lower, "key") || strings.Contains(lower, "cookie") || strings.Contains(lower, "token") || strings.Contains(lower, "state") {
@@ -461,13 +470,17 @@ func (s *AccountTestService) runOpenAIEvalSampleSingleSend(ctx context.Context, 
 	return readOpenAIEvalResponse(requestCtx, resp, isOAuth, true)
 }
 
-func (s *AccountTestService) doOpenAIEvalUpstream(req *http.Request, proxyURL string, account, credential *Account) (*http.Response, error) {
+func (s *AccountTestService) doOpenAIEvalUpstream(req *http.Request, proxyURL string, account, credential *Account) (response *http.Response, err error) {
+	req, finishBudget := openAIEvalTrackPhysicalSend(req)
+	defer func() { finishBudget(response, err) }()
+	if _, specified := req.Context().Value(codexDiagnosticSourceKey{}).(string); !specified {
+		req = req.WithContext(withCodexDiagnosticSource(req.Context(), "manual_evaluation"))
+	}
 	req = req.WithContext(WithHTTPUpstreamSingleSend(req.Context()))
 	var cache GatewayCache
 	if s.openaiGatewayService != nil {
 		cache = s.openaiGatewayService.cache
 	}
-	var err error
 	req, err = accountRPMDispatchRequest(req, cache, s.accountRepo, account)
 	if err != nil {
 		return nil, err
@@ -477,7 +490,10 @@ func (s *AccountTestService) doOpenAIEvalUpstream(req *http.Request, proxyURL st
 		if err := s.checkOpenAIEvalAutomaticAccount(ctx, account); err != nil {
 			return err
 		}
-		return admitAccountRPM(ctx, cache, s.accountRepo, account)
+		if err := admitAccountRPM(ctx, cache, s.accountRepo, account); err != nil {
+			return err
+		}
+		return openAIEvalBeforeSend(ctx)
 	}
 	req = req.WithContext(context.WithValue(req.Context(), accountRPMRetryAdmissionKey{}, policy))
 	if credential.IsOpenAIOAuthLike() && s.pluginManager != nil {
@@ -2632,7 +2648,7 @@ func (s *AccountTestService) testOpenAICompactConnection(c *gin.Context, account
 	if isOAuth {
 		enforceCodexIdentityHeadersWithUA(req.Header, credentialAccount.GetOpenAIUserAgent())
 	}
-	probeSessionID := compactProbeSessionID(account.ID)
+	probeSessionID := compactProbeSessionID(credentialAccount)
 	req.Header.Set("Session_ID", probeSessionID)
 	req.Header.Set("Conversation_ID", probeSessionID)
 
@@ -2650,6 +2666,9 @@ func (s *AccountTestService) testOpenAICompactConnection(c *gin.Context, account
 	// 账号级请求头覆写：测试请求与真实转发保持一致的最终头
 	account.ApplyHeaderOverrides(req.Header)
 	enforceCodexAcceptLanguage(req.Header)
+	if isOAuth {
+		finalizeOpenAIOAuthDiagnosticHeaders(req.Header, credentialAccount, probeSessionID, payloadBytes)
+	}
 
 	proxyURL := ""
 	if account.ProxyID != nil && account.Proxy != nil {

@@ -123,7 +123,7 @@ func (d *coderOpenAIWSClientDialer) Dial(
 		return nil, 0, nil, errors.New("ws url is empty")
 	}
 
-	wrapped := &coderOpenAIWSClientConn{}
+	wrapped := &coderOpenAIWSClientConn{diagnostic: newCodexWSOutboundDiagnostic(ctx)}
 	opts := &coderws.DialOptions{
 		HTTPHeader:      cloneHeader(headers),
 		CompressionMode: coderws.CompressionContextTakeover,
@@ -291,6 +291,7 @@ func (d *coderOpenAIWSClientDialer) SnapshotTransportMetrics() OpenAIWSTransport
 type coderOpenAIWSClientConn struct {
 	conn          *coderws.Conn
 	upstreamPings atomic.Int64
+	diagnostic    *codexWSOutboundDiagnostic
 }
 
 func (c *coderOpenAIWSClientConn) UpstreamPingCount() int64 {
@@ -309,7 +310,9 @@ func (c *coderOpenAIWSClientConn) WriteJSON(ctx context.Context, value any) erro
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return wsjson.Write(ctx, c.conn, value)
+	err := wsjson.Write(ctx, c.conn, value)
+	c.diagnostic.sent(value, err)
+	return err
 }
 
 func (c *coderOpenAIWSClientConn) ReadMessage(ctx context.Context) ([]byte, error) {
@@ -321,6 +324,7 @@ func (c *coderOpenAIWSClientConn) ReadMessage(ctx context.Context) ([]byte, erro
 	}
 
 	msgType, payload, err := c.conn.Read(ctx)
+	c.diagnostic.received(payload, err)
 	if err != nil {
 		return nil, err
 	}
@@ -340,6 +344,7 @@ func (c *coderOpenAIWSClientConn) ReadFrame(ctx context.Context) (coderws.Messag
 		ctx = context.Background()
 	}
 	msgType, payload, err := c.conn.Read(ctx)
+	c.diagnostic.received(payload, err)
 	if err != nil {
 		return coderws.MessageText, nil, err
 	}
@@ -353,7 +358,9 @@ func (c *coderOpenAIWSClientConn) WriteFrame(ctx context.Context, msgType coderw
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return c.conn.Write(ctx, msgType, payload)
+	err := c.conn.Write(ctx, msgType, payload)
+	c.diagnostic.sent(payload, err)
+	return err
 }
 
 func (c *coderOpenAIWSClientConn) Ping(ctx context.Context) error {

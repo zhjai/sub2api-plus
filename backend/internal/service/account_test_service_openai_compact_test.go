@@ -321,10 +321,13 @@ func TestAccountTestService_TestAccountConnection_OpenAICompactProbeIdentityMatc
 
 func TestCompactProbeSessionID_IsUUIDShaped(t *testing.T) {
 	for _, id := range []int64{0, 1, 987654} {
-		got := compactProbeSessionID(id)
+		got := compactProbeSessionID(&Account{ID: id})
 		_, err := uuid.Parse(got)
 		require.NoError(t, err, "探测会话标识必须是 UUID 形态: %s", got)
 	}
-	require.Equal(t, compactProbeSessionID(7), compactProbeSessionID(7), "同账号应稳定复用同一会话")
-	require.NotEqual(t, compactProbeSessionID(7), compactProbeSessionID(8))
+	first := &Account{ID: 7, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"chatgpt_account_id": "upstream-a"}}
+	duplicate := &Account{ID: 8, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"chatgpt_account_id": "upstream-a"}}
+	other := &Account{ID: 7, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"chatgpt_account_id": "upstream-b"}}
+	require.Equal(t, compactProbeSessionID(first), compactProbeSessionID(duplicate))
+	require.NotEqual(t, compactProbeSessionID(first), compactProbeSessionID(other))
 }

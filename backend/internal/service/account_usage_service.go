@@ -894,7 +894,11 @@ func (s *AccountUsageService) probeOpenAICodexSnapshot(ctx context.Context, acco
 	if err != nil {
 		return nil, fmt.Errorf("build openai probe client: %w", err)
 	}
+	req = req.WithContext(withCodexDiagnosticSource(req.Context(), "usage_monitor"))
+	req = withCodexOutboundDiagnostics(req, account)
+	observe := ObserveCodexOutboundAttempt(req, "native_http")
 	resp, err := client.Do(req)
+	observe(resp, err)
 	if err != nil {
 		return nil, fmt.Errorf("openai codex probe request failed: %w", err)
 	}

@@ -136,6 +136,10 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	startTime time.Time,
 ) (*OpenAIForwardResult, error) {
 	requestedModel := reqModel
+	if err := s.guardCodexIdentityRequest(c, account, body, "http"); err != nil {
+		return nil, err
+	}
+	stageCodexClientIdentityBody(c, body)
 	upstreamPassthroughModel := firstNonEmpty(strings.TrimSpace(gjson.GetBytes(body, "model").String()), reqModel)
 	if isOpenAIResponsesCompactPath(c) {
 		compactMappedModel := s.resolveOpenAICompactFallbackModel(account, reqModel)
@@ -355,6 +359,11 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	compactModelFallbackRetried := false
 	rejectedFieldRetryState := openAIResponsesRejectedFieldRetryStateForRequest(c, body)
 	var resp *http.Response
+	defer func() {
+		if resp != nil {
+			s.bindCommittedCodexTurnState(c, account, resp.Header)
+		}
+	}()
 	var usage *OpenAIUsage
 	var firstTokenMs *int
 	responseID := ""
@@ -403,6 +412,9 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		}
 		SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
 		if err != nil {
+			if respondCodexIdentityRequestError(c, err) {
+				return nil, err
+			}
 			// Transport-level failure (proxy/DNS/TCP/TLS — no HTTP response). Convert to
 			// a failover so the handler switches to a healthy account.
 			return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, true)
@@ -588,6 +600,14 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	body []byte,
 	token string,
 ) (*http.Request, error) {
+	if err := s.guardCodexIdentityRequest(c, account, body, "http"); err != nil {
+		return nil, err
+	}
+	var identityErr error
+	body, identityErr = restoreCodexClientIdentityBody(c, account, body)
+	if identityErr != nil {
+		return nil, identityErr
+	}
 	targetURL := openaiPlatformAPIURL
 	switch account.Type {
 	case AccountTypeOAuth:
@@ -749,6 +769,8 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 		return nil, err
 	}
 	setOpenAIExecContract(c, body, true)
+	restoreCodexClientIdentityHeaders(c, account, req.Header, gjson.GetBytes(body, "prompt_cache_key").String())
+	req = stampCodexIdentityRequest(c, req, body)
 	return req, nil
 }
 

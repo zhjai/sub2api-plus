@@ -29,6 +29,7 @@ func (s *OpenAIGatewayService) prepareCodexAccountIdentitySource(ctx context.Con
 		}
 		source = resolved
 	}
+	source = s.stageCodexIdentityPolicy(ctx, c, account, source)
 	if c != nil {
 		c.Set(codexAccountIdentitySourceContextKey, source)
 	}
@@ -78,6 +79,9 @@ func codexAccountIdentityNamespace(account *Account) string {
 // adding the selected OAuth credential namespace. A scheduler failover therefore
 // cannot send the same session/conversation identity through two upstream accounts.
 func isolateOpenAIUpstreamSessionID(apiKeyID int64, account *Account, raw string) string {
+	if preserveCodexClientIdentity(account, apiKeyID) {
+		return raw
+	}
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
@@ -91,6 +95,9 @@ func isolateOpenAIUpstreamSessionID(apiKeyID int64, account *Account, raw string
 }
 
 func scopeCodexAccountIdentityValue(account *Account, apiKeyID int64, kind, raw string) string {
+	if preserveCodexClientIdentity(account, apiKeyID) {
+		return raw
+	}
 	raw = strings.TrimSpace(raw)
 	namespace := codexAccountIdentityNamespace(account)
 	if raw == "" || namespace == "" {

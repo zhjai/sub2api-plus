@@ -1194,10 +1194,17 @@ func (s *AccountTestService) fetchAntigravityOAuthUpstreamModels(ctx context.Con
 }
 
 func (s *AccountTestService) doUpstreamModelsRequest(req *http.Request, proxyURL string, account *Account) (*http.Response, error) {
+	req = req.WithContext(withCodexDiagnosticSource(req.Context(), "model_catalog"))
+	req = withCodexOutboundDiagnostics(req, account)
+	observe := ObserveCodexOutboundAttempt(req, "native_http")
 	if s.tlsFPProfileService == nil {
-		return s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, nil)
+		resp, err := s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, nil)
+		observe(resp, err)
+		return resp, err
 	}
-	return s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+	resp, err := s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+	observe(resp, err)
+	return resp, err
 }
 
 func upstreamModelsProxyURL(account *Account) string {

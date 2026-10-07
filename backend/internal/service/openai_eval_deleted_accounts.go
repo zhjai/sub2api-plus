@@ -36,6 +36,9 @@ func openAIEvalReferencedAccounts(config *OpenAIEvalConfig) map[int64]bool {
 	for _, item := range config.BPSAccounts {
 		ids[item.AccountID] = true
 	}
+	for _, control := range config.BackgroundControls {
+		ids[control.AccountID] = true
+	}
 	return ids
 }
 
@@ -80,6 +83,12 @@ func (s *OpenAIEvalService) pruneDeletedAccountReferences(ctx context.Context, c
 			bps = append(bps, item)
 		}
 	}
-	config.AccountPriorityRules, config.Accounts, config.BPSAccounts = rules, routes, bps
+	background := make([]OpenAIEvalBackgroundControl, 0, len(config.BackgroundControls))
+	for _, control := range config.BackgroundControls {
+		if !deleted[control.AccountID] {
+			background = append(background, control)
+		}
+	}
+	config.AccountPriorityRules, config.Accounts, config.BPSAccounts, config.BackgroundControls = rules, routes, bps, background
 	return nil
 }

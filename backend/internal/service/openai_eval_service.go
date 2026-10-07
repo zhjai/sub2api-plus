@@ -105,6 +105,12 @@ func (s *OpenAIEvalService) GetConfig(ctx context.Context) (*OpenAIEvalConfig, e
 		if err := s.pruneDeletedAccountReferences(ctx, config, nil); err != nil {
 			return nil, err
 		}
+		if err := s.pruneBackgroundControls(ctx, config, nil); err != nil {
+			return nil, err
+		}
+		if err := s.projectBackgroundRuntime(ctx, config); err != nil {
+			return nil, err
+		}
 		if normalizeErr := normalizeOpenAIEvalQualityConfig(config); normalizeErr != nil {
 			return nil, normalizeErr
 		}
@@ -157,6 +163,18 @@ func (s *OpenAIEvalService) SaveConfig(ctx context.Context, config *OpenAIEvalCo
 		if err := s.pruneDeletedAccountReferences(ctx, config, openAIEvalReferencedAccounts(previous)); err != nil {
 			return err
 		}
+		allowed := map[int64]bool{}
+		if previous != nil {
+			for _, c := range previous.BackgroundControls {
+				allowed[c.AccountID] = true
+			}
+		}
+		if err := s.pruneBackgroundControls(ctx, config, allowed); err != nil {
+			return err
+		}
+	}
+	if err := s.validateBackgroundControls(ctx, config); err != nil {
+		return err
 	}
 	rules, rulesErr := normalizeOpenAIEvalAccountPriorityRules(config.AccountPriorityRules)
 	if rulesErr != nil {
@@ -361,6 +379,7 @@ func validateOpenAIEvalSchedule(schedule *OpenAIEvalSchedule, testType string) e
 }
 
 func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunRequest, actorID int64, source string) (*OpenAIEvalRun, error) {
+	defer openAIEvalAdmissionFinished(ctx)
 	if s == nil || s.repo == nil || s.accountTest == nil {
 		return nil, errors.New("OpenAI evaluation service is unavailable")
 	}
@@ -431,7 +450,21 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 	if request.TestType == OpenAIEvalTypeStateProbe && maximum > 3 {
 		maximum = 3
 	}
+	target, err := s.accountTest.ResolveOpenAIEvalTarget(ctx, request.AccountID, request.RequestedModel)
+	if err != nil {
+		return nil, err
+	}
 	leaseKey := openAIEvalRouteKey(request.AccountID, request.RequestedModel, request.ReasoningEffort) + ":" + request.TestType
+	if source == "scheduled" {
+		namespace, namespaceErr := s.backgroundNamespace(ctx, request.AccountID)
+		if namespaceErr != nil {
+			return nil, namespaceErr
+		}
+		if namespace == "" {
+			return nil, errors.New("background credential namespace unavailable")
+		}
+		leaseKey = "background:" + namespace + ":" + request.TestType
+	}
 	owner, err := newOpenAIEvalLeaseOwner()
 	if err != nil {
 		return nil, err
@@ -454,19 +487,15 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 	var leaseErrMu sync.Mutex
 	var leaseErr error
 	renewDone := make(chan struct{})
-	go func() {
+	go func(leaseCtx context.Context) {
 		defer close(renewDone)
-		s.renewOpenAIEvalLease(runCtx, leaseKey, owner, &lostLease, &leaseErrMu, &leaseErr, cancelRun)
-	}()
+		s.renewOpenAIEvalLease(leaseCtx, leaseKey, owner, &lostLease, &leaseErrMu, &leaseErr, cancelRun)
+	}(runCtx)
 	defer func() {
 		cancelRun()
 		<-renewDone
 	}()
 
-	target, err := s.accountTest.ResolveOpenAIEvalTarget(runCtx, request.AccountID, request.RequestedModel)
-	if err != nil {
-		return nil, err
-	}
 	if request.TestType == OpenAIEvalTypeStateProbe && !isOpenAIStateProbeTarget(target) {
 		return nil, errors.New("State Probe requires a direct OpenAI OAuth account")
 	}
@@ -483,6 +512,19 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 	case OpenAIEvalTypeStateProbe:
 		expectedSamples = 2 * maximum
 	}
+	// A successful state probe needs one pair; later pairs are retries and
+	// charge additional available budget rather than reserving worst-case work.
+	nominal := expectedSamples
+	if request.TestType == OpenAIEvalTypeStateProbe {
+		nominal = 2
+	}
+	controlledCtx, releaseBudget, err := s.beginBackgroundRun(runCtx, target, request, source, owner, nominal)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseBudget()
+	openAIEvalAdmissionFinished(ctx)
+	runCtx = controlledCtx
 	run := &OpenAIEvalRun{
 		AccountID: request.AccountID, TestType: request.TestType,
 		RequestedModel: request.RequestedModel, UpstreamModel: target.UpstreamModel,
@@ -568,6 +610,23 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 				}
 			}
 		}
+		diagnostics := openAIEvalRunDiagnostics(runCtx)
+		deferred := diagnostics.DeferredReason != "" || isOpenAIEvalDeferredCode(run.Error) || lostLease.Load() || runCtx.Err() != nil
+		for _, sample := range run.Samples {
+			deferred = deferred || isOpenAIEvalDeferredCode(sample.ErrorCode)
+		}
+		if controller, _ := runCtx.Value(openAIEvalControllerKey{}).(*openAIEvalController); controller != nil && !controller.deadline.IsZero() && !time.Now().Before(controller.deadline) {
+			deferred = true
+			diagnostics.DeferredReason = "sampling_window_exhausted"
+		}
+		if deferred {
+			run.DiagnosticOnly = true
+			run.Status = "inconclusive"
+			if diagnostics.DeferredReason != "" {
+				run.Error = diagnostics.DeferredReason
+			}
+			run.Outcome = OpenAIEvalOutcome{Status: "inconclusive", Reason: run.Error, SampleCount: run.CompletedSamples, ExpectedCount: run.ExpectedSamples, Confidence: "none", Scheduling: "disabled"}
+		}
 		run.CostEstimateUSD = s.estimateRunCost(target.UpstreamModel, request.RequestedModel, run.InputTokens, run.OutputTokens)
 		finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer finishCancel()
@@ -577,7 +636,12 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 			}
 			return run, saveErr
 		}
-		if qualityErr := s.recordOpenAIEvalQualityResult(finishCtx, runID, run); qualityErr != nil {
+		if qualityErr := func() error {
+			if run.DiagnosticOnly {
+				return nil
+			}
+			return s.recordOpenAIEvalQualityResult(finishCtx, runID, run)
+		}(); qualityErr != nil {
 			logger.LegacyPrintf("service.openai_eval", "[OpenAI Eval] quality update failed run=%d: %v", runID, qualityErr)
 		}
 		// Diagnostic quality changes preference only. It must not fabricate
@@ -616,8 +680,9 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 				return finish(ctxErr)
 			}
 			if sampleErr != nil {
-				if record.ErrorCode == "account_scheduling_disabled" {
-					return finish(sampleErr)
+				if isOpenAIEvalDeferredCode(record.ErrorCode) {
+					run.Error = record.ErrorCode
+					return finish(nil)
 				}
 				markHardFailure(sampleErr)
 				if run.Error == "" {
@@ -704,6 +769,10 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 			if sampleErr != nil {
 				markHardFailure(sampleErr)
 				code := safeOpenAIEvalErrorCode(sampleErr)
+				if isOpenAIEvalDeferredCode(code) {
+					run.Error = code
+					return finish(nil)
+				}
 				if run.Error == "" {
 					run.Error = code
 				}

@@ -27,6 +27,17 @@
             <template v-if="planCount">{{ t('admin.modelIntegrity.tests.budget', { requests: formatCount(dailyTotal), plans: planCount }) }}<template v-if="dailyMax > dailyTotal"> {{ t('admin.modelIntegrity.tests.budgetRetry', { max: formatCount(dailyMax) }) }}</template></template>
             <template v-else>{{ t('admin.modelIntegrity.tests.budgetNone') }}</template>
             <span class="budget-hint">{{ t('admin.modelIntegrity.tests.budgetHint') }}</span>
+            <span v-if="pausedAccounts.length" class="paused-summary" data-testid="paused-summary">
+              <span class="paused-summary-label">{{ t('admin.modelIntegrity.tests.background.pausedSummary', { count: pausedAccounts.length }) }}</span>
+              <button
+                v-for="item in pausedAccounts"
+                :key="item.accountID"
+                type="button"
+                class="paused-chip"
+                :disabled="!item.firstKey"
+                @click="selectedKey = item.firstKey"
+              >{{ accountName(item.accountID) }}</button>
+            </span>
           </p>
           <div class="attempts">
             <label class="attempts-field">
@@ -89,7 +100,10 @@
                         :title="`${t(`admin.modelIntegrity.tests.types.${type}.name`)}: ${signalText(route, type)}`"
                       />
                     </span>
-                    <span class="target-auto">{{ autoCount(route) ? t('admin.modelIntegrity.tests.autoCount', { count: autoCount(route) }) : t('admin.modelIntegrity.tests.manualOnly') }}</span>
+                    <span class="target-auto">
+                      <span v-if="isAccountPaused(route.account_id)" class="target-paused" data-testid="target-paused">{{ t('admin.modelIntegrity.tests.background.pausedTag') }}</span>
+                      {{ autoCount(route) ? t('admin.modelIntegrity.tests.autoCount', { count: autoCount(route) }) : t('admin.modelIntegrity.tests.manualOnly') }}
+                    </span>
                   </span>
                 </button>
               </li>
@@ -115,6 +129,18 @@
                 </button>
               </div>
             </header>
+            <AccountAutoTestControls
+              :account-id="selected.account_id"
+              :account-name="accountName(selected.account_id)"
+              :control="controlFor(selected.account_id)"
+              :saved-control="savedControlFor(selected.account_id)"
+              :routes="config.accounts.filter(route => route.account_id === selected!.account_id)"
+              :catalog="catalog"
+              :max-attempts="maxAttempts"
+              :rpm-limit="accountOf(selected.account_id)?.rpm_limit"
+              :applies="testAvailable"
+              @update="updateControl"
+            />
             <div class="detail-body">
               <TestTypePanel
                 v-for="type in TEST_TYPES"
@@ -129,6 +155,7 @@
                 :unavailable-reason="unavailableReason(selected, type)"
                 :notice="testNotice(selected, type)"
                 :max-attempts="maxAttempts"
+                :auto-note="autoNote(selected, type)"
                 @run="requestRun(selected, type)"
                 @open="detailRun = $event"
               />
@@ -159,7 +186,7 @@
                 <option value="likely">{{ t('admin.modelIntegrity.tests.filterLikely') }}</option>
                 <option value="neutral">{{ t('admin.modelIntegrity.tests.filterNeutral') }}</option>
               </select>
-              <button type="button" class="btn btn-secondary btn-sm" :disabled="historyLoading" @click="loadHistory">
+              <button type="button" class="btn btn-secondary btn-sm" :disabled="historyLoading" @click="loadHistory(); refreshRuntime()">
                 <Icon name="refresh" size="sm" :class="historyLoading ? 'motion-safe:animate-spin' : ''" />{{ t('admin.modelIntegrity.common.refresh') }}
               </button>
             </div>
@@ -221,16 +248,20 @@
     <BaseDialog :show="pendingFingerprint !== null" :title="t('admin.modelIntegrity.tests.manualSampleTitle')" width="narrow" @close="pendingFingerprint = null">
       <fieldset class="space-y-2">
         <legend class="sr-only">{{ t('admin.modelIntegrity.tests.sampleMode') }}</legend>
-        <label v-for="mode in fingerprintModes" :key="mode.id" class="sample-choice">
-          <input v-model="manualSampleMode" type="radio" name="manual-sample" :value="mode.id" class="text-primary-600 focus:ring-primary-500" />
-          <span>{{ t('admin.modelIntegrity.tests.manualSampleOption', { mode: sampleModeLabel(mode.id), count: mode.samples }) }}</span>
+        <label v-for="mode in fingerprintModes" :key="mode.id" class="sample-choice" :class="{ 'sample-choice-blocked': manualBlocked(mode.samples) }">
+          <input v-model="manualSampleMode" type="radio" name="manual-sample" :value="mode.id" :disabled="manualBlocked(mode.samples)" class="text-primary-600 focus:ring-primary-500" />
+          <span>
+            {{ t('admin.modelIntegrity.tests.manualSampleOption', { mode: sampleModeLabel(mode.id), count: mode.samples }) }}
+            <span v-if="manualBlocked(mode.samples)" class="block text-xs text-rose-700 dark:text-rose-300">{{ t('admin.modelIntegrity.tests.background.manualBlocked', { capacity: manualCapacity }) }}</span>
+          </span>
         </label>
       </fieldset>
       <p class="mt-3 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.modelIntegrity.tests.manualSampleHint') }}</p>
+      <p v-if="manualControl?.budget_enabled" class="mt-2 text-xs text-gray-500 dark:text-gray-400" data-testid="manual-budget-note">{{ t('admin.modelIntegrity.tests.background.manualBudgetNote') }}</p>
       <template #footer>
         <div class="flex justify-end gap-2">
           <button type="button" class="btn btn-secondary" @click="pendingFingerprint = null">{{ t('admin.modelIntegrity.common.cancel') }}</button>
-          <button type="button" class="btn btn-primary" data-testid="confirm-fingerprint" @click="confirmFingerprint">{{ t('admin.modelIntegrity.tests.runNow') }}</button>
+          <button type="button" class="btn btn-primary" data-testid="confirm-fingerprint" :disabled="manualBlocked(selectedManualSamples)" @click="confirmFingerprint">{{ t('admin.modelIntegrity.tests.runNow') }}</button>
         </div>
       </template>
     </BaseDialog>
@@ -261,7 +292,8 @@ import AddTargetsDialog from '@/components/admin/modelIntegrity/AddTargetsDialog
 import EditTargetDialog from '@/components/admin/modelIntegrity/EditTargetDialog.vue'
 import RunDetailDialog from '@/components/admin/modelIntegrity/RunDetailDialog.vue'
 import PlatformIcon from '@/components/common/PlatformIcon.vue'
-import { accountsAPI, type OpenAIEvalRouteConfig, type OpenAIEvalRun } from '@/api/admin/accounts'
+import AccountAutoTestControls from '@/components/admin/modelIntegrity/AccountAutoTestControls.vue'
+import { accountsAPI, type OpenAIEvalBackgroundControl, type OpenAIEvalRouteConfig, type OpenAIEvalRun } from '@/api/admin/accounts'
 import { useAppStore } from '@/stores/app'
 import { extractApiErrorMessage } from '@/utils/apiError'
 import {
@@ -269,17 +301,22 @@ import {
   MIN_MAX_REQUEST_ATTEMPTS,
   TEST_TYPES,
   activeScheduleCount,
+  findBackgroundControl,
   isDirectOAuthAccount,
   isDirectOAuthRoute,
   latestRunFor,
   newRoute,
   normalizeMaxRequestAttempts,
+  pausedUntil,
   redactSecrets,
   resultTone,
   routeKey,
+  runFeasibility,
   scheduleOf,
   totalDailyMaxRequests,
   totalDailyRequests,
+  requestsPerRun,
+  maxRequestsPerRun,
   type EvalTestType
 } from './modelIntegrity'
 import { runExplanation, runStatusLabel } from './runText'
@@ -288,7 +325,7 @@ import { useModelIntegrityConfig } from './useModelIntegrityConfig'
 
 const { t } = useI18n()
 const appStore = useAppStore()
-const { config, catalog, accounts, loading, loaded, saving, conflict, dirty, load, reloadConfig, save, accountName, accountLabel } = useModelIntegrityConfig()
+const { config, catalog, accounts, loading, loaded, saving, conflict, dirty, load, reloadConfig, save, accountName, accountLabel, savedBackgroundControls, refreshBackgroundRuntime } = useModelIntegrityConfig()
 
 const search = ref('')
 const selectedKey = ref('')
@@ -365,6 +402,41 @@ function commitAttempts() {
 }
 const planCount = computed(() => activeScheduleCount(config.accounts, testAvailable))
 const fingerprintModes = computed(() => catalog.value?.fingerprint_modes?.length ? catalog.value.fingerprint_modes : [{ id: 'quick', samples: 60 }, { id: 'standard', samples: 200 }, { id: 'strict', samples: 400 }])
+
+// -- Account-wide automatic-test controls (pause and experimental limits) --
+// They live in the shared config and persist with the page's Save. Pausing
+// never disables a schedule, removes a target or touches results.
+const controlFor = (accountID: number) => findBackgroundControl(config.background_controls, accountID)
+const savedControlFor = (accountID: number) => findBackgroundControl(savedBackgroundControls.value, accountID)
+const isAccountPaused = (accountID: number) => pausedUntil(controlFor(accountID)) !== null
+function updateControl(control: OpenAIEvalBackgroundControl) {
+  const list = config.background_controls ?? (config.background_controls = [])
+  const index = list.findIndex(item => item.account_id === control.account_id)
+  // The live runtime stays attached for display; it is stripped on save.
+  const next = { ...control, runtime: savedControlFor(control.account_id)?.runtime ?? null }
+  if (index >= 0) list.splice(index, 1, next)
+  else list.push(next)
+}
+const pausedAccounts = computed(() => (config.background_controls ?? [])
+  .filter(control => pausedUntil(control) !== null)
+  .map(control => {
+    const first = config.accounts.find(route => route.account_id === control.account_id)
+    return { accountID: control.account_id, firstKey: first ? routeKey(first) : '' }
+  }))
+function autoNote(route: OpenAIEvalRouteConfig, type: EvalTestType) {
+  if (!scheduleOf(route, type).enabled) return undefined
+  const until = pausedUntil(controlFor(route.account_id))
+  if (until) return t('admin.modelIntegrity.tests.background.panelPaused', { time: formatTime(until.toISOString()) })
+  const control = controlFor(route.account_id)
+  if (!control?.budget_enabled) return undefined
+  const feasibility = runFeasibility(requestsPerRun(route, type, catalog.value), maxRequestsPerRun(route, type, maxAttempts.value, catalog.value), control, accountOf(route.account_id)?.rpm_limit)
+  return feasibility.fits ? undefined : t('admin.modelIntegrity.tests.background.panelBlocked', { count: feasibility.nominal, capacity: feasibility.capacity })
+}
+// A manual run under enabled limits must fit the same window as an automatic one.
+const manualControl = computed(() => (pendingFingerprint.value ? savedControlFor(pendingFingerprint.value.account_id) : undefined))
+const manualCapacity = computed(() => (manualControl.value?.budget_enabled ? runFeasibility(0, 0, manualControl.value, pendingFingerprint.value ? accountOf(pendingFingerprint.value.account_id)?.rpm_limit : undefined).capacity : Number.POSITIVE_INFINITY))
+const manualBlocked = (samples: number) => samples > manualCapacity.value
+const selectedManualSamples = computed(() => fingerprintModes.value.find(mode => mode.id === manualSampleMode.value)?.samples ?? 0)
 
 const panelRuns = computed(() => (selected.value && targetRuns.value?.key === routeKey(selected.value) ? [...targetRuns.value.items, ...runs.value] : runs.value))
 const historyRuns = computed(() => {
@@ -493,8 +565,9 @@ const isRunning = (route: OpenAIEvalRouteConfig, type: EvalTestType) => persiste
 function requestRun(route: OpenAIEvalRouteConfig, type: EvalTestType) {
   if (isRunning(route, type)) return
   if (type === 'fingerprint') {
-    manualSampleMode.value = route.fingerprint_schedule.sample_mode || 'quick'
     pendingFingerprint.value = route
+    manualSampleMode.value = route.fingerprint_schedule.sample_mode || 'quick'
+    if (manualBlocked(selectedManualSamples.value)) manualSampleMode.value = fingerprintModes.value.find(mode => !manualBlocked(mode.samples))?.id ?? manualSampleMode.value
     return
   }
   void runNow(route, type)
@@ -540,7 +613,7 @@ async function runNow(route: OpenAIEvalRouteConfig, type: EvalTestType, sampleMo
     const run = await pendingRun
     detailRun.value = run
     appStore.showSuccess(t('admin.modelIntegrity.tests.runDone'))
-    await Promise.all([loadHistory(), loadTargetRuns()])
+    await Promise.all([loadHistory(), loadTargetRuns(), refreshRuntime()])
   } catch (error) {
     // Upstream errors can echo credentials; the toast shows the cause with them masked.
     const status = (error as { response?: { status?: number }; status?: number })?.response?.status ?? (error as { status?: number })?.status
@@ -564,6 +637,15 @@ onBeforeUnmount(() => {
   for (const timer of progressTimers) clearInterval(timer)
   progressTimers.clear()
 })
+
+/** Best effort: runtime counters are informational and never block the page. */
+async function refreshRuntime() {
+  try {
+    await refreshBackgroundRuntime()
+  } catch {
+    // Missing counters read as "not counted yet".
+  }
+}
 
 async function loadHistory() {
   historyLoading.value = true
@@ -597,9 +679,14 @@ async function loadTargetRuns() {
 }
 
 async function handleSave() {
+  const sentControls = (config.background_controls ?? []).length
   try {
     const result = await save()
     if (result === 'saved') appStore.showSuccess(t('admin.modelIntegrity.common.saved'))
+    // An older server ignores the field; say so rather than showing a pause that is not in force.
+    if ((result === 'saved' || result === 'saved_evaluation_failed') && sentControls > 0 && !savedBackgroundControls.value.length) {
+      appStore.showError(t('admin.modelIntegrity.tests.background.notPersisted'))
+    }
   } catch (error) {
     appStore.showError(extractApiErrorMessage(error, t('admin.modelIntegrity.common.saveFailed')))
   }
@@ -734,4 +821,9 @@ onMounted(initialLoad)
 .tone-running { @apply bg-sky-50 text-sky-800 dark:bg-sky-950/40 dark:text-sky-300; }
 .sample-choice { @apply flex cursor-pointer items-center gap-3 rounded-lg border border-gray-200 px-3 py-2.5 text-sm dark:border-dark-600; }
 .sample-choice:has(input:checked) { @apply border-primary-600 bg-primary-50/50 dark:bg-primary-950/30; }
+.sample-choice-blocked { @apply cursor-not-allowed opacity-70; }
+.paused-summary { @apply mt-2 flex flex-wrap items-center gap-1.5; }
+.paused-summary-label { @apply text-gray-700 dark:text-gray-300; }
+.paused-chip { @apply rounded-md border border-gray-300 px-2 py-0.5 text-xs text-gray-700 hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 disabled:cursor-default disabled:hover:bg-transparent dark:border-dark-500 dark:text-gray-300 dark:hover:bg-dark-700; }
+.target-paused { @apply mr-1 rounded bg-gray-100 px-1 py-px font-medium text-gray-700 dark:bg-dark-700 dark:text-gray-300; }
 </style>

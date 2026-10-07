@@ -319,6 +319,12 @@ export interface OpenAIEvalConfig {
   quality_refreshed_at?: string | null
   quality_next_refresh_at?: string | null
   accounts: OpenAIEvalRouteConfig[]
+  /**
+   * Per-account automatic-test controls (pause and experimental send limits).
+   * Older servers omit it; the UI then omits it on save too, and sends it back
+   * as loaded (runtime stripped) when the server returned it.
+   */
+  background_controls?: OpenAIEvalBackgroundControl[]
   // -- Read-only scheduling evaluation projections (rc3) ---------------------
   // Never sent back on save; the server derives them from the published build.
   /** The ranking in force for the saved revision, if one has been built. */
@@ -330,6 +336,37 @@ export interface OpenAIEvalConfig {
   evaluation_in_progress?: boolean
   /** Revision the server stored on the last accepted save. */
   saved_revision?: number
+}
+
+/** Live counters for one account's automatic tests; GET only, never saved. */
+export interface OpenAIEvalBackgroundRuntime {
+  sent_last_hour: number
+  reserved: number
+  active_runs: number
+  deferred_reason?: string
+  next_send_at?: string | null
+}
+
+/**
+ * Account-wide control over automatic tests, across every target of the
+ * account. Pausing never disables a schedule or removes a target. The numeric
+ * limits only apply when budget_enabled is true.
+ */
+export interface OpenAIEvalBackgroundControl {
+  account_id: number
+  paused_until?: string | null
+  pause_reason?: string
+  budget_enabled: boolean
+  max_requests_per_hour: number
+  min_send_interval_seconds: number
+  max_background_concurrency: number
+  sampling_window_seconds: number
+  runtime?: OpenAIEvalBackgroundRuntime | null
+  /**
+   * GET only: why runtime is absent (e.g. evaluation_budget_unavailable,
+   * credential_namespace_unavailable). Absent runtime always means unknown.
+   */
+  runtime_unavailable_reason?: string
 }
 
 /** Runtime route of one BPS account as reported by the server. */

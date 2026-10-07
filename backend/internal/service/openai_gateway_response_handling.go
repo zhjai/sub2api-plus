@@ -1753,6 +1753,7 @@ func (s *OpenAIGatewayService) bindHTTPResponseAccount(ctx context.Context, c *g
 
 	groupID := getOpenAIGroupIDFromContext(c)
 	ttl := s.openAIWSResponseStickyTTL()
+	s.bindCodexIdentityContinuation(bindCtx, c, account, "response", responseID)
 	logOpenAIWSBindResponseAccountWarn(groupID, account.ID, responseID, store.BindResponseAccount(bindCtx, groupID, responseID, account.ID, ttl))
 	s.bindOpenAIResponseRouteEpoch(bindCtx, c, account, responseID)
 	if rawOwner, ok := c.Get(openAIHTTPResponseOwnerContextKey); ok {

@@ -28,7 +28,7 @@
         </label>
         <label class="tt-field">
           <span class="tt-label">{{ t('admin.modelIntegrity.tests.every') }}</span>
-          <select v-model="intervalChoice" class="input tt-input" :disabled="!schedule.enabled">
+          <select v-model="intervalChoice" class="input tt-input" :disabled="!schedule.enabled" :title="t('admin.modelIntegrity.tests.everyHint')">
             <option v-for="seconds in intervals" :key="seconds" :value="seconds">{{ intervalLabel(seconds) }}</option>
             <option :value="CUSTOM_INTERVAL">{{ t('admin.modelIntegrity.tests.interval.customOption') }}</option>
           </select>
@@ -97,8 +97,9 @@
       <p class="tt-cost">
         <span data-testid="per-run">{{ perRunText }}</span>
         <span :class="schedule.enabled ? 'tt-cost-strong' : ''">{{ schedule.enabled ? t('admin.modelIntegrity.tests.perDay', { count: formatDaily(perDay) }) : t('admin.modelIntegrity.tests.perDayOff') }}</span>
-        <span v-if="schedule.enabled && schedule.next_run_at">{{ t('admin.modelIntegrity.tests.nextRun', { time: formatTime(schedule.next_run_at) }) }}</span>
+        <span v-if="schedule.enabled && schedule.next_run_at && !autoNote">{{ t('admin.modelIntegrity.tests.nextRun', { time: formatTime(schedule.next_run_at) }) }}</span>
       </p>
+      <p v-if="autoNote" class="tt-auto-note" data-testid="auto-note">{{ autoNote }}</p>
       <p v-if="type === 'state_probe' && route.reasoning_effort" class="tt-link-note text-gray-500 dark:text-gray-400" data-testid="state-probe-effort">{{ t('admin.modelIntegrity.tests.stateProbeDefaultEffort') }}</p>
       <p v-if="type === 'state_probe'" class="tt-link-note">
         <router-link to="/admin/model-integrity/scheduling" class="tt-link">{{ t('admin.modelIntegrity.tests.goScheduling') }}</router-link>
@@ -165,6 +166,8 @@ const props = defineProps<{
    * three chains — the panel shows that capped ceiling, never 2 × the value.
    */
   maxAttempts?: number
+  /** Account-wide state that holds this automatic test back (paused, or the run does not fit the limits). */
+  autoNote?: string
 }>()
 
 const emit = defineEmits<{ (e: 'run'): void; (e: 'open', run: OpenAIEvalRun): void }>()
@@ -306,6 +309,7 @@ const formatTime = (value: string) => {
 .tt-cost { @apply flex flex-wrap gap-x-4 gap-y-1 text-xs tabular-nums text-gray-500 dark:text-gray-400; }
 .tt-cost-strong { @apply font-medium text-gray-800 dark:text-gray-200; }
 .tt-link-note { @apply text-xs; }
+.tt-auto-note { @apply text-xs leading-relaxed text-amber-800 dark:text-amber-300; }
 .tt-link { @apply font-medium text-primary-700 underline-offset-2 hover:underline dark:text-primary-300; }
 .tt-progress { @apply rounded-md bg-gray-50 px-3 py-2.5 dark:bg-dark-800/70; }
 .tt-progress-head { @apply mb-2 flex items-center justify-between gap-3 text-xs font-medium text-gray-700 dark:text-gray-300; }

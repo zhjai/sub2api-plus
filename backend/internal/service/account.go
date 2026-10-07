@@ -22,6 +22,8 @@ import (
 )
 
 type Account struct {
+	// Request-local authorization, never serialized into account snapshots.
+	codexIdentityGrant      *CodexIdentityPolicy
 	ID                      int64
 	Name                    string
 	Notes                   *string

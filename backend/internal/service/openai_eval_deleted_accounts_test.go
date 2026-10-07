@@ -78,6 +78,13 @@ func TestOpenAIEvalDeletedCleanupPreservesConfigOnLookupFailure(t *testing.T) {
 	require.Len(t, repo.config.BPSAccounts, 1)
 }
 
+func TestOpenAIEvalDeletedCleanupPrunesBackgroundControls(t *testing.T) {
+	accounts := &deletedEvalAccounts{items: map[int64]*Account{2: {ID: 2, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}}}
+	config := &OpenAIEvalConfig{BackgroundControls: []OpenAIEvalBackgroundControl{{AccountID: 1}, {AccountID: 2, BudgetEnabled: true}}}
+	require.NoError(t, NewOpenAIEvalService(&openAIEvalRepoFake{}, accounts, nil).pruneDeletedAccountReferences(t.Context(), config, nil))
+	require.Equal(t, []OpenAIEvalBackgroundControl{{AccountID: 2, BudgetEnabled: true}}, config.BackgroundControls)
+}
+
 func TestOpenAIEvalDeletedCleanupRejectsStaleRevisionBeforeValidation(t *testing.T) {
 	repo := &openAIEvalRepoFake{config: &OpenAIEvalConfig{Revision: 8}}
 	svc := NewOpenAIEvalService(repo, &deletedEvalAccounts{}, nil)

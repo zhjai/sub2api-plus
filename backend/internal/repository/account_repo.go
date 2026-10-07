@@ -143,6 +143,9 @@ func createAccountRecord(ctx context.Context, client *dbent.Client, account *ser
 	if account == nil {
 		return service.ErrAccountNilInput
 	}
+	if err := normalizeAccountCodexIdentity(ctx, client, account); err != nil {
+		return err
+	}
 
 	builder := client.Account.Create().
 		SetName(account.Name).
@@ -519,6 +522,7 @@ func (r *accountRepository) updateAccount(
 	}
 
 	account.UpdatedAt = updated.UpdatedAt
+	account.Extra = updated.Extra // Include database-triggered identity revocation in save responses.
 	// 普通账号编辑（如 model_mapping / credentials）也需要立即刷新单账号快照，
 	// 否则网关在 outbox worker 延迟或异常时仍可能读到旧配置。
 	if contextTx == nil {
@@ -540,6 +544,10 @@ func (r *accountRepository) updateLockedAccount(
 		return nil, err
 	}
 	account.Extra = extra
+	if err := normalizeAccountCodexIdentity(ctx, client, account); err != nil {
+		return nil, err
+	}
+	extra = account.Extra
 
 	schedulable := account.Schedulable
 	if account.Status == service.StatusError {
@@ -2749,6 +2757,9 @@ func (r *accountRepository) AutoPauseExpiredAccounts(ctx context.Context, now ti
 }
 
 func (r *accountRepository) UpdateExtra(ctx context.Context, id int64, updates map[string]any) error {
+	if err := service.ValidateCodexIdentityExtraPatch(updates); err != nil {
+		return err
+	}
 	if err := service.ValidateAccountRPMExtra(updates); err != nil {
 		return err
 	}
@@ -2795,7 +2806,7 @@ func (r *accountRepository) UpdateExtra(ctx context.Context, id int64, updates m
 	)
 
 	if err != nil {
-		return err
+		return translatePersistenceError(err, nil, nil)
 	}
 
 	affected, err := result.RowsAffected()
@@ -3026,6 +3037,9 @@ func ollamaCloudUsageSnapshotClearRequested(extra map[string]any) bool {
 }
 
 func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates service.AccountBulkUpdate) (int64, error) {
+	if err := service.ValidateCodexIdentityExtraPatch(updates.Extra); err != nil {
+		return 0, err
+	}
 	if err := service.ValidateAccountRPMExtra(updates.Extra); err != nil {
 		return 0, err
 	}
@@ -3274,7 +3288,7 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 
 	result, err := exec.ExecContext(ctx, query, args...)
 	if err != nil {
-		return 0, err
+		return 0, translatePersistenceError(err, nil, nil)
 	}
 	rows, err := result.RowsAffected()
 	if err != nil {

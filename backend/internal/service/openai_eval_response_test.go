@@ -380,6 +380,22 @@ func TestEvalRetryDelayCancellationAndDeterministicErrors(t *testing.T) {
 	}
 }
 
+func TestEvalAutomatic429DoesNotRetry(t *testing.T) {
+	upstream := &evalTransportStub{respond: func(*http.Request, int) (*http.Response, error) {
+		return newJSONResponse(http.StatusTooManyRequests, `{"error":{"code":"rate_limit_exceeded","message":"busy"}}`), nil
+	}}
+	svc, target := evalOAuthHarness(upstream)
+	target.Account.Status = StatusActive
+	target.Account.Schedulable = true
+	svc.accountRepo = &openAIAccountTestRepo{mockAccountRepoForGemini: mockAccountRepoForGemini{accountsByID: map[int64]*Account{target.Account.ID: target.Account}}}
+	ctx := context.WithValue(t.Context(), openAIEvalAutomaticKey{}, true)
+	_, record, err := svc.runOpenAIEvalSampleAttempts(ctx, target, "probe", "", 3)
+	require.Error(t, err)
+	require.Equal(t, http.StatusTooManyRequests, record.HTTPStatus)
+	require.Equal(t, 1, record.Attempts)
+	require.EqualValues(t, 1, upstream.calls.Load())
+}
+
 func TestEvalSettingsValidationAndStateProbeEligibility(t *testing.T) {
 	repo := &openAIEvalRepoFake{}
 	a := &Account{ID: 996, Platform: PlatformOpenAI, Type: AccountTypeOAuth}

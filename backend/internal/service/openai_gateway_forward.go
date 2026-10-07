@@ -40,6 +40,14 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	if _, err := s.prepareCodexAccountIdentitySource(ctx, c, account); err != nil {
 		return nil, err
 	}
+	identityTransport := "http"
+	if GetOpenAIClientTransport(c) == OpenAIClientTransportWS {
+		identityTransport = "ws"
+	}
+	if err := s.guardCodexIdentityRequest(c, account, body, identityTransport); err != nil {
+		return nil, err
+	}
+	stageCodexClientIdentityBody(c, body)
 	startTime := time.Now()
 	// 固定渠道映射后的请求级 canonical body；账号 normalize/strip 不得改写跨 failover hint。
 	canonicalImageIntentBody := body
@@ -537,7 +545,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			markDecodedModified()
 		}
 		// 带真实 device_id 时补齐 client_metadata 安装标识，与真实 Codex 对齐（compact 形态不同，跳过）。
-		if !isCompactRequest && applyCodexClientMetadata(decoded, account) {
+		if !isCompactRequest && !preserveCodexClientIdentity(codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c)) && applyCodexClientMetadata(decoded, account) {
 			markDecodedModified()
 		}
 		if currentClientPromptCacheKey, ok := decoded["prompt_cache_key"].(string); ok {
@@ -641,7 +649,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		markPatchSet("max_output_tokens", clampedCap)
 	}
 	if wsDecision.Transport != OpenAIUpstreamTransportResponsesWebsocketV2 &&
-		!account.IsOpenAIApiKey() && gjson.GetBytes(body, "previous_response_id").Exists() {
+		!account.IsOpenAIApiKey() && !preserveCodexClientIdentity(codexAccountIdentitySource(c, account), apiKeyID) && gjson.GetBytes(body, "previous_response_id").Exists() {
 		markPatchDelete("previous_response_id")
 	}
 	if openAIRequestBodyMayContainEmptyBase64InputImage(body) {
@@ -1081,6 +1089,12 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		// Send request
 		upstreamStart := time.Now()
 		resp, err := s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+		if respondCodexIdentityRequestError(c, err) {
+			if headerGuard != nil {
+				headerGuard.close()
+			}
+			return nil, err
+		}
 		if IsAccountRPMError(err) {
 			return nil, err
 		}
@@ -1396,6 +1410,14 @@ func shouldForwardOpenAIResponsesViaRawChatCompletions(account *Account) bool {
 }
 
 func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Context, account *Account, body []byte, token string, isStream bool, promptCacheKey string, isCodexCLI bool) (*http.Request, error) {
+	if err := s.guardCodexIdentityRequest(c, account, body, "http"); err != nil {
+		return nil, err
+	}
+	var identityErr error
+	body, identityErr = restoreCodexClientIdentityBody(c, account, body)
+	if identityErr != nil {
+		return nil, identityErr
+	}
 	// Determine target URL based on account type
 	var targetURL string
 	switch account.Type {
@@ -1564,6 +1586,8 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 	if err := applyMappedGPT55LiteCompatibility(req, account, body); err != nil {
 		return nil, err
 	}
+	restoreCodexClientIdentityHeaders(c, account, req.Header, gjson.GetBytes(body, "prompt_cache_key").String())
+	req = stampCodexIdentityRequest(c, req, body)
 	return req, nil
 }
 

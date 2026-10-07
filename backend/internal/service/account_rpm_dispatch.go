@@ -17,6 +17,7 @@ type accountRPMHTTPPolicy struct {
 // Carry a fresh admission callback to each actual transport dispatch, including
 // redirects and the Grok fallback below Do. This never reserves a permit.
 func accountRPMDispatchRequest(req *http.Request, cache GatewayCache, repo accountRPMAccountReader, account *Account) (*http.Request, error) {
+	req = withCodexOutboundDiagnostics(req, account)
 	if err := req.Context().Err(); err != nil {
 		if req.Body != nil {
 			_ = req.Body.Close()
@@ -36,7 +37,10 @@ func accountRPMDispatchRequest(req *http.Request, cache GatewayCache, repo accou
 				return &OpenAIEvalRequestError{Code: "account_scheduling_disabled", Message: "automatic test skipped: account scheduling is disabled"}
 			}
 		}
-		return admitAccountRPM(ctx, cache, repo, account)
+		if err := admitAccountRPM(ctx, cache, repo, account); err != nil {
+			return err
+		}
+		return openAIEvalBeforeSend(ctx)
 	}
 	policy := accountRPMHTTPPolicy{
 		admit: admit,

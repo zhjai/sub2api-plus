@@ -435,6 +435,8 @@ type OpenAIEvalRunFilter struct {
 }
 
 type OpenAIEvalScheduledRun struct {
+	ClaimOwner      string
+	ClaimedAt       time.Time
 	AccountID       int64
 	TestType        string
 	RequestedModel  string
@@ -469,6 +471,13 @@ type OpenAIEvalRepository interface {
 // rolling-upgrade adapters can keep using the base repository contract.
 type OpenAIEvalProgressRepository interface {
 	UpdateRunProgress(context.Context, int64, *OpenAIEvalRun) error
+}
+
+// Completion scheduling is optional for legacy repositories and test doubles.
+type OpenAIEvalCompletionRepository interface {
+	ClaimDueSchedulesForCompletion(context.Context, time.Time, int) ([]OpenAIEvalScheduledRun, error)
+	RenewScheduleClaim(context.Context, OpenAIEvalScheduledRun) (bool, error)
+	CompleteSchedule(context.Context, OpenAIEvalScheduledRun, time.Time) error
 }
 
 type OpenAIEvalSchedule struct {
@@ -570,6 +579,7 @@ func openAIEvalRankingUsesQuality(policy string, weights OpenAIEvalRankingWeight
 }
 
 type OpenAIEvalConfig struct {
+	BackgroundControls            []OpenAIEvalBackgroundControl   `json:"background_controls"`
 	AccountPriorityRules          []OpenAIEvalAccountPriorityRule `json:"account_priority_rules,omitempty"`
 	QualityRefreshIntervalSeconds int                             `json:"quality_refresh_interval_seconds"`
 	MaxRequestAttempts            int                             `json:"max_request_attempts"`

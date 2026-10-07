@@ -56,7 +56,22 @@ func (s *OpenAIGatewayService) relayOpenAICodexTurnState(c *gin.Context, account
 		return
 	}
 	c.Writer.Header().Set(canonical, state)
+	if c.Request != nil {
+		s.bindCodexIdentityContinuation(c.Request.Context(), c, account, "ticket", state)
+	}
 	s.noteOpenAICodexTurnStateProvenance(c, account)
+}
+
+// Passthrough copies response headers through a separate writer. Bind only a
+// ticket actually committed downstream, never one from a discarded attempt.
+func (s *OpenAIGatewayService) bindCommittedCodexTurnState(c *gin.Context, account *Account, upstream http.Header) {
+	if c == nil || c.Request == nil || c.Writer == nil || !c.Writer.Written() {
+		return
+	}
+	state := extractOpenAICodexTurnState(upstream)
+	if state != "" && c.Writer.Header().Get(openAICodexTurnStateHeader) == state {
+		s.bindCodexIdentityContinuation(c.Request.Context(), c, account, "ticket", state)
+	}
 }
 
 // stageOpenAICodexTurnState 将上游 turn-state 暂存到延迟提交的响应头集合
@@ -88,6 +103,9 @@ func stageOpenAICodexTurnState(dst *http.Header, upstream http.Header) {
 func (s *OpenAIGatewayService) noteStagedOpenAICodexTurnStateCommitted(c *gin.Context, account *Account, staged http.Header) {
 	if staged == nil || strings.TrimSpace(staged.Get(openAICodexTurnStateHeader)) == "" {
 		return
+	}
+	if c != nil && c.Request != nil {
+		s.bindCodexIdentityContinuation(c.Request.Context(), c, account, "ticket", staged.Get(openAICodexTurnStateHeader))
 	}
 	s.noteOpenAICodexTurnStateProvenance(c, account)
 }

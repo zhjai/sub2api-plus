@@ -46,6 +46,7 @@ type OpenAIEvalRequestError struct {
 	HTTPStatus int
 	Retryable  bool
 	Attempted  bool
+	RetryAfter time.Duration
 }
 
 func (e *OpenAIEvalRequestError) Error() string {
@@ -266,7 +267,13 @@ func openAIEvalResponseText(wire *openAIEvalWireResponse) (string, string) {
 
 // Reads Responses JSON or real SSE frames. Only response.completed commits a
 // stream; output_item.done and [DONE] cannot turn partial output into success.
-func readOpenAIEvalResponse(ctx context.Context, resp *http.Response, requireSSE, requireText bool) (*OpenAIEvalSampleResponse, error) {
+func readOpenAIEvalResponse(ctx context.Context, resp *http.Response, requireSSE, requireText bool) (sample *OpenAIEvalSampleResponse, responseErr error) {
+	defer func() {
+		var failure *OpenAIEvalRequestError
+		if errors.As(responseErr, &failure) {
+			failure.RetryAfter = openAIEvalRetryAfter(resp.Header, time.Now())
+		}
+	}()
 	result := &OpenAIEvalSampleResponse{HTTPStatus: resp.StatusCode}
 	limited := &io.LimitedReader{R: resp.Body, N: openAIEvalResponseLimit + 1}
 	reader := bufio.NewReader(limited)
@@ -478,7 +485,25 @@ func (s *AccountTestService) RunOpenAIEvalSampleAttempts(ctx context.Context, ta
 		if failure == nil || !failure.Attempted || !failure.Retryable || ctx.Err() != nil || attempt+1 == maximum {
 			break
 		}
-		timer := time.NewTimer(time.Duration(attempt+1) * 100 * time.Millisecond)
+		// Automatic evaluation must not add another request after an upstream
+		// throttle. The run is recorded as inconclusive and the scheduler can
+		// try again at the next interval.
+		if automatic, _ := ctx.Value(openAIEvalAutomaticKey{}).(bool); automatic && failure.HTTPStatus == http.StatusTooManyRequests {
+			break
+		}
+		delay := time.Duration(attempt+1) * 100 * time.Millisecond
+		if failure.HTTPStatus == http.StatusTooManyRequests {
+			delay = time.Duration(attempt+1) * time.Second
+		}
+		if failure.RetryAfter > delay {
+			delay = failure.RetryAfter
+		}
+		if deadline, ok := ctx.Deadline(); ok && delay >= time.Until(deadline) {
+			// Preserve the actual rate-limit diagnostic; do not make a send
+			// that cannot honour the upstream reset inside this run.
+			break
+		}
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()

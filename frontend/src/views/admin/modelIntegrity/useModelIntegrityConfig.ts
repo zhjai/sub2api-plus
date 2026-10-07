@@ -1,6 +1,7 @@
 import { computed, reactive, ref } from 'vue'
 import {
   accountsAPI,
+  type OpenAIEvalBackgroundControl,
   type OpenAIEvalConfig,
   type OpenAIEvalEffectiveStatus,
   type OpenAIEvalModelCatalog,
@@ -11,7 +12,7 @@ import {
   type RankingError
 } from '@/api/admin/accounts'
 import type { AccountListItem } from '@/types'
-import { DEFAULT_CUSTOM_BALANCE, DEFAULT_MAX_REQUEST_ATTEMPTS, DEFAULT_QUALITY_REFRESH_SECONDS, isRuleEnabled, normalizeAccountPriorityRule, normalizeCustomBalance, normalizeMaxRequestAttempts, normalizeQualityRefreshInterval, normalizeRoute, normalizeSchedulingThresholds, toSavePayload } from './modelIntegrity'
+import { cloneBackgroundControl, DEFAULT_CUSTOM_BALANCE, DEFAULT_MAX_REQUEST_ATTEMPTS, DEFAULT_QUALITY_REFRESH_SECONDS, isRuleEnabled, normalizeAccountPriorityRule, normalizeCustomBalance, normalizeMaxRequestAttempts, normalizeQualityRefreshInterval, normalizeRoute, normalizeSchedulingThresholds, toSavePayload } from './modelIntegrity'
 
 /**
  * 'saved_evaluation_failed' is a real, distinct outcome: the server accepted
@@ -63,6 +64,11 @@ export function useModelIntegrityConfig() {
   const savedQualityRefreshInterval = ref(DEFAULT_QUALITY_REFRESH_SECONDS)
   /** Model rules as the server stored them; they, not unsaved edits, apply to requests. */
   const savedRules = ref<OpenAIEvalSchedulingPolicyRule[]>([])
+  /**
+   * Background controls as the server stored them, with their live runtime.
+   * The tests page compares the draft against these to mark unsaved pauses.
+   */
+  const savedBackgroundControls = ref<OpenAIEvalBackgroundControl[]>([])
   /**
    * What the gateway is applying now, straight from the server. This is never
    * derived from unsaved edits: the published order belongs to a revision, and
@@ -130,6 +136,9 @@ export function useModelIntegrityConfig() {
     // Disabled rules are kept in the config but never apply to requests.
     savedRules.value = (saved.policies ?? []).filter(isRuleEnabled).map(rule => ({ ...rule, reasoning_effort: rule.reasoning_effort || '' }))
     config.accounts = (saved.accounts ?? []).map(route => normalizeRoute({ ...route }))
+    // Kept undefined when an older server omits it, so saves do not add it.
+    config.background_controls = Array.isArray(saved.background_controls) ? saved.background_controls.map(cloneBackgroundControl) : undefined
+    savedBackgroundControls.value = (saved.background_controls ?? []).map(cloneBackgroundControl)
     applyRanking(saved)
     snapshot.value = serialized()
   }
@@ -164,6 +173,18 @@ export function useModelIntegrityConfig() {
   async function reloadConfig() {
     apply(await accountsAPI.getOpenAIEvalConfig())
     conflict.value = false
+  }
+
+  /**
+   * Updates only the read-only background runtime (sends, reservations,
+   * deferral) from a fresh read. Draft edits, the snapshot and the revision
+   * stay as they are, so this can run while the page has unsaved changes.
+   */
+  async function refreshBackgroundRuntime() {
+    const fresh = await accountsAPI.getOpenAIEvalConfig()
+    const runtime = new Map((fresh.background_controls ?? []).map(control => [control.account_id, control.runtime ?? null]))
+    savedBackgroundControls.value = savedBackgroundControls.value.map(control => ({ ...control, runtime: runtime.get(control.account_id) ?? null }))
+    for (const control of config.background_controls ?? []) control.runtime = runtime.get(control.account_id) ?? null
   }
 
   async function save(): Promise<SaveResult> {
@@ -225,5 +246,5 @@ export function useModelIntegrityConfig() {
     else applyRankingSnapshot({ ranking_error: result.ranking_error ?? null })
   }
 
-  return { config, catalog, accounts, loading, loaded, saving, conflict, loadError, dirty, ranking, load, reloadConfig, save, accountName, accountLabel, savedQualityRefreshInterval, savedRules, applyQualityRefresh, applyRankingSnapshot, applyRankingSummary, foldedLegacyStability }
+  return { config, catalog, accounts, loading, loaded, saving, conflict, loadError, dirty, ranking, load, reloadConfig, save, accountName, accountLabel, savedQualityRefreshInterval, savedRules, savedBackgroundControls, refreshBackgroundRuntime, applyQualityRefresh, applyRankingSnapshot, applyRankingSummary, foldedLegacyStability }
 }

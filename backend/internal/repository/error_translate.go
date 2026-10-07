@@ -51,6 +51,12 @@ func translatePersistenceError(err error, notFound, conflict *infraerrors.Applic
 	if err == nil {
 		return nil
 	}
+	if isUniqueConstraintViolation(err) && strings.Contains(err.Error(), "accounts_codex_identity_namespace_unique") {
+		return infraerrors.BadRequest("CODEX_IDENTITY_NAMESPACE_CONFLICT", "actual credential namespace already has an identity experiment binding")
+	}
+	if strings.Contains(err.Error(), "accounts_codex_identity_config_check") {
+		return infraerrors.BadRequest("CODEX_IDENTITY_FINGERPRINT_CONFLICT", "identity experiment requires a stable namespace, valid API key binding and fingerprint mode off")
+	}
 
 	// 兼容 Ent ORM 和标准 database/sql 的 NotFound 行为。
 	// Ent 使用自定义的 NotFoundError，而标准库使用 sql.ErrNoRows。

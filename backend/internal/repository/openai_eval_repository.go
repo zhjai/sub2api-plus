@@ -126,6 +126,12 @@ func (r *openAIEvalRepository) SaveConfig(ctx context.Context, cfg *service.Open
 		}
 	}
 	cfg.Revision = previous.Revision + 1
+	// Runtime is a GET projection, never configuration or audit input.
+	cfg.BackgroundControls = append([]service.OpenAIEvalBackgroundControl(nil), cfg.BackgroundControls...)
+	for i := range cfg.BackgroundControls {
+		cfg.BackgroundControls[i].Runtime = nil
+		cfg.BackgroundControls[i].RuntimeUnavailableReason = ""
+	}
 	payload, err := json.Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("encode OpenAI evaluation config: %w", err)

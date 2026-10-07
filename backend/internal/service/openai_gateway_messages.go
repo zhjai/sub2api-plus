@@ -52,6 +52,9 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	if _, err := s.prepareCodexAccountIdentitySource(ctx, c, account); err != nil {
 		return nil, err
 	}
+	if err := s.guardCodexIdentityRequest(c, account, nil, "messages_bridge"); err != nil {
+		return nil, err
+	}
 
 	// OpenCode Go：按模型原生协议分流。规则未命中兜底 Chat Completions。
 	if account.IsOpenCodeGo() {
