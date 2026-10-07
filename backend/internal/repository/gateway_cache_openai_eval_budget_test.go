@@ -178,6 +178,7 @@ func TestOpenAIEvalForegroundSingleSlotOnlyWhenIdle(t *testing.T) {
 	ok, err = c.AcquireOpenAIEvalSlot(ctx, 1, 1, "busy")
 	require.NoError(t, err)
 	require.False(t, ok)
+	require.NoError(t, c.DecrementAccountWaitCount(ctx, 1))
 }
 
 func TestOpenAIEvalForegroundSingleSlotLiveLeaseBlocksBackground(t *testing.T) {
@@ -194,6 +195,22 @@ func TestOpenAIEvalForegroundSingleSlotLiveLeaseBlocksBackground(t *testing.T) {
 	ok, err = c.AcquireOpenAIEvalSlot(ctx, 1, 1, "background")
 	require.NoError(t, err)
 	require.True(t, ok)
+}
+
+func TestOpenAIEvalUnlimitedConcurrencyStillAdmitsWhenForegroundIdle(t *testing.T) {
+	_, g := hardRPMRedis(t)
+	c := NewConcurrencyCache(g.rdb, 15, 60).(*concurrencyCache)
+	ctx := context.Background()
+	ok, err := c.AcquireOpenAIEvalSlot(ctx, 1, 0, "unlimited-idle")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NoError(t, c.ReleaseAccountSlot(ctx, 1, "unlimited-idle"))
+	ok, err = c.IncrementAccountWaitCount(ctx, 1, 10)
+	require.NoError(t, err)
+	require.True(t, ok)
+	ok, err = c.AcquireOpenAIEvalSlot(ctx, 1, 0, "unlimited-live")
+	require.NoError(t, err)
+	require.False(t, ok)
 }
 
 func TestOpenAIEvalBudgetPhysicalReservationRefundAndUnknown(t *testing.T) {

@@ -18,7 +18,16 @@ local limit=tonumber(ARGV[1])
 -- Keep one foreground slot whenever possible. With a single-slot account,
 -- the background request may use it only when there is no live request or
 -- waiter; the checks below still reject it as soon as foreground work exists.
-if limit<=0 then return {0,now} end
+-- A non-positive account limit means unlimited.  Keep the waiter/live-request
+-- checks below, but do not turn an unlimited account into an untestable one.
+if limit<=0 then
+ for i=1,#KEYS,3 do
+  if tonumber(redis.call('GET',KEYS[i+2]) or '0')>0 then return {0,now} end
+ end
+ redis.call('ZADD',KEYS[1],now,ARGV[3])
+ redis.call('EXPIRE',KEYS[1],ARGV[2])
+ return {1,now}
+end
 if limit>1 then limit=limit-1 end
 for i=1,#KEYS,3 do
  if tonumber(redis.call('GET',KEYS[i+2]) or '0')>0 then return {0,now} end
