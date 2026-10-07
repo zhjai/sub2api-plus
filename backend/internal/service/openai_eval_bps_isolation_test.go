@@ -19,13 +19,11 @@ func TestOpenAIEvalStateProbeBPSIsolation(t *testing.T) {
 		effort        string
 		accountConfig bool
 		wantModel     string
-		wantUpdate    bool
 	}{
 		{name: "manual test target", source: "manual", accountConfig: true, wantModel: "gpt-5.4"},
 		{name: "scheduled test target", source: "scheduled", accountConfig: true, wantModel: "gpt-5.4"},
 		{name: "manual high effort target", source: "manual", effort: "high", accountConfig: true, wantModel: "gpt-5.4"},
 		{name: "scheduled xhigh effort target", source: "scheduled", effort: "xhigh", accountConfig: true, wantModel: "gpt-5.4"},
-		{name: "internal account BPS schedule", source: "scheduled", effort: OpenAIEvalBPSAccountEffort, accountConfig: true, wantModel: "gpt-6-astra", wantUpdate: true},
 		{name: "legacy manual probe without account entry", source: "manual", wantModel: "gpt-5.4"},
 		{name: "legacy scheduled probe without account entry", source: "scheduled", wantModel: "gpt-5.4"},
 	} {
@@ -87,17 +85,9 @@ func TestOpenAIEvalStateProbeBPSIsolation(t *testing.T) {
 				require.NoError(t, json.NewDecoder(req.Body).Decode(&body))
 				require.Equal(t, tc.wantModel, body.Model)
 			}
-			if tc.wantUpdate {
-				state, ok := accounts.updatedExtra[OpenAIBPSAccountStateExtraKey()].(OpenAIBPSAccountState)
-				require.True(t, ok)
-				require.True(t, state.Active)
-				require.Equal(t, 3, state.DegradedStreak)
-				require.Zero(t, state.HealthyStreak)
-				require.True(t, state.UpdatedAt.After(initialState.UpdatedAt))
-			} else {
-				require.Nil(t, accounts.updatedExtra)
-				require.Equal(t, initialState, readOpenAIBPSAccountState(account))
-			}
+
+			require.Nil(t, accounts.updatedExtra)
+			require.Equal(t, initialState, readOpenAIBPSAccountState(account))
 		})
 	}
 }
@@ -112,47 +102,6 @@ func TestOpenAIEvalManualProbeRejectsInternalBPSSentinel(t *testing.T) {
 	require.ErrorContains(t, err, "unsupported reasoning effort")
 	require.Zero(t, repo.leaseAcquire)
 	require.Empty(t, repo.runs)
-}
-
-func TestOpenAIBPSRoutingIgnoresLegacyEvaluationTargets(t *testing.T) {
-	for _, mode := range []string{OpenAIEvalBPSModeAuto, OpenAIEvalBPSModeForceOn} {
-		t.Run(mode, func(t *testing.T) {
-			account := &Account{ID: 61, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
-				Extra: map[string]any{OpenAIBPSModelStateExtraKeyFor("gpt-5.4"): OpenAIBPSModelState{Active: true}},
-			}
-			repo := &openAIEvalRepoFake{config: &OpenAIEvalConfig{
-				BPSAutoEnabled: true,
-				Accounts:       []OpenAIEvalAccountConfig{{AccountID: account.ID, RequestedModel: "gpt-5.4", BPSMode: mode}},
-			}}
-			svc := &OpenAIGatewayService{openAIEvalRepo: repo}
-			for _, model := range []string{"gpt-5.4", "gpt-6-astra"} {
-				require.False(t, svc.isOpenAIBPSForwardEligible(t.Context(), account, model), "legacy modes are migration data, not routing authority")
-			}
-			repo.config.BPSAccounts = []OpenAIEvalBPSAccountConfig{{AccountID: account.ID, Mode: mode}}
-			for _, model := range []string{"gpt-5.4", "gpt-6-astra"} {
-				require.Equal(t, mode == OpenAIEvalBPSModeForceOn, svc.isOpenAIBPSForwardEligible(t.Context(), account, model), "only explicit manual force_on can authorize legacy state")
-			}
-			account.Extra[OpenAIBPSAccountStateExtraKey()] = OpenAIBPSAccountState{Active: true, DegradedStreak: 3}
-			repo.config.Accounts = nil
-			require.True(t, svc.isOpenAIBPSForwardEligible(t.Context(), account, "gpt-6-astra"), "removing evaluation targets must not disable independent account BPS")
-		})
-	}
-}
-
-func TestOpenAIEvalDisabledAccountProbeDoesNotMutateBPSState(t *testing.T) {
-	initial := OpenAIBPSAccountState{DegradedStreak: 2, UpdatedAt: time.Now().UTC().Add(-time.Hour)}
-	account := &Account{ID: 62, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Schedulable: false,
-		Extra: map[string]any{OpenAIBPSAccountStateExtraKey(): initial}}
-	accounts := &openAIAccountTestRepo{mockAccountRepoForGemini: mockAccountRepoForGemini{accountsByID: map[int64]*Account{account.ID: account}}}
-	repo := &openAIEvalRepoFake{config: &OpenAIEvalConfig{
-		BPSAutoEnabled: true,
-		BPSAccounts:    []OpenAIEvalBPSAccountConfig{{AccountID: account.ID, Mode: OpenAIEvalBPSModeAuto, FailureThreshold: 3, RecoveryThreshold: 2}},
-	}}
-	svc := NewOpenAIEvalService(repo, accounts, &AccountTestService{})
-	svc.applyOpenAIStateProbeBPS(t.Context(), &OpenAIEvalTarget{Account: account, RequestedModel: "gpt-6-astra"},
-		&OpenAIStateProbeResult{Verdict: "degraded"}, true)
-	require.Nil(t, accounts.updatedExtra)
-	require.Equal(t, initial, readOpenAIBPSAccountState(account))
 }
 
 func TestOpenAIEvalAccountDisabledDuringAutomaticProbeRemainsDiagnostic(t *testing.T) {
@@ -176,7 +125,7 @@ func TestOpenAIEvalAccountDisabledDuringAutomaticProbeRemainsDiagnostic(t *testi
 		openaiGatewayService: &OpenAIGatewayService{}, tlsFPProfileService: &TLSFingerprintProfileService{}}
 	svc := NewOpenAIEvalService(repo, accounts, accountTest)
 	run, err := svc.Run(t.Context(), OpenAIEvalRunRequest{AccountID: account.ID, RequestedModel: "gpt-6-astra",
-		TestType: OpenAIEvalTypeStateProbe, ReasoningEffort: OpenAIEvalBPSAccountEffort}, 0, "scheduled")
+		TestType: OpenAIEvalTypeStateProbe}, 0, "scheduled")
 	require.NoError(t, err)
 	require.True(t, run.DiagnosticOnly)
 	require.Nil(t, accounts.updatedExtra)

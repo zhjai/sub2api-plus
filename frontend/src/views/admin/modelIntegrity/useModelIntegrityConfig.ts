@@ -11,7 +11,7 @@ import {
   type RankingError
 } from '@/api/admin/accounts'
 import type { AccountListItem } from '@/types'
-import { DEFAULT_CUSTOM_BALANCE, DEFAULT_MAX_REQUEST_ATTEMPTS, DEFAULT_QUALITY_REFRESH_SECONDS, isRuleEnabled, normalizeAccountPriorityRule, normalizeBPSAccount, normalizeCustomBalance, normalizeMaxRequestAttempts, normalizeQualityRefreshInterval, normalizeRoute, normalizeSchedulingThresholds, toSavePayload } from './modelIntegrity'
+import { DEFAULT_CUSTOM_BALANCE, DEFAULT_MAX_REQUEST_ATTEMPTS, DEFAULT_QUALITY_REFRESH_SECONDS, isRuleEnabled, normalizeAccountPriorityRule, normalizeCustomBalance, normalizeMaxRequestAttempts, normalizeQualityRefreshInterval, normalizeRoute, normalizeSchedulingThresholds, toSavePayload } from './modelIntegrity'
 
 /**
  * 'saved_evaluation_failed' is a real, distinct outcome: the server accepted
@@ -109,7 +109,7 @@ export function useModelIntegrityConfig() {
       .some(weights => Number(weights?.stability) > 0)
     config.revision = saved.revision
     config.effects_enabled = Boolean(saved.effects_enabled)
-    config.bps_auto_enabled = Boolean(saved.bps_auto_enabled)
+    config.bps_auto_enabled = false
     config.scheduling_policy = saved.scheduling_policy ?? ''
     config.custom_balance = normalizeCustomBalance(saved.custom_balance)
     // A legacy response without the field reads as the defaults; a configured one is kept as sent.
@@ -121,7 +121,7 @@ export function useModelIntegrityConfig() {
       ...(rule.policy === 'custom_balance' ? { custom_balance: normalizeCustomBalance(rule.custom_balance ?? saved.custom_balance) } : {})
     }))
     config.account_priority_rules = (saved.account_priority_rules ?? []).map(normalizeAccountPriorityRule)
-    config.bps_accounts = (saved.bps_accounts ?? []).map(item => normalizeBPSAccount({ ...item }))
+    config.bps_accounts = []
     config.max_request_attempts = normalizeMaxRequestAttempts(saved.max_request_attempts)
     config.quality_refresh_interval_seconds = normalizeQualityRefreshInterval(saved.quality_refresh_interval_seconds)
     config.quality_refreshed_at = saved.quality_refreshed_at ?? null
@@ -169,7 +169,6 @@ export function useModelIntegrityConfig() {
   async function save(): Promise<SaveResult> {
     if (!loaded.value || saving.value) return 'failed'
     config.accounts.forEach(normalizeRoute)
-    config.bps_accounts?.forEach(normalizeBPSAccount)
     config.max_request_attempts = normalizeMaxRequestAttempts(config.max_request_attempts)
     saving.value = true
     try {
@@ -179,7 +178,7 @@ export function useModelIntegrityConfig() {
       // ranking error. Reporting that as a plain success would hide the fact
       // that the new policy is not in force yet.
       let authoritative = saved
-      // Runtime-only fields (BPS state, OAuth eligibility) are not echoed by
+      // Runtime-only fields (OAuth eligibility) are not echoed by
       // every server version, so re-read them after a successful save.
       try {
         authoritative = await accountsAPI.getOpenAIEvalConfig()

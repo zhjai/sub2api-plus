@@ -5,6 +5,9 @@ export default {
       saving: 'Saving…',
       saved: 'Saved',
       refresh: 'Refresh',
+      everyDays: 'Every {n} days',
+      everyHours: 'Every {n} hours',
+      everyMinutes: 'Every {n} minutes',
       reload: 'Reload',
       unsaved: 'Unsaved changes',
       saveFailed: 'Save failed',
@@ -38,12 +41,12 @@ export default {
     reason: {
       stateProbe: {
         healthy: 'The linked request completed; its ticket showed no route change.',
-        degraded: 'The linked request returned a changed ticket, so the route may have switched. This result does not change BPS state; automatic BPS switching for an account is driven by that account’s independent probe under Scheduling policy.',
+        degraded: 'The linked request returned a changed ticket, so the route may have switched. This result diagnoses routes without switching them automatically.',
         inconclusive: 'The tickets could not show whether the route changed.',
         ticket: {
           none: 'The linked request completed without issuing a new ticket.',
           same: 'The linked request completed and returned the same ticket.',
-          different: 'The linked request returned a different ticket, so the route may have switched. This result does not change BPS state; automatic BPS switching for an account is driven by that account’s independent probe under Scheduling policy.'
+          different: 'The linked request returned a different ticket, so the route may have switched. This result diagnoses routes without switching them automatically.'
         },
         mintMissingTicket: 'The request completed but returned no first ticket, so the probe could not continue.',
         legacyLinkedMissingTicket: 'Result from an older probe version; run the test again.'
@@ -97,7 +100,7 @@ export default {
     tests: {
       title: 'Integrity tests',
       headerDescription: 'Check for degraded models. Manual or automatic results can affect ranking.',
-      description: 'Periodically checks, with fixed questions and sampling, whether accounts serve the requested model and whether request routes stay stable. With evaluation effects on, the integrity pass rate ranks accounts under “Avoid degradation” and under “Custom balance” when it has a pass-rate weight. Tests set to run automatically decide which tests count; each one uses its latest completed result, whether that run was manual or automatic. Test results do not change BPS state; automatic BPS switching is driven by each account’s independent probe under Scheduling policy.',
+      description: 'Periodically checks, with fixed questions and sampling, whether accounts serve the requested model and whether request routes stay stable. With evaluation effects on, the integrity pass rate ranks accounts under “Avoid degradation” and under “Custom balance” when it has a pass-rate weight. Tests set to run automatically decide which tests count; each one uses its latest completed result, whether that run was manual or automatic. State Probe diagnoses routes without switching them automatically.',
       budget: 'Automatic tests send about {requests} upstream requests per day ({plans} automatic plans).',
       budgetNone: 'Automatic tests are off. Only manual tests send requests.',
       budgetHint: 'Test requests are billed like normal requests.',
@@ -135,7 +138,7 @@ export default {
         },
         state_probe: {
           name: 'State probe',
-          what: 'Sends two linked requests — first a mint, then a continue — and compares the returned tickets to infer whether the route switches mid-way; tickets reflect routing only, not model quality. On failure it starts a fresh chain, at most 3 chains and 6 requests. The result is not part of the integrity pass rate and does not change BPS state; automatic BPS switching is driven by the account probe under Scheduling policy.'
+          what: 'Sends two linked requests — first a mint, then a continue — and compares the returned tickets to infer whether the route switches mid-way; tickets reflect routing only, not model quality. On failure it starts a fresh chain, at most 3 chains and 6 requests. The result is not part of the integrity pass rate and diagnoses routes without switching them automatically.'
         }
       },
       runNow: 'Test now',
@@ -147,6 +150,7 @@ export default {
       },
       runDone: 'Test finished',
       runFailed: 'Failed to start test',
+      alreadyRunning: 'This test is already running automatically for the account. Wait for it to finish and try again.',
       runAllTitle: 'Run all test types',
       auto: 'Run automatically',
       every: 'Interval',
@@ -187,7 +191,7 @@ export default {
       neverRun: 'Not tested yet',
       onlyDirectOAuth: 'Only for direct OpenAI OAuth accounts.',
       stateProbeDefaultEffort: 'State probe runs on the account\'s default reasoning effort, whatever effort this target tests.',
-      goScheduling: 'Configure BPS on the Scheduling policy page',
+      goScheduling: 'Configure the scheduling policy',
       manualSampleTitle: 'Select sample size',
       manualSampleHint: 'Applies to this manual run only and does not change the schedule. More samples give a more reliable result and send more requests.',
       manualSampleOption: '{mode}: {count} requests',
@@ -312,7 +316,7 @@ export default {
         prismNoSharedModels: 'The selected accounts have no model in common. Select fewer accounts.',
         prismNoModels: 'This account has no selectable Prism model right now. Check its aliases and catalog on the Accounts page.',
         prismDefaultEffort: 'Default ({effort})',
-        prismNote: 'Prism targets run Candy on any catalog model; Fingerprint and ModelTrace only when a versioned baseline covers the model. State Probe and BPS do not apply.',
+        prismNote: 'Prism targets run Candy on any catalog model; Fingerprint and ModelTrace only when a versioned baseline covers the model. State Probe does not apply.',
         searchAccounts: 'Search by account name or ID',
         noAccounts: 'No OpenAI accounts found.',
         model: 'Requested model',
@@ -341,7 +345,7 @@ export default {
         targetLoading: 'Prism account. Loading its model catalog…',
         targetCatalogError: 'Prism account. Its model catalog could not be loaded; the server still checks every run.',
         noFingerprintBaseline: 'No versioned Fingerprint baseline covers {model}, so this test does not run for this target.',
-        stateProbeUnsupported: 'Prism does not support the Codex state probe or BPS.',
+        stateProbeUnsupported: 'Prism does not support the Codex state probe.',
         unsupported: 'Not available for Prism targets.',
         noModelTraceBaseline: 'The ModelTrace bank does not cover {model}, so this test does not run for this target.',
         modelTraceCoverageUnknown: 'This server does not report which models the ModelTrace bank covers; an uncovered run is rejected before any request is sent.',
@@ -351,8 +355,8 @@ export default {
     },
     scheduling: {
       title: 'Scheduling policy',
-      headerDescription: 'Configure account ranking and BPS backup routes.',
-      description: 'Configure the account ranking policy, model rules and BPS backup route, and review recent scheduling decisions.',
+      headerDescription: 'Configure account ranking and priority rules.',
+      description: 'Configure the account ranking policy, model rules and account priority rules, and review recent scheduling decisions.',
       policy: {
         title: 'Ranking policy',
         hint: 'Determines the order only among accounts that meet the scheduling conditions; whether an account can be scheduled is decided by the scheduling conditions.',
@@ -593,103 +597,6 @@ export default {
         features: 'The account supports the features and connection type the request requires.',
         privacy: 'If the group requires privacy mode, the account has it enabled.',
         capacity: 'Concurrency and queue capacity are available.'
-      },
-      bps: {
-        title: 'BPS backup route',
-        hint: 'Configured per OAuth account. When probes on the original route keep failing, the whole account switches to the BPS route and switches back after recovery. The probe model is used only for route checks and does not limit what switches.',
-        master: 'Enable automatic BPS switching',
-        masterHint: 'When off, accounts in “Automatic” mode use the original route; “Always use BPS” is not affected. Per-account settings are kept.',
-        add: 'Add account',
-        edit: 'Settings',
-        summary: {
-          total: '{count} accounts',
-          bps: '{count} using BPS',
-          native: '{count} on original route',
-          locked: '{count} disabled after 403',
-          inactive: '{count} not enabled'
-        },
-        columns: {
-          account: 'Account',
-          mode: 'Mode',
-          state: 'Current route',
-          counters: 'Switch counters',
-          probe: 'Probe model and interval',
-          actions: 'Actions'
-        },
-        modes: {
-          auto: 'Automatic',
-          force_on: 'Always use BPS',
-          force_off: 'Do not use BPS'
-        },
-        modeHints: {
-          auto: 'Switches between the original route and BPS by the switch thresholds. Controlled by the global switch.',
-          force_on: 'Always uses BPS, regardless of probe results or the global switch.',
-          force_off: 'Always uses the original route; probe results do not trigger switching.'
-        },
-        state: {
-          bps: 'Using BPS',
-          native: 'Original route',
-          locked: 'BPS disabled',
-          inactive: 'Not enabled'
-        },
-        counters: 'Unhealthy {degraded}/{failure} · Healthy {healthy}/{recovery}',
-        lastProbe: 'Last probe: {time}',
-        nextProbe: 'Next probe: {time}',
-        ruleFor: 'Switches to BPS after {failure} consecutive failed probes; switches back after {recovery} consecutive healthy probes.',
-        updatedAt: 'Updated {time}',
-        every: {
-          minutes: 'Every {n} min',
-          hours: 'Every {n} h',
-          days: 'Every {n} d'
-        },
-        interval: {
-          customOption: 'Custom',
-          customMinutes: 'Custom interval (minutes, storage max {max})'
-        },
-        disabled: {
-          upstream_403: 'The BPS route returned 403 and has been disabled and locked. The lock does not clear automatically; click “Restore” after confirming the account is healthy.',
-          other: 'BPS disabled ({reason}).'
-        },
-        warnings: {
-          masterOff: 'The global switch is off, so automatic switching is inactive. To always use BPS, set the mode to “Always use BPS”.',
-          masterOffShort: 'Global switch off; not switching'
-        },
-        dialog: {
-          addTitle: 'Add BPS account',
-          editTitle: 'BPS settings · {account}',
-          account: 'OAuth account',
-          pickAccount: 'Select account',
-          noCandidates: 'All OpenAI OAuth accounts have been added.',
-          mode: 'Mode',
-          probeModel: 'Probe model',
-          pickModel: 'Select model',
-          defaultModel: 'Default probe model (gpt-5.4)',
-          probeModelHint: 'Used only for probe requests. Switching applies to the whole account and is independent of integrity test targets.',
-          thresholds: 'Switch thresholds',
-          failure: 'Consecutive failures (switch to BPS)',
-          recovery: 'Consecutive successes (switch back)',
-          interval: 'Probe interval',
-          thresholdsManual: 'Switch thresholds apply only in “Automatic” mode; the current values are kept.',
-          remove: 'Remove this account',
-          apply: 'Apply',
-          applyHint: 'After applying, click “Save changes” on the page for it to take effect.'
-        },
-        history: {
-          title: 'Recent activity',
-          empty: 'No probe or action records for this account.',
-          probe: 'Probe: {status}',
-          reset: 'BPS state restored by an administrator'
-        },
-        reset: 'Restore',
-        resetTitle: 'Restore BPS state for this account?',
-        resetBody: 'Clears the BPS state, 403 lock and counters for {account}; probes will decide again. Takes effect immediately, no save required.',
-        resetDone: 'BPS state restored',
-        resetFailed: 'Restore failed',
-        removeTitle: 'Remove BPS configuration for this account?',
-        removeBody: '{account} will be removed from the list and use the original route after saving. Its integrity test targets are not affected.',
-        empty: 'No accounts added. BPS supports direct OpenAI OAuth accounts only; click “Add account” to configure.',
-        emptyNoOAuth: 'No OpenAI OAuth accounts available. BPS supports direct OpenAI OAuth accounts only.',
-        legacyRoutes: '{count} test targets still carry model-level BPS settings from before the upgrade. This page does not modify them.'
       },
       decisions: {
         title: 'Recent scheduling decisions',

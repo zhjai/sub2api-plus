@@ -990,6 +990,11 @@ func (r *accountRepository) Delete(ctx context.Context, id int64) error {
 		txClient = r.client
 	}
 
+	// Remove active evaluation references in the same transaction. History is
+	// retained, and the revision change invalidates stale admin-page drafts.
+	if err := removeDeletedAccountEvalConfig(ctx, txClient, id); err != nil {
+		return err
+	}
 	if _, err := txClient.AccountGroup.Delete().Where(dbaccountgroup.AccountIDEQ(id)).Exec(ctx); err != nil {
 		return err
 	}

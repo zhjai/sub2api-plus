@@ -351,33 +351,6 @@ func TestAccountHardRPMAdminSaveDisableBulk(t *testing.T) {
 	require.Error(t, s.UpdateAccountExtra(context.Background(), 1, bad))
 }
 
-type hardRPMEvalRepo struct{ OpenAIEvalRepository }
-
-func (*hardRPMEvalRepo) GetConfig(context.Context) (*OpenAIEvalConfig, error) {
-	return &OpenAIEvalConfig{BPSAccounts: []OpenAIEvalBPSAccountConfig{{AccountID: 1, Mode: OpenAIEvalBPSModeForceOn}}}, nil
-}
-
-func TestAccountHardRPMBPSFallbackIsolation(t *testing.T) {
-	a := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"access_token": "synthetic", "chatgpt_account_id": "test"}, Extra: map[string]any{"rpm_limit": 1}}
-	cache := &hardRPMCache{}
-	up := &hardRPMUpstream{status: 502}
-	s := &OpenAIGatewayService{cfg: &config.Config{}, cache: cache, httpUpstream: up, openAIEvalRepo: &hardRPMEvalRepo{}}
-	c, _ := gin.CreateTestContext(httptest.NewRecorder())
-	c.Request = httptest.NewRequest("POST", "/v1/responses", nil)
-	body := []byte(`{"model":"gpt-5.5","stream":true,"input":"hello"}`)
-	_, err := s.forwardOpenAIBPS(context.Background(), c, a, body, time.Now())
-	require.ErrorIs(t, err, errOpenAIBPSNativeFallback)
-	require.Equal(t, 1, up.sends)
-	require.Equal(t, 1, cache.used)
-	_, err = s.forwardOpenAIBPS(context.Background(), c, a, body, time.Now())
-	require.True(t, IsAccountRPMError(err))
-	require.NotErrorIs(t, err, errOpenAIBPSNativeFallback)
-	req, _ := http.NewRequest("POST", "https://example.invalid/v1/responses", strings.NewReader(string(body)))
-	_, err = s.doOpenAIUpstream(req, "", a)
-	require.True(t, IsAccountRPMError(err))
-	require.Equal(t, 1, up.sends)
-}
-
 type hardRPMNativeWS struct{ writes int }
 
 func (c *hardRPMNativeWS) WriteJSON(context.Context, any) error { c.writes++; return nil }

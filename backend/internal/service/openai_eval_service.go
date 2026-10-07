@@ -28,7 +28,6 @@ const (
 	OpenAIEvalMaxIntervalSeconds     = int64(1<<31 - 1)
 	OpenAIEvalMaxFingerprintRequests = 400
 	OpenAIEvalMinStateProbeInterval  = 5 * time.Minute
-	OpenAIEvalMinBPSAccountInterval  = 5 * time.Minute
 )
 
 type OpenAIEvalRunRequest struct {
@@ -64,6 +63,13 @@ func (s *OpenAIEvalService) Initialize(ctx context.Context) error {
 		SetOpenAIEvalSchedulingPolicySnapshot(nil)
 		return nil
 	}
+	copy := *config
+	config = &copy
+	config.Accounts = append([]OpenAIEvalAccountConfig(nil), config.Accounts...)
+	RetireOpenAIEvalBPS(config)
+	if err := s.pruneDeletedAccountReferences(ctx, config, nil); err != nil {
+		return err
+	}
 	if err := normalizeOpenAIEvalQualityConfig(config); err != nil {
 		return err
 	}
@@ -91,6 +97,14 @@ func NewOpenAIEvalService(repo OpenAIEvalRepository, accounts AccountRepository,
 func (s *OpenAIEvalService) GetConfig(ctx context.Context) (*OpenAIEvalConfig, error) {
 	config, err := s.repo.GetConfig(ctx)
 	if err == nil && config != nil {
+		// Work on a projection; legacy cleanup must not mutate stored config on read.
+		copy := *config
+		config = &copy
+		config.Accounts = append([]OpenAIEvalAccountConfig(nil), config.Accounts...)
+		RetireOpenAIEvalBPS(config)
+		if err := s.pruneDeletedAccountReferences(ctx, config, nil); err != nil {
+			return nil, err
+		}
 		if normalizeErr := normalizeOpenAIEvalQualityConfig(config); normalizeErr != nil {
 			return nil, normalizeErr
 		}
@@ -117,34 +131,11 @@ func (s *OpenAIEvalService) GetConfig(ctx context.Context) (*OpenAIEvalConfig, e
 				route.DirectOAuthEligible = false
 				route.BPSState = nil
 				account := accountFor(route.AccountID)
-				if account != nil && account.IsOpenAIOAuth() {
-					state := readOpenAIBPSAccountState(account)
-					route.BPSState = &state
-				}
 				if account != nil {
 					route.DirectOAuthEligible = account.IsOpenAIOAuth() && !account.IsShadow() && !account.IsSyntheticUITest() && !account.IsOpenAIAgentIdentity()
 				}
 			}
-			for i := range config.BPSAccounts {
-				item := &config.BPSAccounts[i]
-				account := accountFor(item.AccountID)
-				if account == nil || !account.IsOpenAIOAuth() {
-					item.State = "inactive"
-					continue
-				}
-				state := readOpenAIBPSAccountState(account)
-				item.Active = state.Active
-				item.DegradedStreak = state.DegradedStreak
-				item.HealthyStreak = state.HealthyStreak
-				item.DisabledReason = state.DisabledReason
-				if state.UpdatedAt.IsZero() {
-					item.UpdatedAt = nil
-				} else {
-					updated := state.UpdatedAt
-					item.UpdatedAt = &updated
-				}
-				item.State = openAIBPSConfigRuntimeState(config, *item, state)
-			}
+
 		}
 	}
 	return config, err
@@ -153,6 +144,19 @@ func (s *OpenAIEvalService) GetConfig(ctx context.Context) (*OpenAIEvalConfig, e
 func (s *OpenAIEvalService) SaveConfig(ctx context.Context, config *OpenAIEvalConfig, actorID int64) error {
 	if config == nil {
 		return errors.New("evaluation config is required")
+	}
+	RetireOpenAIEvalBPS(config)
+	if s.accounts != nil {
+		previous, err := s.repo.GetConfig(ctx)
+		if err != nil {
+			return fmt.Errorf("load evaluation config for account validation: %w", err)
+		}
+		if previous != nil && config.Revision != 0 && config.Revision < previous.Revision {
+			return ErrOpenAIEvalConfigRevisionConflict
+		}
+		if err := s.pruneDeletedAccountReferences(ctx, config, openAIEvalReferencedAccounts(previous)); err != nil {
+			return err
+		}
 	}
 	rules, rulesErr := normalizeOpenAIEvalAccountPriorityRules(config.AccountPriorityRules)
 	if rulesErr != nil {
@@ -197,54 +201,6 @@ func (s *OpenAIEvalService) SaveConfig(ctx context.Context, config *OpenAIEvalCo
 		}
 		config.CustomBalance = weights
 	}
-	if len(config.BPSAccounts) > 5000 {
-		return errors.New("BPS config exceeds the 5000 account limit")
-	}
-	seenBPS := make(map[int64]struct{}, len(config.BPSAccounts))
-	for i := range config.BPSAccounts {
-		item := &config.BPSAccounts[i]
-		if item.AccountID <= 0 {
-			return fmt.Errorf("invalid BPS account at index %d", i)
-		}
-		if _, exists := seenBPS[item.AccountID]; exists {
-			return fmt.Errorf("duplicate BPS account at index %d", i)
-		}
-		seenBPS[item.AccountID] = struct{}{}
-		item.Mode = normalizeOpenAIEvalBPSMode(item.Mode, false)
-		if item.ProbeModel != "" && !isOpenAIEvalSupportedModel(item.ProbeModel) {
-			return fmt.Errorf("invalid BPS probe model %q", item.ProbeModel)
-		}
-		if item.FailureThreshold == 0 {
-			item.FailureThreshold = 3
-		}
-		if item.RecoveryThreshold == 0 {
-			item.RecoveryThreshold = 2
-		}
-		if item.FailureThreshold < 1 || item.FailureThreshold > 10 || item.RecoveryThreshold < 1 || item.RecoveryThreshold > 10 {
-			return fmt.Errorf("BPS account %d thresholds must be between 1 and 10", item.AccountID)
-		}
-		if item.IntervalSeconds == 0 {
-			item.IntervalSeconds = int(OpenAIEvalMinBPSAccountInterval.Seconds())
-		}
-		if item.IntervalSeconds < int(OpenAIEvalMinBPSAccountInterval.Seconds()) || int64(item.IntervalSeconds) > OpenAIEvalMaxIntervalSeconds {
-			return fmt.Errorf("BPS account %d interval must be at least %d seconds and fit database integer storage", item.AccountID, int(OpenAIEvalMinBPSAccountInterval.Seconds()))
-		}
-		// Runtime fields are a projection of accounts.extra and must never be
-		// written back by the admin config endpoint.
-		item.Active = false
-		item.State = ""
-		item.DisabledReason = ""
-		item.DegradedStreak = 0
-		item.HealthyStreak = 0
-		item.UpdatedAt = nil
-		if s.accounts == nil {
-			return errors.New("account lookup is unavailable for BPS validation")
-		}
-		account, accountErr := s.accounts.GetByID(ctx, item.AccountID)
-		if accountErr != nil || account == nil || !account.IsOpenAIOAuth() || account.IsShadow() || account.IsSyntheticUITest() || account.IsOpenAIAgentIdentity() {
-			return fmt.Errorf("BPS account %d must be a direct OpenAI OAuth account", item.AccountID)
-		}
-	}
 	for i := range config.Policies {
 		rule := &config.Policies[i]
 		if strings.TrimSpace(rule.RequestedModel) == "" || len(rule.RequestedModel) > 200 || strings.ContainsAny(rule.RequestedModel, "\x00\r\n\t") {
@@ -277,8 +233,8 @@ func (s *OpenAIEvalService) SaveConfig(ctx context.Context, config *OpenAIEvalCo
 		item := &config.Accounts[i]
 		item.BPSState = nil              // runtime status is read-only, never persisted in route config
 		item.DirectOAuthEligible = false // derived from the current account, never persisted
-		item.BPSMode = normalizeOpenAIEvalBPSMode(item.BPSMode, item.BPSAuto)
-		item.BPSAuto = item.BPSMode == OpenAIEvalBPSModeAuto
+		item.BPSMode = OpenAIEvalBPSModeForceOff
+		item.BPSAuto = false
 		prismRoute, prismErr := s.validatePrismEvalRoute(ctx, item.AccountID, item.RequestedModel, item.ReasoningEffort)
 		if prismErr != nil {
 			return fmt.Errorf("Prism evaluation route %d: %w", i, prismErr)
@@ -342,22 +298,6 @@ func (s *OpenAIEvalService) SaveConfig(ctx context.Context, config *OpenAIEvalCo
 	return nil
 }
 
-func openAIBPSConfigRuntimeState(config *OpenAIEvalConfig, item OpenAIEvalBPSAccountConfig, state OpenAIBPSAccountState) string {
-	if strings.TrimSpace(state.DisabledReason) != "" {
-		return "locked"
-	}
-	mode := normalizeOpenAIEvalBPSMode(item.Mode, false)
-	if mode == OpenAIEvalBPSModeForceOff || (mode == OpenAIEvalBPSModeAuto && (config == nil || !config.BPSAutoEnabled)) {
-		return "inactive"
-	}
-	if mode == OpenAIEvalBPSModeForceOn || state.Active {
-		return "bps"
-	}
-	return "native"
-}
-
-// OpenAIEvalIntervalDuration converts a persisted schedule interval without
-// allowing integer multiplication to wrap time.Duration.
 func OpenAIEvalIntervalDuration(seconds int) (time.Duration, error) {
 	if seconds < 0 || int64(seconds) > OpenAIEvalMaxIntervalSeconds {
 		return 0, errors.New("interval does not fit database integer storage")
@@ -427,19 +367,15 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 	request.TestType = strings.ToLower(strings.TrimSpace(request.TestType))
 	request.RequestedModel = strings.TrimSpace(request.RequestedModel)
 	request.ReasoningEffort = strings.TrimSpace(request.ReasoningEffort)
+	if source == "scheduled" && request.ReasoningEffort == OpenAIEvalBPSAccountEffort {
+		return nil, errors.New("BPS automatic probes have been retired; configure State Probe on a test target instead")
+	}
 	prismRoute, prismErr := s.validatePrismEvalRoute(ctx, request.AccountID, request.RequestedModel, request.ReasoningEffort)
 	if prismErr != nil {
 		return nil, prismErr
 	}
 	if request.AccountID <= 0 || (!prismRoute && !isOpenAIEvalSupportedModel(request.RequestedModel)) {
 		return nil, errors.New("a supported OpenAI model and account are required")
-	}
-	// Account-scoped automatic BPS probes use an internal scheduler sentinel,
-	// not a public reasoning-effort value. Normalize that private dimension
-	// before applying the public effort allow-list.
-	isBPSAccountProbe := source == "scheduled" && request.TestType == OpenAIEvalTypeStateProbe && request.ReasoningEffort == OpenAIEvalBPSAccountEffort
-	if isBPSAccountProbe {
-		request.ReasoningEffort = ""
 	}
 	if !prismRoute && request.ReasoningEffort != "" && !isAllowedOpenAIEvalReasoningEffort(request.ReasoningEffort) {
 		return nil, fmt.Errorf("unsupported reasoning effort %q", request.ReasoningEffort)
@@ -527,15 +463,7 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 		<-renewDone
 	}()
 
-	targetModel := request.RequestedModel
-	if isBPSAccountProbe {
-		if config, configErr := s.repo.GetConfig(runCtx); configErr == nil {
-			if bps, ok := openAIEvalBPSAccountConfigFor(config, request.AccountID); ok && strings.TrimSpace(bps.ProbeModel) != "" {
-				targetModel = strings.TrimSpace(bps.ProbeModel)
-			}
-		}
-	}
-	target, err := s.accountTest.ResolveOpenAIEvalTarget(runCtx, request.AccountID, targetModel)
+	target, err := s.accountTest.ResolveOpenAIEvalTarget(runCtx, request.AccountID, request.RequestedModel)
 	if err != nil {
 		return nil, err
 	}
@@ -565,7 +493,10 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 		ExpectedSamples: expectedSamples,
 		Phase:           "sampling",
 		Samples:         make([]OpenAIEvalSampleRecord, 0),
-		DiagnosticOnly:  !target.Account.IsActive() || !target.Account.Schedulable,
+		// Account activity is a validity boundary. Scheduling participation is
+		// only a boundary for automatic runs; a manual administrator evaluation
+		// remains quality evidence when routing is paused.
+		DiagnosticOnly: !target.Account.IsActive() || (source == "scheduled" && !target.Account.Schedulable),
 	}
 	run.Protocol = "responses"
 	if !target.Credential.IsOpenAIOAuthLike() && shouldForwardOpenAIResponsesViaRawChatCompletions(target.Account) {
@@ -606,8 +537,10 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 	}
 	finish := func(runErr error) (*OpenAIEvalRun, error) {
 		if s.accounts != nil {
-			if latest, readErr := s.accounts.GetByID(context.WithoutCancel(ctx), target.Account.ID); readErr == nil && latest != nil && (!latest.IsActive() || !latest.Schedulable) {
-				run.DiagnosticOnly = true
+			if source == "scheduled" {
+				if latest, readErr := s.accounts.GetByID(context.WithoutCancel(ctx), target.Account.ID); readErr == nil && latest != nil && (!latest.IsActive() || !latest.Schedulable) {
+					run.DiagnosticOnly = true
+				}
 			}
 		}
 		run.FinishedAt = time.Now().UTC()
@@ -661,11 +594,7 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 		run.CompletedSamples = len(probe.Samples)
 		run.Outcome = OpenAIEvalOutcome{Status: probe.Verdict, Reason: probe.Failure, SampleCount: probe.RequestCount, ExpectedCount: expectedSamples, Confidence: "low", Scheduling: "alert_only", StateProbe: probe}
 		run.Status = probe.Verdict
-		completed, finishErr := finish(nil)
-		if finishErr == nil && !completed.DiagnosticOnly {
-			s.applyOpenAIStateProbeBPS(ctx, target, probe, isBPSAccountProbe)
-		}
-		return completed, finishErr
+		return finish(nil) // State Probe is diagnostic only; never switches routes.
 	}
 
 	if request.TestType == OpenAIEvalTypeCandy {

@@ -25,13 +25,11 @@ import {
   isValidCustomBalance,
   policyOrderKeys,
   runStatusKey,
-  bpsModeOf,
   dailyRequests,
   exclusionKey,
   MAX_INTERVAL_SECONDS,
   maxScheduleJitterSeconds,
   newRoute,
-  normalizeBPSAccount,
   normalizeCustomBalance,
   normalizeRoute,
   normalizeSchedule,
@@ -138,14 +136,6 @@ describe('schedule normalisation', () => {
     expect(schedule.interval_seconds).toBe(MAX_INTERVAL_SECONDS)
     expect(schedule.jitter_seconds).toBe(0)
     expect(maxScheduleJitterSeconds(MAX_INTERVAL_SECONDS - 60)).toBe(60)
-    const bps = normalizeBPSAccount({
-      account_id: 1,
-      mode: 'auto',
-      failure_threshold: 3,
-      recovery_threshold: 2,
-      interval_seconds: Number.MAX_SAFE_INTEGER
-    })
-    expect(bps.interval_seconds).toBe(MAX_INTERVAL_SECONDS)
   })
 })
 
@@ -247,23 +237,39 @@ describe('custom balance compatibility', () => {
   })
 })
 
-describe('BPS mode compatibility', () => {
-  it('maps the legacy bps_auto boolean when no explicit mode exists', () => {
-    expect(bpsModeOf({ bps_auto: true })).toBe('auto')
-    expect(bpsModeOf({ bps_auto: false })).toBe('force_off')
-    expect(bpsModeOf({ bps_auto: false, bps_mode: 'force_on' })).toBe('force_on')
-  })
-
+describe('retired BPS compatibility', () => {
   it('fills missing schedules on routes saved by older versions', () => {
     const legacy = { account_id: 3, requested_model: 'gpt-5', reasoning_effort: '', candy_schedule: { enabled: true, interval_seconds: 3600, jitter_seconds: 0 }, fingerprint_schedule: { enabled: false, interval_seconds: 86400, jitter_seconds: 0 }, bps_auto: true } as unknown as OpenAIEvalRouteConfig
     const route = normalizeRoute(legacy)
     expect(route.modeltrace_schedule.interval_seconds).toBe(300)
     expect(route.state_probe_schedule.interval_seconds).toBe(300)
-    expect(route.bps_mode).toBe('auto')
+    expect(route.bps_mode).toBe('force_off')
   })
 })
 
 describe('save payload', () => {
+  it('unifies the GPT-6 alias as Astra without changing distinct Sol or custom models', () => {
+    const rule = { account_id: 3, priority: 1, requested_models: [' GPT-6 ', 'gpt-6-astra', 'gpt-6-sol', 'custom-astra'] }
+    expect(normalizeAccountPriorityRule(rule).requested_models).toEqual(['gpt-6-astra', 'gpt-6-sol', 'custom-astra'])
+    const payload = toSavePayload({ effects_enabled: false, bps_auto_enabled: false, accounts: [], account_priority_rules: [rule] })
+    expect(payload.account_priority_rules![0].requested_models).toEqual(['gpt-6-astra', 'gpt-6-sol', 'custom-astra'])
+    expect([...accountPriorityRuleIssues([
+      { account_id: 3, priority: 1, requested_models: ['gpt-6'] },
+      { account_id: 3, priority: 2, requested_models: ['gpt-6-astra'] }
+    ], () => false).entries()]).toEqual([[1, 'overlap']])
+  })
+
+  it('unifies the GPT-5.6 alias in account rules on load and save', () => {
+    const rule = { account_id: 3, priority: 1, requested_models: [' GPT-5.6 ', 'gpt-5.6-sol', 'custom-sol'] }
+    expect(normalizeAccountPriorityRule(rule).requested_models).toEqual(['gpt-5.6-sol', 'custom-sol'])
+    const payload = toSavePayload({ effects_enabled: false, bps_auto_enabled: false, accounts: [], account_priority_rules: [rule] })
+    expect(payload.account_priority_rules![0].requested_models).toEqual(['gpt-5.6-sol', 'custom-sol'])
+    expect([...accountPriorityRuleIssues([
+      { account_id: 3, priority: 1, requested_models: ['gpt-5.6'] },
+      { account_id: 3, priority: 2, requested_models: ['gpt-5.6-sol'] }
+    ], () => false).entries()]).toEqual([[1, 'overlap']])
+  })
+
   it('sends account priority rules with every model omitted as all models, keeping disabled ones', () => {
     const payload = toSavePayload({
       effects_enabled: false,
@@ -401,8 +407,8 @@ describe('policy meters', () => {
     expect(payload.policies).toEqual([{ requested_model: 'gpt-5', reasoning_effort: '', policy: 'avoid_degradation', enabled: true }])
     expect(payload.accounts[0]).not.toHaveProperty('bps_state')
     expect(payload.accounts[0]).not.toHaveProperty('direct_oauth_eligible')
-    expect(payload.accounts[0].bps_mode).toBe('auto')
-    expect(payload.accounts[0].bps_auto).toBe(true)
+    expect(payload.accounts[0].bps_mode).toBe('force_off')
+    expect(payload.accounts[0].bps_auto).toBe(false)
   })
 })
 
@@ -701,14 +707,13 @@ describe('official admin wording', () => {
   })
 
   it('does not claim that test-page probes advance automatic BPS switching', () => {
-    // Backend: only the internal scheduled account probe under Scheduling policy
-    // advances BPS state (openai_bps_state.go applyOpenAIStateProbeBPS).
+    // State Probe remains diagnostic-only after BPS retirement.
     const history = zhT('admin.modelIntegrity.reason.stateProbe.degraded')
     const probe = zhT('admin.modelIntegrity.tests.types.state_probe.what')
     const testDescription = zhT('admin.modelIntegrity.tests.description')
     for (const text of [history, probe, testDescription]) {
-      expect(text).toContain('不改变 BPS 状态')
-      expect(text).toContain('调度策略')
+      expect(text).toContain('不自动切换线路')
+      expect(text).not.toContain('BPS')
     }
     expect(probe).not.toContain('依据此结果')
     expect(history).not.toContain('将切换至 BPS')

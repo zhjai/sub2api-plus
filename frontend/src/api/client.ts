@@ -255,12 +255,15 @@ apiClient.interceptors.response.use(
       }
 
       // Return structured error
+      const backendErrorMessage = typeof apiData.error === 'string'
+        ? apiData.error
+        : typeof apiData.error?.message === 'string' ? apiData.error.message : undefined
       return Promise.reject({
         status,
         code: apiData.code,
         reason: apiData.reason,
         error: apiData.error,
-        message: apiData.message || apiData.detail || error.message,
+        message: apiData.message || apiData.detail || backendErrorMessage || error.message,
         metadata: apiData.metadata,
       })
     }

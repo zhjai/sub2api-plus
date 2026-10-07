@@ -41,47 +41,6 @@ func TestListOpenAIEvalModelsOnlyAdvertisesTextCatalogAndSampleCosts(t *testing.
 	require.Len(t, payload.ModelTrace.Models, payload.ModelTrace.CandidateCount)
 }
 
-func TestMergeOpenAIEvalRouteBPSFieldsPreservesOmittedLegacyFields(t *testing.T) {
-	previous := service.OpenAIEvalAccountConfig{BPSMode: service.OpenAIEvalBPSModeAuto, BPSAuto: true}
-	incoming := service.OpenAIEvalAccountConfig{}
-	mergeOpenAIEvalRouteBPSFields(&incoming, previous, map[string]json.RawMessage{})
-	require.Equal(t, service.OpenAIEvalBPSModeAuto, incoming.BPSMode)
-	require.True(t, incoming.BPSAuto)
-}
-
-func TestMergeOpenAIEvalRouteBPSFieldsHonorsLegacyExplicitBoolean(t *testing.T) {
-	previous := service.OpenAIEvalAccountConfig{BPSMode: service.OpenAIEvalBPSModeAuto, BPSAuto: true}
-	for _, test := range []struct {
-		name string
-		raw  string
-		mode string
-		auto bool
-	}{
-		{name: "enable", raw: "true", mode: service.OpenAIEvalBPSModeAuto, auto: true},
-		{name: "disable", raw: "false", mode: service.OpenAIEvalBPSModeForceOff, auto: false},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			incoming := service.OpenAIEvalAccountConfig{}
-			mergeOpenAIEvalRouteBPSFields(&incoming, previous, map[string]json.RawMessage{
-				"bps_auto": json.RawMessage(test.raw),
-			})
-			require.Equal(t, test.mode, incoming.BPSMode)
-			require.Equal(t, test.auto, incoming.BPSAuto)
-		})
-	}
-}
-
-func TestMergeOpenAIEvalRouteBPSFieldsKeepsExplicitMode(t *testing.T) {
-	previous := service.OpenAIEvalAccountConfig{BPSMode: service.OpenAIEvalBPSModeAuto, BPSAuto: true}
-	incoming := service.OpenAIEvalAccountConfig{BPSMode: "", BPSAuto: true}
-	mergeOpenAIEvalRouteBPSFields(&incoming, previous, map[string]json.RawMessage{
-		"bps_mode": json.RawMessage(`""`),
-		"bps_auto": json.RawMessage("true"),
-	})
-	require.Empty(t, incoming.BPSMode, "an explicitly empty mode is a deliberate clear operation")
-	require.True(t, incoming.BPSAuto)
-}
-
 func TestOpenAIEvalHandlersFailClosedWithoutService(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h := NewAccountHandler(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
@@ -89,14 +48,12 @@ func TestOpenAIEvalHandlersFailClosedWithoutService(t *testing.T) {
 	router.GET("/config", h.GetOpenAIEvalConfig)
 	router.PUT("/config", h.UpdateOpenAIEvalConfig)
 	router.POST("/run", h.RunOpenAIEval)
-	router.POST("/bps/reset", h.ResetOpenAIEvalBPSState)
 	router.GET("/runs", h.ListOpenAIEvalRuns)
 	router.GET("/audit", h.ListOpenAIEvalAudit)
 	for _, route := range []struct{ method, path string }{
 		{http.MethodGet, "/config"},
 		{http.MethodPut, "/config"},
 		{http.MethodPost, "/run"},
-		{http.MethodPost, "/bps/reset"},
 		{http.MethodGet, "/runs"},
 		{http.MethodGet, "/audit"},
 	} {
@@ -232,5 +189,38 @@ func TestOpenAIEvalConfigRejectsInvalidExplicitAttempts(t *testing.T) {
 		r := httptest.NewRecorder()
 		router.ServeHTTP(r, httptest.NewRequest(http.MethodPut, "/config", strings.NewReader(`{"max_request_attempts":`+value+`}`)))
 		require.Equal(t, http.StatusBadRequest, r.Code, value)
+	}
+}
+
+func TestOpenAIEvalConfigTypeErrorReportsFieldWithoutValue(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := &AccountHandler{openAIEvalService: service.NewOpenAIEvalService(nil, nil, nil)}
+	router := gin.New()
+	router.PUT("/config", h.UpdateOpenAIEvalConfig)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodPut, "/config", strings.NewReader(`{"account_priority_rules":[{"account_id":"private-value"}]}`)))
+	require.Equal(t, http.StatusBadRequest, response.Code)
+	require.Contains(t, response.Body.String(), "account_priority_rules")
+	require.Contains(t, response.Body.String(), "account_id")
+	require.Contains(t, response.Body.String(), "int64")
+	require.NotContains(t, response.Body.String(), "private-value")
+}
+
+func TestMergeOpenAIEvalAccountRuleAliasesPreservesDisabledCondition(t *testing.T) {
+	for _, pair := range [][2]string{{"gpt-6", "gpt-6-astra"}, {"gpt-5.6", "gpt-5.6-sol"}} {
+		disabled := false
+		current := &service.OpenAIEvalConfig{AccountPriorityRules: []service.OpenAIEvalAccountPriorityRule{{
+			AccountID: 7, Priority: 1, RequestedModels: []string{pair[1]}, Enabled: &disabled,
+			Condition: &service.OpenAIEvalAccountPriorityCondition{Metric: "quality_ratio", Operator: "gte", Threshold: 1},
+		}}}
+		incoming := &service.OpenAIEvalConfig{AccountPriorityRules: []service.OpenAIEvalAccountPriorityRule{{
+			AccountID: 7, Priority: 3, RequestedModels: []string{pair[0]},
+		}}}
+		mergeOpenAIEvalConfigOmittedFields(incoming, current, map[string]json.RawMessage{
+			"account_priority_rules": json.RawMessage(`[{"account_id":7,"priority":3}]`),
+		})
+		require.NotNil(t, incoming.AccountPriorityRules[0].Enabled)
+		require.False(t, *incoming.AccountPriorityRules[0].Enabled)
+		require.Equal(t, current.AccountPriorityRules[0].Condition, incoming.AccountPriorityRules[0].Condition)
 	}
 }

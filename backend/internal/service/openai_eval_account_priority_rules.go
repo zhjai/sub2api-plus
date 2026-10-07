@@ -27,6 +27,20 @@ type openAIEvalAccountPriorityIndex struct {
 	modelConditions    map[string]*OpenAIEvalAccountPriorityCondition
 }
 
+// CanonicalOpenAIEvalAccountRuleModel unifies only the established account-rule aliases. Transport and custom
+// model mappings keep accepting legacy inbound IDs independently.
+func CanonicalOpenAIEvalAccountRuleModel(model string) string {
+	model = strings.TrimSpace(model)
+	switch strings.ToLower(model) {
+	case "gpt-5.6", "gpt-5.6-sol":
+		return "gpt-5.6-sol"
+	case "gpt-6", "gpt-6-astra":
+		return "gpt-6-astra"
+	default:
+		return model
+	}
+}
+
 func buildOpenAIEvalAccountPriorityIndex(rules []OpenAIEvalAccountPriorityRule) (map[int64]openAIEvalAccountPriorityIndex, error) {
 	normalized, err := normalizeOpenAIEvalAccountPriorityRules(rules)
 	if err != nil {
@@ -62,7 +76,7 @@ func openAIEvalAccountPriorityFromIndex(index map[int64]openAIEvalAccountPriorit
 	if !exists {
 		return 0, false
 	}
-	model := strings.ToLower(strings.TrimSpace(requestedModel))
+	model := strings.ToLower(CanonicalOpenAIEvalAccountRuleModel(requestedModel))
 	var evidence OpenAIEvalRankingFactors
 	if len(factors) > 0 {
 		evidence = factors[0]
@@ -107,14 +121,21 @@ func normalizeOpenAIEvalAccountPriorityRules(rules []OpenAIEvalAccountPriorityRu
 		}
 		models := make([]string, 0, len(rule.RequestedModels))
 		seenModels := make(map[string]bool)
+		seenSpellings := make(map[string]bool)
 		for _, requestedModel := range rule.RequestedModels {
 			model := strings.TrimSpace(requestedModel)
 			if model == "" {
 				return nil, fmt.Errorf("account priority rule %d contains an empty requested model", index)
 			}
+			spelling := strings.ToLower(model)
+			if seenSpellings[spelling] {
+				return nil, fmt.Errorf("account priority rule %d repeats requested model %q", index, model)
+			}
+			seenSpellings[spelling] = true
+			model = CanonicalOpenAIEvalAccountRuleModel(model)
 			key := strings.ToLower(model)
 			if seenModels[key] {
-				return nil, fmt.Errorf("account priority rule %d repeats requested model %q", index, model)
+				continue // stored alias and canonical ID represent one selection
 			}
 			seenModels[key] = true
 			models = append(models, model)
@@ -148,7 +169,7 @@ func normalizeOpenAIEvalAccountPriorityRules(rules []OpenAIEvalAccountPriorityRu
 }
 
 func openAIEvalAccountPriorityFor(rules []OpenAIEvalAccountPriorityRule, accountID int64, requestedModel string, factors ...OpenAIEvalRankingFactors) (int, bool) {
-	requestedModel = strings.TrimSpace(requestedModel)
+	requestedModel = CanonicalOpenAIEvalAccountRuleModel(requestedModel)
 	var evidence OpenAIEvalRankingFactors
 	if len(factors) > 0 {
 		evidence = factors[0]
@@ -165,7 +186,7 @@ func openAIEvalAccountPriorityFor(rules []OpenAIEvalAccountPriorityRule, account
 			continue
 		}
 		for _, model := range rule.RequestedModels {
-			if strings.EqualFold(strings.TrimSpace(model), requestedModel) {
+			if strings.EqualFold(CanonicalOpenAIEvalAccountRuleModel(model), requestedModel) {
 				return rule.Priority, true
 			}
 		}

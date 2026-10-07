@@ -13,7 +13,6 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
-	"github.com/Wei-Shaw/sub2api/internal/service/basispoints"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )
@@ -160,23 +159,6 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	requestView := newOpenAIRequestView(body)
 	reqModel, reqStream, promptCacheKey := requestView.Model, requestView.Stream, requestView.PromptCacheKey
 	originalModel := reqModel
-	// BPS is a deliberately narrow bridge. Requests that require native
-	// Responses semantics must continue through the normal OpenAI path instead
-	// of becoming a user-visible 400 from the bridge.
-	bpsFallback := basispoints.NativeFallbackReason(body)
-	if bpsFallback == "" && len(collectOpenAIImageInlineAssets(body, "")) > 0 {
-		bpsFallback = "inline_image"
-	}
-	if bpsFallback == "" && (!reqStream || isOpenAIResponsesCompactPath(c)) {
-		bpsFallback = "streaming_required"
-	}
-	if bpsFallback == "" && s.isOpenAIBPSForwardEligible(ctx, account, originalModel) {
-		result, err := s.forwardOpenAIBPS(ctx, c, account, body, startTime)
-		if !errors.Is(err, errOpenAIBPSNativeFallback) {
-			return result, err
-		}
-	}
-
 	if account.Platform == PlatformGrok {
 		return s.forwardGrokResponses(ctx, c, account, body, originalModel, reqStream, startTime)
 	}

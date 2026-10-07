@@ -115,28 +115,6 @@ func TestR6AccountProbeLanguageAfterAccountOverride(t *testing.T) {
 	}
 }
 
-func TestR6BPSLegacyCountersCannotAuthorizeAutomaticActivation(t *testing.T) {
-	legacy := OpenAIBPSModelState{Active: true, DegradedStreak: 99, HealthyStreak: 99}
-	account := &Account{ID: 64, Platform: PlatformOpenAI, Type: AccountTypeOAuth,
-		Extra: map[string]any{OpenAIBPSModelStateExtraKeyFor("gpt-6-astra"): legacy}}
-	repo := &openAIEvalRepoFake{config: &OpenAIEvalConfig{BPSAutoEnabled: true,
-		BPSAccounts: []OpenAIEvalBPSAccountConfig{{AccountID: account.ID, Mode: OpenAIEvalBPSModeAuto, FailureThreshold: 3, RecoveryThreshold: 2}}}}
-	svc := &OpenAIGatewayService{openAIEvalRepo: repo}
-	require.False(t, svc.isOpenAIBPSForwardEligible(t.Context(), account, "gpt-6-astra"))
-	state := readOpenAIBPSAccountState(account)
-	for i := 1; i <= 3; i++ {
-		state, _ = nextOpenAIBPSAccountState(state, "degraded", 3, 2)
-		account.Extra[OpenAIBPSAccountStateExtraKey()] = state
-		require.Equal(t, i == 3, svc.isOpenAIBPSForwardEligible(t.Context(), account, "gpt-6-astra"))
-	}
-	require.Equal(t, legacy, account.Extra[OpenAIBPSModelStateExtraKeyFor("gpt-6-astra")])
-	for i := 1; i <= 2; i++ {
-		state, _ = nextOpenAIBPSAccountState(state, "healthy", 3, 2)
-		account.Extra[OpenAIBPSAccountStateExtraKey()] = state
-		require.Equal(t, i < 2, svc.isOpenAIBPSForwardEligible(t.Context(), account, "gpt-6-astra"))
-	}
-}
-
 func TestR6ModelTraceAttributionOnlyLunaIsSuspect(t *testing.T) {
 	for _, tc := range []struct{ model, status string }{
 		{"gpt-6-astra", "suspected_normal"}, {"gpt-6-sol", "suspected_normal"},

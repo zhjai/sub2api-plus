@@ -185,7 +185,7 @@ export interface OpenAIEvalRouteConfig {
   modeltrace_schedule: OpenAIEvalSchedule
   state_probe_schedule: OpenAIEvalSchedule
   bps_auto: boolean
-  /** Explicit BPS mode; older servers only return bps_auto. */
+  /** Legacy storage compatibility only; BPS is retired and always disabled. */
   bps_mode?: OpenAIEvalBPSMode
   bps_state?: OpenAIBPSModelState | null
   direct_oauth_eligible?: boolean
@@ -301,8 +301,7 @@ export interface OpenAIEvalConfig {
    */
   scheduling_thresholds?: OpenAIEvalSchedulingThresholds
   /**
-   * BPS is decided per OAuth account, independent of the account/model/effort
-   * test targets in `accounts`. Older servers omit the field.
+   * Legacy storage compatibility only. New clients clear retired BPS entries.
    */
   bps_accounts?: OpenAIEvalBPSAccountConfig[]
   /**
@@ -966,11 +965,6 @@ export async function getOpenAIEvalAccountOverview(query: OpenAIEvalAccountOverv
 
 export async function listOpenAIEvalAudit(): Promise<{ items: Array<{ id: number; actor_id: number; action: string; payload: Record<string, unknown>; created_at: string }> }> {
   const { data } = await apiClient.get<{ items: Array<{ id: number; actor_id: number; action: string; payload: Record<string, unknown>; created_at: string }> }>('/admin/accounts/evaluations/audit')
-  return data
-}
-
-export async function resetOpenAIBPSState(request: { account_id: number; requested_model?: string }): Promise<{ state: OpenAIBPSModelState }> {
-  const { data } = await apiClient.post<{ state: OpenAIBPSModelState }>('/admin/accounts/evaluations/bps/reset', request)
   return data
 }
 
@@ -2160,7 +2154,6 @@ export const accountsAPI = {
   ,getOpenAIEvalRankingAccounts
   ,getOpenAIEvalAccountOverview
   ,listOpenAIEvalAudit
-  ,resetOpenAIBPSState
 }
 
 export default accountsAPI

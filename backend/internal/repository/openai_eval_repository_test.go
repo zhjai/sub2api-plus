@@ -254,27 +254,3 @@ func TestOpenAIEvalSaveConfigRejectsStaleRevision(t *testing.T) {
 	require.ErrorIs(t, repo.SaveConfig(t.Context(), &config, 17), service.ErrOpenAIEvalConfigRevisionConflict)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
-
-func TestDisableLegacyBPSForRemovedAccountPreventsCompatibilityFallback(t *testing.T) {
-	previous := &service.OpenAIEvalConfig{BPSAccounts: []service.OpenAIEvalBPSAccountConfig{
-		{AccountID: 41, Mode: service.OpenAIEvalBPSModeAuto},
-		{AccountID: 42, Mode: service.OpenAIEvalBPSModeAuto},
-	}}
-	next := &service.OpenAIEvalConfig{
-		BPSAccounts: []service.OpenAIEvalBPSAccountConfig{{AccountID: 42, Mode: service.OpenAIEvalBPSModeAuto}},
-		Accounts: []service.OpenAIEvalAccountConfig{
-			{AccountID: 41, RequestedModel: "gpt-5.4", BPSMode: service.OpenAIEvalBPSModeAuto, BPSAuto: true},
-			{AccountID: 41, RequestedModel: "gpt-6-astra", BPSMode: service.OpenAIEvalBPSModeForceOn, BPSAuto: true},
-			{AccountID: 42, RequestedModel: "gpt-5.4", BPSMode: service.OpenAIEvalBPSModeAuto, BPSAuto: true},
-		},
-	}
-
-	disableLegacyBPSForRemovedAccounts(previous, next)
-
-	require.Equal(t, service.OpenAIEvalBPSModeForceOff, next.Accounts[0].BPSMode)
-	require.False(t, next.Accounts[0].BPSAuto)
-	require.Equal(t, service.OpenAIEvalBPSModeForceOff, next.Accounts[1].BPSMode)
-	require.False(t, next.Accounts[1].BPSAuto)
-	require.Equal(t, service.OpenAIEvalBPSModeAuto, next.Accounts[2].BPSMode)
-	require.True(t, next.Accounts[2].BPSAuto)
-}

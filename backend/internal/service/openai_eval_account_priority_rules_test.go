@@ -46,6 +46,29 @@ func TestOpenAIEvalAccountPriorityRulesMatch(t *testing.T) {
 	}
 }
 
+func TestOpenAIEvalAccountPriorityAliasesNormalizeAndMatch(t *testing.T) {
+	rules, err := normalizeOpenAIEvalAccountPriorityRules([]OpenAIEvalAccountPriorityRule{
+		{AccountID: 1, Priority: 1, RequestedModels: []string{" GPT-6 ", "gpt-6-astra", "gpt-6-sol", "gpt-5.6", "gpt-5.6-sol"}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"gpt-6-astra", "gpt-6-sol", "gpt-5.6-sol"}, rules[0].RequestedModels)
+	index, err := buildOpenAIEvalAccountPriorityIndex(rules)
+	require.NoError(t, err)
+	for _, model := range []string{"gpt-6", "gpt-6-astra", "GPT-5.6", "gpt-5.6-sol"} {
+		priority, matched := openAIEvalAccountPriorityFromIndex(index, 1, model)
+		require.True(t, matched, model)
+		require.Equal(t, 1, priority)
+		priority, matched = openAIEvalAccountPriorityFor(rules, 1, model)
+		require.True(t, matched, model)
+		require.Equal(t, 1, priority)
+	}
+	_, err = normalizeOpenAIEvalAccountPriorityRules([]OpenAIEvalAccountPriorityRule{
+		{AccountID: 1, RequestedModels: []string{"gpt-6"}},
+		{AccountID: 1, RequestedModels: []string{"gpt-6-astra"}},
+	})
+	require.ErrorContains(t, err, "overlaps")
+}
+
 func TestOpenAIEvalAccountPriorityRulesRejectAmbiguity(t *testing.T) {
 	for _, testcase := range []struct {
 		name  string
@@ -244,7 +267,8 @@ func TestOpenAIEvalInvalidAccountPrioritySnapshotPreservesAcceptedState(t *testi
 
 func TestOpenAIEvalInvalidStoredAccountPriorityRejectsInitializationAndRead(t *testing.T) {
 	service, repo, _ := setupQualityRefreshTest(t)
-	repo.config.AccountPriorityRules = []OpenAIEvalAccountPriorityRule{{AccountID: 2, Priority: 1}, {AccountID: 2, Priority: 2}}
+	accountID := repo.config.Accounts[0].AccountID
+	repo.config.AccountPriorityRules = []OpenAIEvalAccountPriorityRule{{AccountID: accountID, Priority: 1}, {AccountID: accountID, Priority: 2}}
 	require.ErrorContains(t, service.Initialize(context.Background()), "build account priority rules")
 	_, err := service.GetConfig(context.Background())
 	require.ErrorContains(t, err, "build account priority rules")

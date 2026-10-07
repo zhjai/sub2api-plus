@@ -440,8 +440,7 @@ function addTargets(payload: { accountIDs: number[]; model: string; effort: stri
  * Changes only the model and effort of one target. The route is replaced, not
  * mutated, so a run that is still in flight keeps the identity it started
  * with. Account, every schedule (State Probe included — it always uses the
- * account default effort) and route BPS mode carry over; account-level BPS
- * settings live elsewhere and are not touched. Past runs keep their own
+ * account default effort) carry over. Past runs keep their own
  * model/effort and are not shown for the new target.
  */
 function saveEdit(payload: { model: string; effort: string }) {
@@ -463,7 +462,7 @@ function saveEdit(payload: { model: string; effort: string }) {
 
 /**
  * Automatic plans for tests a Prism target cannot run are switched off so the
- * scheduler never queues an unsupported probe. BPS stays off for Prism.
+ * scheduler never queues an unsupported probe.
  */
 function disableUnavailableSchedules(route: OpenAIEvalRouteConfig) {
   route.bps_mode = 'force_off'
@@ -484,7 +483,12 @@ function confirmRemove() {
 }
 
 const runKey = (route: OpenAIEvalRouteConfig, type: EvalTestType) => `${routeKey(route)}:${type}`
-const isRunning = (route: OpenAIEvalRouteConfig, type: EvalTestType) => runningKeys.has(runKey(route, type))
+const persistedRunFor = (route: OpenAIEvalRouteConfig, type: EvalTestType) => {
+  const key = runKey(route, type)
+  if (targetRuns.value?.key === routeKey(route) && targetRuns.value.items.some(run => run.test_type === type && run.status === 'running')) return true
+  return runs.value.some(run => run.account_id === route.account_id && run.requested_model === route.requested_model && (type === 'state_probe' ? run.reasoning_effort === '' : run.reasoning_effort === route.reasoning_effort) && run.test_type === type && run.status === 'running') || runningKeys.has(key)
+}
+const isRunning = (route: OpenAIEvalRouteConfig, type: EvalTestType) => persistedRunFor(route, type)
 
 function requestRun(route: OpenAIEvalRouteConfig, type: EvalTestType) {
   if (isRunning(route, type)) return
@@ -539,7 +543,13 @@ async function runNow(route: OpenAIEvalRouteConfig, type: EvalTestType, sampleMo
     await Promise.all([loadHistory(), loadTargetRuns()])
   } catch (error) {
     // Upstream errors can echo credentials; the toast shows the cause with them masked.
-    appStore.showError(redactSecrets(extractApiErrorMessage(error, t('admin.modelIntegrity.tests.runFailed'))))
+    const status = (error as { response?: { status?: number }; status?: number })?.response?.status ?? (error as { status?: number })?.status
+    if (status === 409 || /already running/i.test(extractApiErrorMessage(error, ''))) {
+      appStore.showInfo(t('admin.modelIntegrity.tests.alreadyRunning'))
+      await Promise.all([loadHistory(), loadTargetRuns()])
+    } else {
+      appStore.showError(redactSecrets(extractApiErrorMessage(error, t('admin.modelIntegrity.tests.runFailed'))))
+    }
   } finally {
     if (pollTimer) {
       clearInterval(pollTimer)
@@ -575,6 +585,11 @@ async function loadTargetRuns() {
     if (selected.value && routeKey(selected.value) === key) {
       const effort = (route.reasoning_effort || '').toLowerCase()
       targetRuns.value = { key, items: (items ?? []).filter(run => run.test_type === 'state_probe' || (run.reasoning_effort || '').toLowerCase() === effort) }
+      for (const type of TEST_TYPES) {
+        const running = targetRuns.value.items.find(run => run.test_type === type && run.status === 'running')
+        if (running) runningProgress.set(runKey(route, type), running)
+        else runningProgress.delete(runKey(route, type))
+      }
     }
   } catch {
     // The global history still backs the panels; a failed narrow query is not fatal.

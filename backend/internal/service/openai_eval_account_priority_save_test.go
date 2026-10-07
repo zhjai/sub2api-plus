@@ -48,7 +48,7 @@ func TestOpenAIEvalAccountPrioritySaveConfigDisabledRuleAndReenableConflict(t *t
 	previous := openAIEvalSchedulingPolicy.Load()
 	t.Cleanup(func() { openAIEvalSchedulingPolicy.Store(previous) })
 	account := &Account{ID: 61, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
-	accounts := &openAIAccountTestRepo{mockAccountRepoForGemini: mockAccountRepoForGemini{accountsByID: map[int64]*Account{account.ID: account}}}
+	accounts := &deletedEvalAccounts{items: map[int64]*Account{account.ID: account}}
 	repo := &openAIEvalRepoFake{}
 	service := NewOpenAIEvalService(repo, accounts, nil)
 	disabled := false

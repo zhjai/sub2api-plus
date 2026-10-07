@@ -414,56 +414,20 @@ describe('ModelIntegritySchedulingView', () => {
     expect(api.saveOpenAIEvalConfig).not.toHaveBeenCalled()
   })
 
-  it('lists BPS-capable targets and offers explicit force-on mode', async () => {
+  it('removes BPS controls and retires stored switches without deleting State Probe schedules', async () => {
     const wrapper = mountView()
     await flushPromises()
-
-    const rows = wrapper.findAll('[data-testid="bps-row"]')
-    expect(rows).toHaveLength(1)
-    expect(rows[0].text()).toContain('BPS 已停用')
-    expect(rows[0].text()).toContain('返回 403')
-    expect(wrapper.text()).toContain('1 个测试对象仍保留升级前的模型级 BPS 配置')
-    await rows[0].get('[data-testid="bps-edit"]').trigger('click')
-    expect(wrapper.get('[data-testid="bps-mode-auto"]').exists()).toBe(true)
-    expect(wrapper.get('[data-testid="bps-mode-force_off"]').exists()).toBe(true)
-    expect(wrapper.get('[data-testid="bps-mode-force_on"]').exists()).toBe(true)
-  })
-
-  it('never offers a Prism account as a BPS route', async () => {
-    api.list.mockImplementation(async (_page: number, _size: number, filters: { platform: string }) => ({
-      items: filters.platform === 'prism'
-        ? [{ id: 31, name: 'prism-one', platform: 'prism', type: 'oauth' }]
-        : [{ id: 11, name: 'oauth-a', platform: 'openai', type: 'oauth' }]
-    }))
-    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ bps_accounts: [] }))
-    const wrapper = mountView()
-    await flushPromises()
-    await wrapper.get('[data-testid="bps-add"]').trigger('click')
-    await flushPromises()
-    const options = wrapper.findAll('[data-testid="bps-account"] option').map(option => option.text())
-    expect(options.some(text => text.includes('oauth-a'))).toBe(true)
-    expect(options.some(text => text.includes('prism-one'))).toBe(false)
-  })
-
-  it('uses the shared interval presets and preserves a custom BPS interval', async () => {
-    const wrapper = mountView()
-    await flushPromises()
-
-    await wrapper.get('[data-testid="bps-edit"]').trigger('click')
-    const select = wrapper.get('[data-testid="bps-interval"]')
-    expect(select.text()).toContain('每 5 分钟')
-    expect(select.text()).toContain('每 24 小时')
-    await select.setValue('custom')
-    const custom = wrapper.get('[data-testid="bps-custom-interval"]')
-    expect(custom.attributes('max')).toBe('35791394')
-    expect(wrapper.text()).toContain('存储上限 35,791,394')
-    await custom.setValue(17)
-    await wrapper.get('[data-testid="bps-dialog"]').trigger('submit')
+    expect(wrapper.find('[data-testid="bps-row"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="bps-add"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('BPS 备用线路')
+    await wrapper.get('[data-testid="policy-cost_first"]').setValue(true)
     await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
     await flushPromises()
-
     const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
-    expect(payload.bps_accounts?.[0].interval_seconds).toBe(17 * 60)
+    expect(payload.bps_auto_enabled).toBe(false)
+    expect(payload.bps_accounts).toEqual([])
+    expect(payload.accounts[0].state_probe_schedule).toEqual(serverConfig().accounts[0].state_probe_schedule)
+    expect(api.resetOpenAIBPSState).not.toHaveBeenCalled()
   })
 
   it('normalizes an old all-zero custom balance response before saving a new custom rule', async () => {
@@ -586,25 +550,6 @@ describe('ModelIntegritySchedulingView', () => {
     await flushPromises()
     const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
     expect(payload.policies?.[0].custom_balance).toEqual({ cost: 0, stability: 0, error_rate: 0, ttft: 0, load: 0.1, quality: 0, absolute_priorities: [] })
-  })
-
-  it('restores a locked BPS route through the reset API without touching unsaved config', async () => {
-    api.resetOpenAIBPSState.mockResolvedValue({ state: { active: false, degraded_streak: 0, healthy_streak: 0 } })
-    const wrapper = mountView()
-    await flushPromises()
-
-    const row = wrapper.get('[data-testid="bps-row"]')
-    await row.get('[data-testid="bps-reset"]').trigger('click')
-    await flushPromises()
-    const dialogs = wrapper.findAllComponents({ name: 'ConfirmDialog' })
-    const resetDialog = dialogs.find(dialog => dialog.props('show') === true)
-    expect(resetDialog).toBeDefined()
-    resetDialog!.vm.$emit('confirm')
-    await flushPromises()
-
-    expect(api.resetOpenAIBPSState).toHaveBeenCalledWith({ account_id: 11 })
-    expect(wrapper.get('[data-testid="bps-row"]').text()).toContain('原线路')
-    expect(api.saveOpenAIEvalConfig).not.toHaveBeenCalled()
   })
 
   it('explains the latest decision and each candidate in plain words', async () => {
@@ -1638,6 +1583,50 @@ describe('ModelIntegritySchedulingView rule switches', () => {
 })
 
 describe('ModelIntegritySchedulingView account priority rules', () => {
+  it('offers only Astra and migrates a stored GPT-6 alias when saving', async () => {
+    api.getOpenAIEvalModels.mockResolvedValue({ ...catalog, items: [
+      { id: 'gpt-6', display_name: 'GPT-6 (Astra)' },
+      { id: 'gpt-6-astra', display_name: 'GPT-6 Astra' },
+      { id: 'gpt-6-sol', display_name: 'GPT-6 Sol' }
+    ] })
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ account_priority_rules: [
+      { account_id: 11, priority: 1, requested_models: ['gpt-6', 'gpt-6-astra'] }
+    ] }))
+    const wrapper = mountView()
+    await flushPromises()
+    const models = wrapper.get('[data-testid="account-rule-models"]')
+    expect(models.findAll('input[type="checkbox"]')).toHaveLength(2)
+    expect(models.text()).toContain('GPT-6 Astra')
+    expect(models.text()).not.toContain('GPT-6 (Astra)')
+    await wrapper.get('[data-testid="account-rule-priority"]').setValue('2')
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    expect(api.saveOpenAIEvalConfig.mock.calls[0][0].account_priority_rules[0].requested_models).toEqual(['gpt-6-astra'])
+  })
+
+  it('offers only Sol and migrates a saved GPT-5.6 alias when saving', async () => {
+    api.getOpenAIEvalModels.mockResolvedValue({ ...catalog, items: [
+      { id: 'gpt-5.6', display_name: 'GPT-5.6 (Sol)' },
+      { id: 'gpt-5.6-sol', display_name: 'GPT-5.6 Sol' },
+      { id: 'gpt-5.6-sol', display_name: 'GPT-5.6 Sol' }
+    ] })
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ account_priority_rules: [
+      { account_id: 11, priority: 1, requested_models: ['gpt-5.6', 'gpt-5.6-sol'] }
+    ] }))
+    const wrapper = mountView()
+    await flushPromises()
+    const models = wrapper.get('[data-testid="account-rule-models"]')
+    expect(models.findAll('input[type="checkbox"]')).toHaveLength(1)
+    expect(models.text()).toContain('GPT-5.6 Sol')
+    expect(models.text()).not.toContain('GPT-5.6 (Sol)')
+    expect(models.get('input').element).toHaveProperty('checked', true)
+    await wrapper.get('[data-testid="account-rule-priority"]').setValue('2')
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    expect(api.saveOpenAIEvalConfig).toHaveBeenCalledTimes(1)
+    expect(api.saveOpenAIEvalConfig.mock.calls[0][0].account_priority_rules[0].requested_models).toEqual(['gpt-5.6-sol'])
+  })
+
   it('explains the order and starts empty for a config without rules', async () => {
     const wrapper = mountView()
     await flushPromises()

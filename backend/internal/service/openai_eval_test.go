@@ -499,22 +499,29 @@ func TestOpenAIEvalSaveConfigDefaultsEffectsOffAndValidatesRoutes(t *testing.T) 
 	require.ErrorContains(t, svc.SaveConfig(context.Background(), config, 9), "invalid evaluation route")
 }
 
-func TestOpenAIEvalBPSAccountIntervalHasNoProductCapButRejectsStorageOverflow(t *testing.T) {
-	account := &Account{ID: 61, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
-	accounts := &openAIAccountTestRepo{mockAccountRepoForGemini: mockAccountRepoForGemini{accountsByID: map[int64]*Account{account.ID: account}}}
+func TestOpenAIEvalRetiresLegacyBPSOnSave(t *testing.T) {
+	previousPolicy, previousQuality := openAIEvalSchedulingPolicy.Load(), openAIEvalQualitySnapshots
+	openAIEvalQualitySnapshots = &openAIEvalQualitySnapshotStore{}
+	t.Cleanup(func() {
+		openAIEvalSchedulingPolicy.Store(previousPolicy)
+		openAIEvalQualitySnapshots = previousQuality
+	})
 	repo := &openAIEvalRepoFake{}
+	accounts := &deletedEvalAccounts{items: map[int64]*Account{61: {ID: 61, Platform: PlatformOpenAI, Type: AccountTypeOAuth}}}
 	svc := NewOpenAIEvalService(repo, accounts, nil)
-	config := &OpenAIEvalConfig{BPSAccounts: []OpenAIEvalBPSAccountConfig{{
-		AccountID: account.ID, Mode: OpenAIEvalBPSModeAuto, FailureThreshold: 3, RecoveryThreshold: 2,
-		IntervalSeconds: 365 * 24 * 3600,
-	}}}
-	require.NoError(t, svc.SaveConfig(context.Background(), config, 9))
-
-	config.BPSAccounts[0].IntervalSeconds = int(OpenAIEvalMaxIntervalSeconds) + 1
-	require.ErrorContains(t, svc.SaveConfig(context.Background(), config, 9), "fit database integer storage")
+	config := &OpenAIEvalConfig{BPSAutoEnabled: true,
+		BPSAccounts: []OpenAIEvalBPSAccountConfig{{AccountID: 61, Mode: OpenAIEvalBPSModeForceOn}},
+		Accounts: []OpenAIEvalAccountConfig{{AccountID: 61, RequestedModel: "gpt-6-astra", BPSAuto: true, BPSMode: OpenAIEvalBPSModeAuto,
+			StateProbeSchedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 300}}}}
+	require.NoError(t, svc.SaveConfig(t.Context(), config, 9))
+	require.False(t, repo.config.BPSAutoEnabled)
+	require.Empty(t, repo.config.BPSAccounts)
+	require.False(t, repo.config.Accounts[0].BPSAuto)
+	require.Equal(t, OpenAIEvalBPSModeForceOff, repo.config.Accounts[0].BPSMode)
+	require.True(t, repo.config.Accounts[0].StateProbeSchedule.Enabled)
 }
 
-func TestOpenAIEvalRunnerNormalizesBPSAccountSentinelBeforePublicEffortValidation(t *testing.T) {
+func TestOpenAIEvalRunnerRejectsRetiredBPSBeforeLease(t *testing.T) {
 	repo := &openAIEvalRepoFake{due: []OpenAIEvalScheduledRun{{
 		AccountID:       61,
 		TestType:        OpenAIEvalTypeStateProbe,
@@ -527,11 +534,9 @@ func TestOpenAIEvalRunnerNormalizesBPSAccountSentinelBeforePublicEffortValidatio
 
 	runner.runDue(context.Background())
 
-	// ResolveOpenAIEvalTarget intentionally fails later because this focused
-	// test has no account dependencies. Reaching the lease proves the runner's
-	// internal sentinel passed through Run's public effort validation.
-	require.Equal(t, 1, repo.leaseAcquire)
-	require.Equal(t, 1, repo.leaseRelease)
+	require.Zero(t, repo.leaseAcquire)
+	require.Zero(t, repo.leaseRelease)
+	require.Empty(t, repo.runs)
 }
 
 func TestOpenAIEvalInitializeRestoresEffectsSwitch(t *testing.T) {
@@ -567,19 +572,6 @@ func TestOpenAIEvalEffectsDisabledSuppressesSchedulingPolicy(t *testing.T) {
 	SetOpenAIEvalEffectsEnabled(true)
 	require.Equal(t, OpenAIEvalSchedulingPolicyCostFirst, OpenAIEvalSchedulingPolicyForRequest("gpt-6-astra", "high"))
 	require.Equal(t, OpenAIEvalSchedulingPolicyStabilityFirst, OpenAIEvalSchedulingPolicyForRequest("gpt-6-astra", "low"))
-}
-
-func TestOpenAIBPSForceOnBypassesMasterSwitchButNotLocks(t *testing.T) {
-	account := &Account{ID: 88, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
-	repo := &openAIEvalRepoFake{config: &OpenAIEvalConfig{
-		BPSAutoEnabled: false,
-		BPSAccounts:    []OpenAIEvalBPSAccountConfig{{AccountID: account.ID, Mode: OpenAIEvalBPSModeForceOn}},
-	}}
-	svc := &OpenAIGatewayService{openAIEvalRepo: repo}
-	require.True(t, svc.isOpenAIBPSForwardEligible(context.Background(), account, "gpt-6-astra"))
-
-	account.Extra = map[string]any{openAIBPSModelStateKey("gpt-6-astra"): OpenAIBPSModelState{DisabledReason: "upstream_403"}}
-	require.False(t, svc.isOpenAIBPSForwardEligible(context.Background(), account, "gpt-6-astra"))
 }
 
 func TestOpenAIEvalRouteHealthIsScopedAndExpires(t *testing.T) {
@@ -686,6 +678,14 @@ func TestOpenAIEvalRunCandyAndFingerprintUseSafeRouteOutcomes(t *testing.T) {
 		require.Empty(t, evalRepo.runs)
 	})
 
+	t.Run("manual evaluation remains quality evidence when routing is paused", func(t *testing.T) {
+		svc, _, accounts, _ := newHarness("21")
+		accounts.accountsByID[51].Schedulable = false
+		run, err := svc.Run(context.Background(), OpenAIEvalRunRequest{AccountID: 51, TestType: OpenAIEvalTypeCandy, RequestedModel: "gpt-5.4", ReasoningEffort: "high"}, 8, "manual")
+		require.NoError(t, err)
+		require.False(t, run.DiagnosticOnly, "manual quality evidence must not depend on routing participation")
+	})
+
 	t.Run("Candy transport failures remain alert only when effects are enabled", func(t *testing.T) {
 		t.Cleanup(func() { SetOpenAIEvalEffectsEnabled(false) })
 		SetOpenAIEvalEffectsEnabled(true)
@@ -698,38 +698,4 @@ func TestOpenAIEvalRunCandyAndFingerprintUseSafeRouteOutcomes(t *testing.T) {
 		require.Equal(t, "alert_only", run.Outcome.Scheduling)
 		require.Nil(t, healthRepo.updatedExtra, "diagnostic probe transport failures must not change production route eligibility")
 	})
-}
-
-func TestResetOpenAIBPSStateIsExplicitAndAudited(t *testing.T) {
-	account := &Account{
-		ID:       77,
-		Platform: PlatformOpenAI,
-		Type:     AccountTypeOAuth,
-		Extra: map[string]any{
-			openAIBPSModelStateKey("gpt-6-astra"): OpenAIBPSModelState{
-				Active:         false,
-				DegradedStreak: 3,
-				DisabledReason: "upstream_403",
-				UpdatedAt:      time.Now().UTC().Add(-time.Hour),
-			},
-		},
-	}
-	accounts := &openAIAccountTestRepo{mockAccountRepoForGemini: mockAccountRepoForGemini{accountsByID: map[int64]*Account{account.ID: account}}}
-	repo := &openAIEvalRepoFake{}
-	svc := NewOpenAIEvalService(repo, accounts, nil)
-
-	state, err := svc.ResetOpenAIBPSState(context.Background(), account.ID, "gpt-6-astra", 9)
-	require.NoError(t, err)
-	require.False(t, state.Active)
-	require.Empty(t, state.DisabledReason)
-	require.Zero(t, state.DegradedStreak)
-	require.NotZero(t, state.UpdatedAt)
-
-	stored, ok := accounts.updatedExtra[OpenAIBPSAccountStateExtraKey()].(OpenAIBPSModelState)
-	require.True(t, ok)
-	require.Empty(t, stored.DisabledReason)
-	require.Len(t, repo.audit, 1)
-	require.Equal(t, "bps_state_reset", repo.audit[0].Action)
-	require.Equal(t, int64(77), repo.audit[0].Payload["account_id"])
-	require.Equal(t, "gpt-6-astra", repo.audit[0].Payload["requested_model"])
 }

@@ -1,6 +1,6 @@
 <template>
   <BaseDialog :show="route !== null" :title="t('admin.modelIntegrity.tests.edit.title')" width="normal" @close="emit('close')">
-    <form v-if="route" id="edit-target-form" class="space-y-4" @submit.prevent="submit">
+    <form v-if="route" :id="formId" class="space-y-4" @submit.prevent="submit">
       <div>
         <span class="input-label">{{ t('admin.modelIntegrity.tests.edit.account') }}</span>
         <p class="text-sm text-gray-900 dark:text-gray-100" data-testid="edit-account">{{ accountLabel }}</p>
@@ -36,7 +36,7 @@
     <template #footer>
       <div class="flex justify-end gap-2">
         <button type="button" class="btn btn-secondary" data-testid="edit-cancel" @click="emit('close')">{{ t('admin.modelIntegrity.common.cancel') }}</button>
-        <button type="submit" form="edit-target-form" class="btn btn-primary" :disabled="!canSubmit" data-testid="edit-submit">
+        <button type="submit" :form="formId" class="btn btn-primary" :disabled="!canSubmit" data-testid="edit-submit">
           {{ t('admin.modelIntegrity.tests.edit.submit') }}
         </button>
       </div>
@@ -45,7 +45,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, getCurrentInstance, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import type { OpenAIEvalModelCatalog, OpenAIEvalRouteConfig } from '@/api/admin/accounts'
@@ -69,6 +69,9 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
+// A leaving dialog can coexist with a newly mounted one. Keep its footer
+// submit button bound to this instance, not another dialog's form.
+const formId = `edit-target-form-${getCurrentInstance()!.uid}`
 const model = ref('')
 const effort = ref('')
 

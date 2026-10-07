@@ -228,6 +228,34 @@ describe('API Client', () => {
   // --- 响应拦截器 ---
 
   describe('响应拦截器', () => {
+    it.each([
+      { error: '账号优先规则引用的账号不存在' },
+      { error: { message: 'Invalid input[3].id', code: 'invalid_value' } }
+    ])('显示 HTTP 400 的具体后端原因而不是 Axios 状态文本：%j', async data => {
+      const { extractApiErrorMessage } = await import('@/utils/apiError')
+      apiClient.defaults.adapter = vi.fn().mockRejectedValue({
+        config: { url: '/admin/accounts/evaluations/config' },
+        response: { status: 400, data },
+        message: 'Request failed with status code 400'
+      })
+      const error = await apiClient.put('/admin/accounts/evaluations/config', {}).catch(error => error)
+      expect(error.status).toBe(400)
+      const reason = typeof data.error === 'string' ? data.error : data.error.message
+      expect(error.message).toBe(reason)
+      expect(extractApiErrorMessage(error)).toBe(reason)
+    })
+
+    it('后端没有提供原因时保留 HTTP 错误兜底提示', async () => {
+      apiClient.defaults.adapter = vi.fn().mockRejectedValue({
+        config: { url: '/admin/accounts/evaluations/config' },
+        response: { status: 400, data: { error: { code: 'unknown' } } },
+        message: 'Request failed with status code 400'
+      })
+      await expect(apiClient.put('/admin/accounts/evaluations/config', {})).rejects.toMatchObject({
+        status: 400, message: 'Request failed with status code 400'
+      })
+    })
+
     it('code=0 时解包 data 字段', async () => {
       const adapter = vi.fn().mockResolvedValue({
         status: 200,

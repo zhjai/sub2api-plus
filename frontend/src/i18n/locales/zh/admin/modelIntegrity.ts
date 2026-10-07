@@ -5,6 +5,9 @@ export default {
       saving: '保存中…',
       saved: '已保存',
       refresh: '刷新',
+      everyDays: '每 {n} 天',
+      everyHours: '每 {n} 小时',
+      everyMinutes: '每 {n} 分钟',
       reload: '重新载入',
       unsaved: '有未保存的更改',
       saveFailed: '保存失败',
@@ -38,12 +41,12 @@ export default {
     reason: {
       stateProbe: {
         healthy: '关联请求已完成，票据未显示线路切换。',
-        degraded: '关联请求返回的票据有变化，推测线路可能已切换。本次结果不改变 BPS 状态；账号的 BPS 自动切换由「调度策略」中该账号的独立探测决定。',
+        degraded: '关联请求返回的票据有变化，推测线路可能已切换。本次结果仅用于线路诊断，不自动切换线路。',
         inconclusive: '本次无法根据票据判断线路是否切换。',
         ticket: {
           none: '关联请求已完成，未签发新票据。',
           same: '关联请求已完成，返回相同票据。',
-          different: '关联请求返回不同票据，推测线路可能已切换。本次结果不改变 BPS 状态；账号的 BPS 自动切换由「调度策略」中该账号的独立探测决定。'
+          different: '关联请求返回不同票据，推测线路可能已切换。本次结果仅用于线路诊断，不自动切换线路。'
         },
         mintMissingTicket: '请求已完成，但未取得首次票据，无法继续判定。',
         legacyLinkedMissingTicket: '旧版探针结果，请重新测试。'
@@ -97,7 +100,7 @@ export default {
     tests: {
       title: '降智测试',
       headerDescription: '检测账号是否降智，手动或自动结果均可参与排序。',
-      description: '使用固定题目与采样，定期检测账号是否提供所请求的模型，并检测请求线路是否稳定。开启评测影响后，降智通过率会用于「避免降智」和设置了降智通过率权重的「自定义平衡」排序。开启自动运行的测试项决定计入哪些测试，每项取最近一次已完成的结果，手动或自动运行均可。测试结果不改变 BPS 状态，BPS 自动切换由「调度策略」中各账号的独立探测决定。',
+      description: '使用固定题目与采样，定期检测账号是否提供所请求的模型，并检测请求线路是否稳定。开启评测影响后，降智通过率会用于「避免降智」和设置了降智通过率权重的「自定义平衡」排序。开启自动运行的测试项决定计入哪些测试，每项取最近一次已完成的结果，手动或自动运行均可。状态探针仅用于线路诊断，不自动切换线路。',
       budget: '自动测试预计每天发出约 {requests} 次上游请求（{plans} 个自动计划）。',
       budgetNone: '未开启自动测试，仅手动测试会产生请求。',
       budgetHint: '测试请求与正常请求同样计费。',
@@ -135,7 +138,7 @@ export default {
         },
         state_probe: {
           name: '状态探针',
-          what: '发送两次关联请求（先取票、再续写），比较上游返回的票据，推测线路是否在中途切换；票据只反映线路，不说明模型质量。失败时重新开始一条链，最多 3 条链、共 6 次请求。结果不计入降智通过率，也不改变 BPS 状态；BPS 自动切换由「调度策略」中的账号探测决定。'
+          what: '发送两次关联请求（先取票、再续写），比较上游返回的票据，推测线路是否在中途切换；票据只反映线路，不说明模型质量。失败时重新开始一条链，最多 3 条链、共 6 次请求。结果不计入降智通过率，仅用于线路诊断，不自动切换线路。'
         }
       },
       runNow: '立即测试',
@@ -147,6 +150,7 @@ export default {
       },
       runDone: '测试完成',
       runFailed: '测试启动失败',
+      alreadyRunning: '该账号的同一项测试正在自动运行，请等待当前测试完成后再试。',
       runAllTitle: '运行全部测试项',
       auto: '自动运行',
       every: '间隔',
@@ -187,7 +191,7 @@ export default {
       neverRun: '尚未测试',
       onlyDirectOAuth: '只支持直连 OpenAI OAuth 账号。',
       stateProbeDefaultEffort: '状态探针按账号的默认推理强度运行，与该测试对象的推理强度无关。',
-      goScheduling: '在调度策略页配置 BPS',
+      goScheduling: '配置调度策略',
       manualSampleTitle: '选择本次采样量',
       manualSampleHint: '仅影响本次手动测试，不修改自动计划。采样越多结论越可靠，请求量也越大。',
       manualSampleOption: '{mode}：{count} 次请求',
@@ -312,7 +316,7 @@ export default {
         prismNoSharedModels: '所选账号没有共同的模型，请减少所选账号。',
         prismNoModels: '此账号目前没有可选的 Prism 模型。请到账号管理页检查其别名与目录。',
         prismDefaultEffort: '默认（{effort}）',
-        prismNote: 'Prism 目标可对目录中任一模型运行 Candy；Fingerprint 与 ModelTrace 仅在有版本化基线覆盖该模型时可用。状态探针与 BPS 不适用。',
+        prismNote: 'Prism 目标可对目录中任一模型运行 Candy；Fingerprint 与 ModelTrace 仅在有版本化基线覆盖该模型时可用。状态探针不适用。',
         searchAccounts: '搜索账号名称或 ID',
         noAccounts: '未找到 OpenAI 账号。',
         model: '请求模型',
@@ -341,7 +345,7 @@ export default {
         targetLoading: 'Prism 账号。正在读取模型目录…',
         targetCatalogError: 'Prism 账号。无法读取模型目录，每次运行仍由服务器校验。',
         noFingerprintBaseline: '没有版本化 Fingerprint 基线覆盖 {model}，此目标不运行该测试。',
-        stateProbeUnsupported: 'Prism 不支持 Codex 状态探针与 BPS。',
+        stateProbeUnsupported: 'Prism 不支持 Codex 状态探针。',
         unsupported: 'Prism 目标不可用。',
         noModelTraceBaseline: 'ModelTrace 题库未覆盖 {model}，此目标不运行该测试。',
         modelTraceCoverageUnknown: '此服务器未提供 ModelTrace 题库的覆盖范围；未覆盖的模型会在发出请求前被拒绝。',
@@ -351,8 +355,8 @@ export default {
     },
     scheduling: {
       title: '调度策略',
-      headerDescription: '配置账号排序策略与 BPS 备用线路。',
-      description: '配置账号排序策略、模型规则与 BPS 备用线路，并查看最近的调度决策。',
+      headerDescription: '配置账号排序策略与优先规则。',
+      description: '配置账号排序策略、模型规则与账号优先规则，并查看最近的调度决策。',
       policy: {
         title: '排序策略',
         hint: '仅决定多个账号均满足调度条件时的优先顺序；账号能否参与调度由调度条件决定。',
@@ -593,103 +597,6 @@ export default {
         features: '账号支持本次请求所需的功能与连接方式。',
         privacy: '分组要求开启隐私设置时，账号须已开启。',
         capacity: '并发与排队仍有余量。'
-      },
-      bps: {
-        title: 'BPS 备用线路',
-        hint: '按 OAuth 账号配置。原线路连续探测异常时，整个账号切换至 BPS 线路，恢复后切回。探测模型仅用于线路检测，不限制切换范围。',
-        master: '启用 BPS 自动切换',
-        masterHint: '关闭后，「自动切换」模式的账号均使用原线路；「始终使用 BPS」不受影响，各账号配置保留。',
-        add: '添加账号',
-        edit: '设置',
-        summary: {
-          total: '共 {count} 个账号',
-          bps: '{count} 个使用 BPS',
-          native: '{count} 个使用原线路',
-          locked: '{count} 个因 403 已停用',
-          inactive: '{count} 个未启用'
-        },
-        columns: {
-          account: '账号',
-          mode: '模式',
-          state: '当前线路',
-          counters: '切换计数',
-          probe: '探测模型与间隔',
-          actions: '操作'
-        },
-        modes: {
-          auto: '自动切换',
-          force_on: '始终使用 BPS',
-          force_off: '不使用 BPS'
-        },
-        modeHints: {
-          auto: '按切换阈值在原线路与 BPS 之间切换，受全局开关控制。',
-          force_on: '始终使用 BPS，不受探测结果和全局开关影响。',
-          force_off: '始终使用原线路，探测结果不触发切换。'
-        },
-        state: {
-          bps: '使用 BPS',
-          native: '原线路',
-          locked: 'BPS 已停用',
-          inactive: '未启用'
-        },
-        counters: '连续异常 {degraded}/{failure} · 连续正常 {healthy}/{recovery}',
-        lastProbe: '上次探测：{time}',
-        nextProbe: '下次探测：{time}',
-        ruleFor: '连续 {failure} 次探测异常后切换至 BPS；切换后连续 {recovery} 次正常则切回原线路。',
-        updatedAt: '更新于 {time}',
-        every: {
-          minutes: '每 {n} 分钟',
-          hours: '每 {n} 小时',
-          days: '每 {n} 天'
-        },
-        interval: {
-          customOption: '自定义',
-          customMinutes: '自定义间隔（分钟，存储上限 {max}）'
-        },
-        disabled: {
-          upstream_403: 'BPS 线路返回 403，已停用并锁定。锁定不会自动解除，确认账号状态正常后点击「恢复」。',
-          other: 'BPS 已停用（{reason}）。'
-        },
-        warnings: {
-          masterOff: '全局开关已关闭，自动切换暂不生效；如需始终使用 BPS，请将模式设为「始终使用 BPS」。',
-          masterOffShort: '全局开关已关闭，暂不切换'
-        },
-        dialog: {
-          addTitle: '添加 BPS 账号',
-          editTitle: 'BPS 设置 · {account}',
-          account: 'OAuth 账号',
-          pickAccount: '选择账号',
-          noCandidates: '所有 OpenAI OAuth 账号均已添加。',
-          mode: '模式',
-          probeModel: '探测模型',
-          pickModel: '选择模型',
-          defaultModel: '默认探测模型（gpt-5.4）',
-          probeModelHint: '仅用于发送探测请求。切换作用于整个账号，与降智测试的测试对象相互独立。',
-          thresholds: '切换阈值',
-          failure: '连续异常次数（切换至 BPS）',
-          recovery: '连续正常次数（切回原线路）',
-          interval: '探测间隔',
-          thresholdsManual: '切换阈值仅在「自动切换」模式下生效，当前配置将保留。',
-          remove: '移除该账号',
-          apply: '应用',
-          applyHint: '应用后需点击页面上的「保存更改」才会生效。'
-        },
-        history: {
-          title: '最近记录',
-          empty: '暂无该账号的探测或操作记录。',
-          probe: '探测：{status}',
-          reset: '管理员已恢复 BPS 状态'
-        },
-        reset: '恢复',
-        resetTitle: '恢复该账号的 BPS 状态？',
-        resetBody: '将清空 {account} 的 BPS 状态、403 锁定与计数，之后由探测重新判定。此操作立即生效，无需保存。',
-        resetDone: 'BPS 状态已恢复',
-        resetFailed: '恢复失败',
-        removeTitle: '移除该账号的 BPS 配置？',
-        removeBody: '{account} 将从列表中移除，保存后使用原线路。降智测试中该账号的测试对象不受影响。',
-        empty: '尚未添加账号。BPS 仅支持直连 OpenAI OAuth 账号，点击「添加账号」开始配置。',
-        emptyNoOAuth: '暂无可用的 OpenAI OAuth 账号。BPS 仅支持直连 OpenAI OAuth 账号。',
-        legacyRoutes: '{count} 个测试对象仍保留升级前的模型级 BPS 配置，本页面不会修改。'
       },
       decisions: {
         title: '最近调度记录',

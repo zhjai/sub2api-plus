@@ -16,35 +16,6 @@ type openAIEvalRepository struct {
 	db *sql.DB
 }
 
-// An account-scoped BPS entry supersedes the legacy per-model flags. If that
-// account entry is later deleted, leaving those historical flags enabled would
-// silently turn BPS back on through the compatibility fallback. Clear only the
-// removed accounts' legacy flags while preserving unrelated old clients and
-// routes.
-func disableLegacyBPSForRemovedAccounts(previous, next *service.OpenAIEvalConfig) {
-	if previous == nil || next == nil || len(previous.BPSAccounts) == 0 {
-		return
-	}
-	configured := make(map[int64]struct{}, len(next.BPSAccounts))
-	for _, item := range next.BPSAccounts {
-		configured[item.AccountID] = struct{}{}
-	}
-	removed := make(map[int64]struct{})
-	for _, item := range previous.BPSAccounts {
-		if _, ok := configured[item.AccountID]; !ok {
-			removed[item.AccountID] = struct{}{}
-		}
-	}
-	for i := range next.Accounts {
-		route := &next.Accounts[i]
-		if _, ok := removed[route.AccountID]; !ok {
-			continue
-		}
-		route.BPSMode = service.OpenAIEvalBPSModeForceOff
-		route.BPSAuto = false
-	}
-}
-
 func openAIEvalInitialNextRun(now time.Time, intervalSeconds, jitterSeconds int) (time.Time, error) {
 	jitter := 0
 	if jitterSeconds > 0 {
@@ -93,22 +64,6 @@ func (r *openAIEvalRepository) GetConfig(ctx context.Context) (*service.OpenAIEv
 			return nil, fmt.Errorf("scan OpenAI evaluation schedule state: %w", err)
 		}
 		if testType == service.OpenAIEvalTypeStateProbe && effort == service.OpenAIEvalBPSAccountEffort {
-			for i := range cfg.BPSAccounts {
-				item := &cfg.BPSAccounts[i]
-				if item.AccountID != accountID || !strings.EqualFold(service.OpenAIEvalBPSProbeModel(item.ProbeModel), model) {
-					continue
-				}
-				item.LastRunAt, item.NextRunAt = nil, nil
-				if lastRun.Valid {
-					value := lastRun.Time
-					item.LastRunAt = &value
-				}
-				if nextRun.Valid {
-					value := nextRun.Time
-					item.NextRunAt = &value
-				}
-				break
-			}
 			continue
 		}
 		for i := range cfg.Accounts {
@@ -163,7 +118,7 @@ func (r *openAIEvalRepository) SaveConfig(ctx context.Context, cfg *service.Open
 	if cfg.Revision != 0 && cfg.Revision != previous.Revision {
 		return service.ErrOpenAIEvalConfigRevisionConflict
 	}
-	disableLegacyBPSForRemovedAccounts(&previous, cfg)
+	service.RetireOpenAIEvalBPS(cfg)
 	if cfg.MaxRequestAttempts == 0 {
 		cfg.MaxRequestAttempts = previous.MaxRequestAttempts
 		if cfg.MaxRequestAttempts == 0 {
@@ -190,19 +145,11 @@ func (r *openAIEvalRepository) SaveConfig(ctx context.Context, cfg *service.Open
 	if err != nil {
 		return fmt.Errorf("lock OpenAI evaluation schedule keys: %w", err)
 	}
-	keep := make(map[string]struct{}, len(cfg.Accounts)*4+len(cfg.BPSAccounts))
+	keep := make(map[string]struct{}, len(cfg.Accounts)*4)
 	for _, route := range cfg.Accounts {
 		for _, testType := range []string{service.OpenAIEvalTypeCandy, service.OpenAIEvalTypeFingerprint, service.OpenAIEvalTypeModelTrace, service.OpenAIEvalTypeStateProbe} {
 			keep[openAIEvalScheduleKey(route.AccountID, testType, route.RequestedModel, route.ReasoningEffort)] = struct{}{}
 		}
-	}
-	for _, item := range cfg.BPSAccounts {
-		mode := strings.ToLower(strings.TrimSpace(item.Mode))
-		if !cfg.BPSAutoEnabled || mode != service.OpenAIEvalBPSModeAuto {
-			continue
-		}
-		probeModel := service.OpenAIEvalBPSProbeModel(item.ProbeModel)
-		keep[openAIEvalScheduleKey(item.AccountID, service.OpenAIEvalTypeStateProbe, probeModel, service.OpenAIEvalBPSAccountEffort)] = struct{}{}
 	}
 	type existingScheduleKey struct {
 		accountID int64
@@ -278,40 +225,6 @@ func (r *openAIEvalRepository) SaveConfig(ctx context.Context, cfg *service.Open
 				item.schedule.SampleMode, item.schedule.SampleCount, nextRun); err != nil {
 				return fmt.Errorf("save OpenAI evaluation schedule: %w", err)
 			}
-		}
-	}
-	for _, item := range cfg.BPSAccounts {
-		probeModel := service.OpenAIEvalBPSProbeModel(item.ProbeModel)
-		enabled := cfg.BPSAutoEnabled && strings.EqualFold(strings.TrimSpace(item.Mode), service.OpenAIEvalBPSModeAuto)
-		nextRun := any(nil)
-		if enabled {
-			delay, err := service.OpenAIEvalIntervalDuration(item.IntervalSeconds)
-			if err != nil {
-				return fmt.Errorf("invalid OpenAI BPS account interval: %w", err)
-			}
-			nextRun = time.Now().UTC().Add(delay)
-		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO openai_eval_schedule_state (
-				account_id, test_type, requested_model, reasoning_effort, enabled,
-				interval_seconds, jitter_seconds, sample_mode, sample_count, next_run_at, updated_at
-			) VALUES ($1,$2,$3,$4,$5,$6,0,'',0,$7,NOW())
-			ON CONFLICT (account_id, test_type, requested_model, reasoning_effort) DO UPDATE SET
-				enabled=EXCLUDED.enabled,
-				next_run_at=CASE
-					WHEN openai_eval_schedule_state.enabled IS DISTINCT FROM EXCLUDED.enabled
-						OR openai_eval_schedule_state.interval_seconds IS DISTINCT FROM EXCLUDED.interval_seconds
-						THEN EXCLUDED.next_run_at
-					ELSE openai_eval_schedule_state.next_run_at
-				END,
-				interval_seconds=EXCLUDED.interval_seconds,
-				jitter_seconds=0,
-				sample_mode='',
-				sample_count=0,
-				updated_at=NOW()`,
-			item.AccountID, service.OpenAIEvalTypeStateProbe, probeModel, service.OpenAIEvalBPSAccountEffort,
-			enabled, item.IntervalSeconds, nextRun); err != nil {
-			return fmt.Errorf("save OpenAI BPS account schedule: %w", err)
 		}
 	}
 	var after any
@@ -547,7 +460,7 @@ func (r *openAIEvalRepository) ClaimDueSchedules(ctx context.Context, now time.T
 	rows, err := tx.QueryContext(ctx, `
 		SELECT account_id, test_type, requested_model, reasoning_effort, sample_mode, sample_count, interval_seconds, jitter_seconds
 		FROM openai_eval_schedule_state
-		WHERE enabled = TRUE AND next_run_at <= $1
+		WHERE enabled = TRUE AND next_run_at <= $1 AND reasoning_effort <> '__bps_account__'
 		ORDER BY next_run_at, account_id
 		LIMIT $2
 		FOR UPDATE SKIP LOCKED`, now, limit)

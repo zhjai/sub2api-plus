@@ -254,43 +254,6 @@ func OpenAIEvalRouteHealthKey(model, effort string) string {
 	return strings.ToLower(strings.TrimSpace(model)) + "\x00" + strings.ToLower(strings.TrimSpace(effort))
 }
 
-func normalizeOpenAIEvalBPSMode(mode string, legacyAuto bool) string {
-	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case OpenAIEvalBPSModeForceOn:
-		return OpenAIEvalBPSModeForceOn
-	case OpenAIEvalBPSModeForceOff:
-		return OpenAIEvalBPSModeForceOff
-	case OpenAIEvalBPSModeAuto:
-		return OpenAIEvalBPSModeAuto
-	default:
-		if legacyAuto {
-			return OpenAIEvalBPSModeAuto
-		}
-		return OpenAIEvalBPSModeForceOff
-	}
-}
-
-// OpenAIEvalBPSProbeModel returns the model used by an account-scoped BPS
-// health probe. An empty admin value intentionally means the stable native
-// OpenAI test model, while the selected model never changes the account-wide
-// BPS state scope.
-func OpenAIEvalBPSProbeModel(model string) string {
-	model = strings.TrimSpace(model)
-	if model != "" {
-		return model
-	}
-	return openai.DefaultTestModel
-}
-
-func openAIEvalBPSModeEnabled(route OpenAIEvalAccountConfig) bool {
-	switch normalizeOpenAIEvalBPSMode(route.BPSMode, route.BPSAuto) {
-	case OpenAIEvalBPSModeForceOn, OpenAIEvalBPSModeAuto:
-		return true
-	default:
-		return false
-	}
-}
-
 func normalizeOpenAIEvalSchedulingPolicy(policy string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(policy)) {
 	case "", OpenAIEvalSchedulingPolicyCostFirst, OpenAIEvalSchedulingPolicyStabilityFirst, OpenAIEvalSchedulingPolicyAvoidDegradation, OpenAIEvalSchedulingPolicyCustomBalance:

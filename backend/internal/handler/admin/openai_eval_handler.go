@@ -3,6 +3,7 @@ package admin
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"sort"
@@ -44,7 +45,12 @@ func (h *AccountHandler) UpdateOpenAIEvalConfig(c *gin.Context) {
 	}
 	var config service.OpenAIEvalConfig
 	if err := json.Unmarshal(payload, &config); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid evaluation config"})
+		message := "invalid evaluation config"
+		var typeError *json.UnmarshalTypeError
+		if errors.As(err, &typeError) {
+			message = fmt.Sprintf("invalid evaluation config: field %s must be %s (received %s)", typeError.Field, typeError.Type, typeError.Value)
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": message})
 		return
 	}
 	if _, present := fields["max_request_attempts"]; present && (config.MaxRequestAttempts < 1 || config.MaxRequestAttempts > 10) {
@@ -56,9 +62,9 @@ func (h *AccountHandler) UpdateOpenAIEvalConfig(c *gin.Context) {
 		return
 	}
 	// Whole-object saves from older admin clients predate revision, policy, and
-	// explicit BPS mode fields. Merge only omitted fields from the current
+	// newer settings. Merge only omitted fields from the current
 	// projection so an old client cannot silently erase newer controls. Explicit
-	// false, empty arrays, or an empty BPS mode remain valid clear operations.
+	// false or empty arrays remain valid clear operations.
 	current, err := h.openAIEvalService.GetConfig(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load current evaluation config"})
@@ -75,7 +81,7 @@ func (h *AccountHandler) UpdateOpenAIEvalConfig(c *gin.Context) {
 		return
 	}
 	// SaveConfig strips runtime fields before persistence. Return a fresh
-	// projection so BPS state and current account eligibility remain visible
+	// projection so current account eligibility remains visible
 	// immediately after saving.
 	saved, err := h.openAIEvalService.GetConfig(c.Request.Context())
 	if err != nil {
@@ -108,9 +114,6 @@ func mergeOpenAIEvalConfigOmittedFields(incoming, current *service.OpenAIEvalCon
 	}
 	if _, ok := fields["effects_enabled"]; !ok {
 		incoming.EffectsEnabled = current.EffectsEnabled
-	}
-	if _, ok := fields["bps_auto_enabled"]; !ok {
-		incoming.BPSAutoEnabled = current.BPSAutoEnabled
 	}
 	if _, ok := fields["scheduling_policy"]; !ok {
 		incoming.SchedulingPolicy = current.SchedulingPolicy
@@ -184,25 +187,10 @@ func mergeOpenAIEvalConfigOmittedFields(incoming, current *service.OpenAIEvalCon
 			}
 		}
 	}
-	if _, ok := fields["bps_accounts"]; !ok {
-		incoming.BPSAccounts = current.BPSAccounts
+	if _, ok := fields["accounts"]; !ok {
+		incoming.Accounts = append([]service.OpenAIEvalAccountConfig(nil), current.Accounts...)
 	}
-	if raw, ok := fields["accounts"]; !ok {
-		incoming.Accounts = current.Accounts
-	} else {
-		var rawRoutes []map[string]json.RawMessage
-		if json.Unmarshal(raw, &rawRoutes) == nil {
-			byKey := make(map[string]service.OpenAIEvalAccountConfig, len(current.Accounts))
-			for _, route := range current.Accounts {
-				byKey[openAIEvalRouteConfigKey(route)] = route
-			}
-			for i := range incoming.Accounts {
-				if previous, exists := byKey[openAIEvalRouteConfigKey(incoming.Accounts[i])]; exists {
-					mergeOpenAIEvalRouteBPSFields(&incoming.Accounts[i], previous, rawRoutesField(rawRoutes, i))
-				}
-			}
-		}
-	}
+	service.RetireOpenAIEvalBPS(incoming)
 }
 
 func cloneBoolPointer(value *bool) *bool {
@@ -237,7 +225,7 @@ func openAIEvalAccountPriorityRuleMergeKey(rule service.OpenAIEvalAccountPriorit
 func openAIEvalAccountPriorityRuleBaseKey(rule service.OpenAIEvalAccountPriorityRule) string {
 	models := make([]string, 0, len(rule.RequestedModels))
 	for _, model := range rule.RequestedModels {
-		models = append(models, strings.ToLower(strings.TrimSpace(model)))
+		models = append(models, strings.ToLower(service.CanonicalOpenAIEvalAccountRuleModel(model)))
 	}
 	sort.Strings(models)
 	return strconv.FormatInt(rule.AccountID, 10) + "|" + strings.Join(models, ",")
@@ -264,41 +252,11 @@ func mergeOpenAIEvalQualityWeight(incoming *service.OpenAIEvalPolicyWeights, cur
 	}
 }
 
-func mergeOpenAIEvalRouteBPSFields(incoming *service.OpenAIEvalAccountConfig, previous service.OpenAIEvalAccountConfig, fields map[string]json.RawMessage) {
-	if incoming == nil {
-		return
-	}
-	if _, modePresent := fields["bps_mode"]; modePresent {
-		// An explicit mode, including an empty string, is a deliberate write.
-		// The service normalizer turns an empty mode into force_off.
-		return
-	}
-	if rawAuto, autoPresent := fields["bps_auto"]; autoPresent {
-		var legacyAuto bool
-		if err := json.Unmarshal(rawAuto, &legacyAuto); err == nil {
-			incoming.BPSAuto = legacyAuto
-			if legacyAuto {
-				incoming.BPSMode = service.OpenAIEvalBPSModeAuto
-			} else {
-				incoming.BPSMode = service.OpenAIEvalBPSModeForceOff
-			}
-		}
-		return
-	}
-	// Neither field was sent by the old client. Preserve both stored values.
-	incoming.BPSMode = previous.BPSMode
-	incoming.BPSAuto = previous.BPSAuto
-}
-
 func rawRoutesField(routes []map[string]json.RawMessage, index int) map[string]json.RawMessage {
 	if index < 0 || index >= len(routes) || routes[index] == nil {
 		return map[string]json.RawMessage{}
 	}
 	return routes[index]
-}
-
-func openAIEvalRouteConfigKey(route service.OpenAIEvalAccountConfig) string {
-	return strconv.FormatInt(route.AccountID, 10) + "\x00" + strings.ToLower(strings.TrimSpace(route.RequestedModel)) + "\x00" + strings.ToLower(strings.TrimSpace(route.ReasoningEffort))
 }
 
 func (h *AccountHandler) RunOpenAIEval(c *gin.Context) {
@@ -322,28 +280,6 @@ func (h *AccountHandler) RunOpenAIEval(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, run)
-}
-
-func (h *AccountHandler) ResetOpenAIEvalBPSState(c *gin.Context) {
-	if h.openAIEvalService == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "OpenAI evaluation service is unavailable"})
-		return
-	}
-	var request struct {
-		AccountID      int64  `json:"account_id"`
-		RequestedModel string `json:"requested_model"`
-	}
-	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid BPS reset request"})
-		return
-	}
-	actorID, _ := c.Request.Context().Value(ctxkey.UserID).(int64)
-	state, err := h.openAIEvalService.ResetOpenAIBPSState(c.Request.Context(), request.AccountID, request.RequestedModel, actorID)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"state": state})
 }
 
 func (h *AccountHandler) ListOpenAIEvalRuns(c *gin.Context) {

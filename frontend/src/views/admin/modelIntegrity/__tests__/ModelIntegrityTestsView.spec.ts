@@ -512,8 +512,8 @@ describe('ModelIntegrityTestsView target editing', () => {
     expect(edited.modeltrace_schedule).toEqual(before.accounts[0].modeltrace_schedule)
     expect(edited.state_probe_schedule).toEqual(before.accounts[0].state_probe_schedule)
     expect(edited.bps_mode).toBe('force_off')
-    expect(payload.bps_auto_enabled).toBe(true)
-    expect(payload.bps_accounts).toEqual(bpsAccounts)
+    expect(payload.bps_auto_enabled).toBe(false)
+    expect(payload.bps_accounts).toEqual([])
     // A legacy rule without the switch is sent back explicitly enabled, which the server reads the same way.
     expect(payload.policies).toEqual([{ requested_model: 'gpt-5', reasoning_effort: 'high', policy: 'cost_first', enabled: true }])
     wrapper.unmount()
@@ -600,8 +600,15 @@ describe('ModelIntegrityTestsView target editing', () => {
     await reopened.findAll('[data-testid="target"]')[1].trigger('click')
     await reopened.get('[data-testid="edit-target"]').trigger('click')
     await flushPromises()
+    expect($<HTMLSelectElement>('[data-testid="edit-effort"]')!.value).toBe('')
     await choose('[data-testid="edit-effort"]', 'high')
+    expect($<HTMLButtonElement>('[data-testid="edit-submit"]')!.disabled).toBe(false)
+    const formIDs = [...document.querySelectorAll('form[id^="edit-target-form-"]')].map(form => form.id)
+    expect(new Set(formIDs).size).toBe(formIDs.length)
+    expect($<HTMLButtonElement>('[data-testid="edit-submit"]')!.form).toBe($<HTMLFormElement>('form[id^="edit-target-form-"]'))
     await apply()
+    expect(reopened.get('[data-testid="target"][aria-current="true"]').text()).toContain('gpt-5 · high')
+    expect(reopened.get('[data-testid="model-integrity-save"]').attributes('disabled')).toBeUndefined()
     await reopened.get('[data-testid="model-integrity-save"]').trigger('click')
     await flushPromises()
     expect(api.saveOpenAIEvalConfig).toHaveBeenCalledTimes(2)
@@ -636,7 +643,7 @@ describe('ModelIntegrityTestsView target editing', () => {
     expect(edited.candy_schedule).toEqual(before.candy_schedule)
     expect(edited.fingerprint_schedule).toEqual(before.fingerprint_schedule)
     expect(edited.modeltrace_schedule).toEqual(before.modeltrace_schedule)
-    expect(payload.bps_accounts).toEqual(bpsAccounts)
+    expect(payload.bps_accounts).toEqual([])
     wrapper.unmount()
   })
 
@@ -664,12 +671,12 @@ describe('ModelIntegrityTestsView target editing', () => {
     const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
     const before = config.accounts[1]
     const edited = payload.accounts[1]
-    expect(edited).toMatchObject({ account_id: 11, requested_model: 'gpt-5.1', reasoning_effort: 'high', bps_mode: 'auto', bps_auto: true })
+    expect(edited).toMatchObject({ account_id: 11, requested_model: 'gpt-5.1', reasoning_effort: 'high', bps_mode: 'force_off', bps_auto: false })
     expect(edited.state_probe_schedule).toEqual(before.state_probe_schedule)
     expect(edited.candy_schedule).toEqual(before.candy_schedule)
     expect(edited.fingerprint_schedule).toEqual(before.fingerprint_schedule)
     expect(edited.modeltrace_schedule).toEqual(before.modeltrace_schedule)
-    expect(payload.bps_accounts).toEqual(bpsAccounts)
+    expect(payload.bps_accounts).toEqual([])
     wrapper.unmount()
   })
 
@@ -688,7 +695,7 @@ describe('ModelIntegrityTestsView target editing', () => {
     await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
     await flushPromises()
     const edited = (api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig).accounts[1]
-    expect(edited).toMatchObject({ requested_model: 'gpt-5.1', reasoning_effort: '', bps_mode: 'auto' })
+    expect(edited).toMatchObject({ requested_model: 'gpt-5.1', reasoning_effort: '', bps_mode: 'force_off' })
     expect(edited.state_probe_schedule.enabled).toBe(true)
     wrapper.unmount()
   })

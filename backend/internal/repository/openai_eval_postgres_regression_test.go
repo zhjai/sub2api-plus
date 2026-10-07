@@ -48,24 +48,27 @@ func TestR8OpenAIEvalPostgresTargetRemoval(t *testing.T) {
 		BPSAccounts: []service.OpenAIEvalBPSAccountConfig{{AccountID: 17, ProbeModel: "gpt-5.1", Mode: service.OpenAIEvalBPSModeAuto, IntervalSeconds: 300}},
 	}
 	cfg.Accounts[0].CandySchedule.SampleCount = 3
+	cfg.Accounts[0].StateProbeSchedule = service.OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 300}
 	require.NoError(t, repo.SaveConfig(ctx, cfg, 9))
 	loaded, err := repo.GetConfig(ctx)
 	require.NoError(t, err)
 	require.Len(t, loaded.Accounts, 2)
 	require.Equal(t, 3, loaded.Accounts[0].CandySchedule.SampleCount)
 	require.NotNil(t, loaded.Accounts[0].CandySchedule.NextRunAt)
-	require.NotNil(t, loaded.BPSAccounts[0].NextRunAt)
-	targetNext, bpsNext := *loaded.Accounts[0].CandySchedule.NextRunAt, *loaded.BPSAccounts[0].NextRunAt
+	require.Empty(t, loaded.BPSAccounts, "retired BPS entries cannot schedule probes")
+	require.False(t, loaded.BPSAutoEnabled)
+	require.NotNil(t, loaded.Accounts[0].StateProbeSchedule.NextRunAt)
+	targetNext, probeNext := *loaded.Accounts[0].CandySchedule.NextRunAt, *loaded.Accounts[0].StateProbeSchedule.NextRunAt
 	for _, count := range []int{1, 0, 0} {
 		loaded.Accounts = loaded.Accounts[:count]
 		require.NoError(t, repo.SaveConfig(ctx, loaded, 9), "remove targets, including idempotent empty save")
 		loaded, err = repo.GetConfig(ctx)
 		require.NoError(t, err)
 		require.Len(t, loaded.Accounts, count)
-		require.Len(t, loaded.BPSAccounts, 1)
-		require.True(t, bpsNext.Equal(*loaded.BPSAccounts[0].NextRunAt), "BPS schedule must not be reset")
+		require.Empty(t, loaded.BPSAccounts)
 		if count == 1 {
 			require.True(t, targetNext.Equal(*loaded.Accounts[0].CandySchedule.NextRunAt), "remaining target retains next run")
+			require.True(t, probeNext.Equal(*loaded.Accounts[0].StateProbeSchedule.NextRunAt), "independent State Probe schedule must not be reset")
 		}
 		var state string
 		require.NoError(t, db.QueryRowContext(ctx, "SELECT extra::text FROM accounts WHERE id=17").Scan(&state))
@@ -73,7 +76,7 @@ func TestR8OpenAIEvalPostgresTargetRemoval(t *testing.T) {
 	}
 	var enabled int
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT count(*) FROM openai_eval_schedule_state WHERE enabled`).Scan(&enabled))
-	require.Equal(t, 1, enabled, "only the independent BPS probe remains enabled")
+	require.Zero(t, enabled, "removing all test targets retires all automatic schedules")
 	_, err = db.ExecContext(ctx, `UPDATE openai_eval_schedule_state SET sample_count=11`)
 	require.Error(t, err, "migration enforces Candy sample count bounds")
 }

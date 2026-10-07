@@ -10,7 +10,7 @@ import type { EvalTestType } from './modelIntegrity'
  * when the account has no mapping); every coverage check uses the actual
  * upstream model that name resolves to. Candy works for any catalog model;
  * Fingerprint and ModelTrace need a versioned baseline for the actual model.
- * The Codex ticket probe and BPS are OpenAI OAuth features and never apply.
+ * The Codex ticket probe is an OpenAI OAuth feature and never applies.
  */
 
 export type PrismCatalogState =

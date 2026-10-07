@@ -6,8 +6,6 @@ import type {
   OpenAIEvalAccountRuleConditionMetric,
   OpenAIEvalAccountRuleConditionOperator,
   OpenAIEvalAccountPriorityRule,
-  OpenAIEvalBPSAccountConfig,
-  OpenAIEvalBPSMode,
   OpenAIEvalConfig,
   OpenAIEvalEffectiveStatus,
   OpenAIEvalModelCatalog,
@@ -172,13 +170,8 @@ export function maxScheduleJitterSeconds(intervalSeconds: number): number {
   return Math.min(Math.floor(interval / 2), HOUR, storageHeadroom)
 }
 
-export function bpsModeOf(route: Pick<OpenAIEvalRouteConfig, 'bps_mode' | 'bps_auto'>): OpenAIEvalBPSMode {
-  if (route.bps_mode === 'auto' || route.bps_mode === 'force_on' || route.bps_mode === 'force_off') return route.bps_mode
-  return route.bps_auto ? 'auto' : 'force_off'
-}
-
 /**
- * BPS and State Probe only exist for direct OpenAI OAuth accounts. Eligibility
+ * State Probe only exists for direct OpenAI OAuth accounts. Eligibility
  * is an account capability; State Probe always runs on the account's default
  * effort, whatever effort the target itself tests.
  */
@@ -211,8 +204,8 @@ export function normalizeRoute(route: OpenAIEvalRouteConfig): OpenAIEvalRouteCon
   route.modeltrace_schedule ||= emptySchedule('modeltrace')
   route.state_probe_schedule ||= emptySchedule('state_probe')
   route.reasoning_effort = route.reasoning_effort ?? ''
-  route.bps_mode = bpsModeOf(route)
-  route.bps_auto = route.bps_mode !== 'force_off'
+  route.bps_mode = 'force_off'
+  route.bps_auto = false
   for (const type of TEST_TYPES) normalizeSchedule(scheduleOf(route, type), type)
   return route
 }
@@ -240,11 +233,26 @@ export function isRuleEnabled(rule: { enabled?: boolean }): boolean {
   return rule.enabled !== false
 }
 
+export function accountRuleModelID(model: string): string {
+  const id = model.trim()
+  switch (id.toLowerCase()) {
+    case 'gpt-5.6':
+    case 'gpt-5.6-sol': return 'gpt-5.6-sol'
+    case 'gpt-6':
+    case 'gpt-6-astra': return 'gpt-6-astra'
+    default: return id
+  }
+}
+
+function accountRuleModels(models: string[] = []): string[] {
+  return [...new Set(models.map(accountRuleModelID).filter(Boolean))]
+}
+
 export function normalizeAccountPriorityRule(rule: OpenAIEvalAccountPriorityRule): OpenAIEvalAccountPriorityRule {
   return {
     account_id: rule.account_id,
     priority: rule.priority,
-    requested_models: [...(rule.requested_models ?? [])],
+    requested_models: accountRuleModels(rule.requested_models),
     enabled: isRuleEnabled(rule),
     // Kept exactly as loaded, even when out of range: validation reports it.
     ...(rule.condition ? { condition: { ...rule.condition } } : {})
@@ -258,7 +266,7 @@ export function normalizeAccountPriorityRule(rule: OpenAIEvalAccountPriorityRule
  * than conditions), so null is the only way to clear one.
  */
 function accountPriorityRulePayload(rule: OpenAIEvalAccountPriorityRule): OpenAIEvalAccountPriorityRule {
-  const models = (rule.requested_models ?? []).map(model => model.trim()).filter(Boolean)
+  const models = accountRuleModels(rule.requested_models)
   return {
     account_id: rule.account_id,
     priority: rule.priority,
@@ -334,7 +342,7 @@ export function accountPriorityRuleIssues(rules: OpenAIEvalAccountPriorityRule[]
   const issues = new Map<number, AccountPriorityRuleIssue>()
   const scopes = new Map<number, Set<string>>()
   rules.forEach((rule, index) => {
-    const models = (rule.requested_models ?? []).map(model => model.trim()).filter(Boolean)
+    const models = accountRuleModels(rule.requested_models)
     if (!(rule.account_id > 0)) issues.set(index, 'account')
     else if (typeof rule.priority !== 'number' || !Number.isSafeInteger(rule.priority)) issues.set(index, 'priority')
     else if (pickingModels(rule) && !models.length) issues.set(index, 'models')
@@ -360,7 +368,7 @@ export function toSavePayload(config: OpenAIEvalConfig): OpenAIEvalConfig {
   return {
     revision: config.revision,
     effects_enabled: config.effects_enabled,
-    bps_auto_enabled: config.bps_auto_enabled,
+    bps_auto_enabled: false, // retired; never reactivate legacy saved switches
     scheduling_policy: config.scheduling_policy ?? '',
     custom_balance: customBalancePayload(config.custom_balance),
     // Copied as edited: the scheduling page refuses to save invalid values,
@@ -375,83 +383,15 @@ export function toSavePayload(config: OpenAIEvalConfig): OpenAIEvalConfig {
         : {})
     })),
     account_priority_rules: (config.account_priority_rules ?? []).map(accountPriorityRulePayload),
-    bps_accounts: (config.bps_accounts ?? []).map(bpsAccountPayload),
+    bps_accounts: [],
     max_request_attempts: normalizeMaxRequestAttempts(config.max_request_attempts),
     quality_refresh_interval_seconds: normalizeQualityRefreshInterval(config.quality_refresh_interval_seconds),
     accounts: config.accounts.map(route => {
-      const mode = bpsModeOf(route)
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const { bps_state, direct_oauth_eligible, ...rest } = route
-      return { ...rest, bps_mode: mode, bps_auto: mode !== 'force_off' }
+      return { ...rest, bps_mode: 'force_off', bps_auto: false }
     })
   }
-}
-
-// ---------------------------------------------------------------------------
-// BPS accounts (account-scoped, independent of test targets)
-// ---------------------------------------------------------------------------
-
-export const BPS_MODES: OpenAIEvalBPSMode[] = ['auto', 'force_on', 'force_off']
-export const BPS_THRESHOLD_MIN = 1
-export const BPS_THRESHOLD_MAX = 10
-export const BPS_DEFAULT_FAILURE_THRESHOLD = 3
-export const BPS_DEFAULT_RECOVERY_THRESHOLD = 2
-/** Same lower bound as the State Probe schedule (OpenAIEvalMinStateProbeInterval). */
-export const BPS_INTERVALS = [5 * 60, 10 * 60, 30 * 60, HOUR, 6 * HOUR, 12 * HOUR, DAY]
-
-function clampInt(value: unknown, min: number, max: number, fallback: number): number {
-  const raw = Number(value)
-  if (!Number.isFinite(raw)) return fallback
-  return Math.min(Math.max(Math.trunc(raw), min), max)
-}
-
-export function newBPSAccount(accountID: number, probeModel = ''): OpenAIEvalBPSAccountConfig {
-  return {
-    account_id: accountID,
-    probe_model: probeModel,
-    mode: 'auto',
-    failure_threshold: BPS_DEFAULT_FAILURE_THRESHOLD,
-    recovery_threshold: BPS_DEFAULT_RECOVERY_THRESHOLD,
-    interval_seconds: BPS_INTERVALS[0]
-  }
-}
-
-export function normalizeBPSAccount(item: OpenAIEvalBPSAccountConfig): OpenAIEvalBPSAccountConfig {
-  item.mode = BPS_MODES.includes(item.mode) ? item.mode : 'force_off'
-  item.probe_model = (item.probe_model ?? '').trim()
-  item.failure_threshold = clampInt(item.failure_threshold, BPS_THRESHOLD_MIN, BPS_THRESHOLD_MAX, BPS_DEFAULT_FAILURE_THRESHOLD)
-  item.recovery_threshold = clampInt(item.recovery_threshold, BPS_THRESHOLD_MIN, BPS_THRESHOLD_MAX, BPS_DEFAULT_RECOVERY_THRESHOLD)
-  item.interval_seconds = clampInt(item.interval_seconds, BPS_INTERVALS[0], MAX_INTERVAL_SECONDS, BPS_INTERVALS[0])
-  item.degraded_streak = Number(item.degraded_streak) || 0
-  item.healthy_streak = Number(item.healthy_streak) || 0
-  return item
-}
-
-/** Only the editable fields; runtime state is owned by the server. */
-export function bpsAccountPayload(item: OpenAIEvalBPSAccountConfig): OpenAIEvalBPSAccountConfig {
-  return {
-    account_id: item.account_id,
-    probe_model: item.probe_model ?? '',
-    mode: item.mode,
-    failure_threshold: item.failure_threshold,
-    recovery_threshold: item.recovery_threshold,
-    interval_seconds: item.interval_seconds
-  }
-}
-
-export type BPSLane = 'bps' | 'native' | 'locked' | 'inactive'
-
-/** Which route the account uses right now, from the admin's point of view. */
-export function bpsAccountLane(item: OpenAIEvalBPSAccountConfig, autoEnabled: boolean): BPSLane {
-  if (item.disabled_reason?.trim() || item.state === 'locked') return 'locked'
-  if (item.mode === 'force_off') return 'inactive'
-  if (item.mode === 'force_on') return 'bps'
-  if (!autoEnabled) return 'inactive'
-  return item.active || item.state === 'bps' ? 'bps' : 'native'
-}
-
-export function canResetBPSAccount(item: OpenAIEvalBPSAccountConfig): boolean {
-  return Boolean(item.active || item.disabled_reason || item.state === 'bps' || item.state === 'locked' || item.degraded_streak || item.healthy_streak)
 }
 
 const roundWeight = (value: number) => Math.round(value * 1e6) / 1e6
@@ -1114,13 +1054,6 @@ const KNOWN_CANDIDATE_REASONS = new Set([
 export function candidateReasonKey(code: string | undefined): string | null {
   if (!code) return null
   return KNOWN_CANDIDATE_REASONS.has(code) ? code : KNOWN_DECISIONS.has(code) ? `decision.${code}` : null
-}
-
-const BPS_DISABLED_REASONS = new Set(['upstream_403'])
-
-export function bpsDisabledKey(reason: string | undefined): string {
-  if (!reason) return ''
-  return BPS_DISABLED_REASONS.has(reason.trim().toLowerCase()) ? reason.trim().toLowerCase() : 'other'
 }
 
 /** Sort candidates: chosen first, then everyone who could serve by score, then excluded ones. */
