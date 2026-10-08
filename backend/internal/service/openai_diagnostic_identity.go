@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -12,7 +13,12 @@ func prepareOpenAIOAuthDiagnosticPayload(payload map[string]any, credential *Acc
 	if session == "" {
 		session = uuid.NewString()
 	}
-	payload["client_metadata"] = map[string]any{"session_id": session}
+	metadata, _ := payload["client_metadata"].(map[string]any)
+	if metadata == nil {
+		metadata = make(map[string]any)
+		payload["client_metadata"] = metadata
+	}
+	metadata["session_id"] = session
 	payload["prompt_cache_key"] = session
 	applyCodexAccountIdentityClientMetadataMap(payload, credential, 0)
 	ids := resolveCodexFingerprintIDsFromRequest(credential, openAIDiagnosticSessionHeaders(session))
@@ -20,13 +26,34 @@ func prepareOpenAIOAuthDiagnosticPayload(payload map[string]any, credential *Acc
 		applyCodexFingerprintClientMetadata(payload, ids)
 		applyCodexFingerprintPromptCacheKey(payload, ids)
 	}
+	if turn, ok := metadata["turn_id"].(string); ok && turn != "" {
+		metadata["root_turn_id"] = turn
+		raw, _ := metadata[openAIWSTurnMetadataHeader].(string)
+		var embedded map[string]any
+		if json.Unmarshal([]byte(raw), &embedded) == nil && embedded != nil {
+			embedded["root_turn_id"] = turn
+			if rebuilt, err := marshalCodexTurnMetadata(embedded); err == nil {
+				metadata[openAIWSTurnMetadataHeader] = string(rebuilt)
+			}
+		}
+		if input, ok := payload["input"].([]any); ok {
+			for _, raw := range input {
+				item, _ := raw.(map[string]any)
+				if itemMetadata, ok := item["internal_chat_message_metadata_passthrough"].(map[string]any); ok {
+					if _, exists := itemMetadata["turn_id"]; exists {
+						itemMetadata["turn_id"] = turn
+					}
+				}
+			}
+		}
+	}
 	return ids
 }
 
 func finalizeOpenAIOAuthDiagnosticHeaders(headers http.Header, credential *Account, session string, body []byte, staged ...*codexFingerprintIDs) {
 	ensureCodexIdentityHeaders(headers)
 	setOpenAIChatGPTAccountHeaders(headers, credential)
-	if session != "" {
+	if session != "" && !applyOpenAIEvalCodexPayloadHeaders(headers, body) {
 		headers.Set("session_id", isolateOpenAIUpstreamSessionID(0, credential, session))
 		headers.Set("session-id", session)
 		applyCodexAccountIdentityHeaders(headers, credential, 0)

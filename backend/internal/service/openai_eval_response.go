@@ -208,18 +208,20 @@ type openAIEvalWireError struct {
 	Type    string `json:"type"`
 	Message string `json:"message"`
 }
-type openAIEvalWireResponse struct {
-	Status string `json:"status"`
-	Model  string `json:"model"`
-	Output []struct {
+type openAIEvalWireOutputItem struct {
+	Type    string `json:"type"`
+	Content []struct {
 		Type    string `json:"type"`
-		Content []struct {
-			Type    string `json:"type"`
-			Text    string `json:"text"`
-			Refusal string `json:"refusal"`
-		} `json:"content"`
-	} `json:"output"`
-	Usage struct {
+		Text    string `json:"text"`
+		Refusal string `json:"refusal"`
+	} `json:"content"`
+}
+
+type openAIEvalWireResponse struct {
+	Status string                     `json:"status"`
+	Model  string                     `json:"model"`
+	Output []openAIEvalWireOutputItem `json:"output"`
+	Usage  struct {
 		InputTokens  int64 `json:"input_tokens"`
 		OutputTokens int64 `json:"output_tokens"`
 	} `json:"usage"`
@@ -302,7 +304,15 @@ func readOpenAIEvalResponse(ctx context.Context, resp *http.Response, requireSSE
 	// Some compatible providers omit Content-Type; sniff only the first bytes.
 	prefix, _ := reader.Peek(5)
 	isSSE := requireSSE || strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") || strings.HasPrefix(string(prefix), "data:") || strings.HasPrefix(string(prefix), "event") || strings.HasPrefix(string(prefix), ":")
+	var completedItems []openAIEvalWireOutputItem
+	toolCallObserved := false
 	complete := func(wire *openAIEvalWireResponse, terminal string, delta, refusal string) (*OpenAIEvalSampleResponse, error) {
+		if len(wire.Output) == 0 {
+			wire.Output = completedItems
+		}
+		for _, item := range wire.Output {
+			toolCallObserved = toolCallObserved || strings.HasSuffix(item.Type, "_call")
+		}
 		result.Model = wire.Model
 		text, wireRefusal := openAIEvalResponseText(wire)
 		if text != "" {
@@ -328,6 +338,9 @@ func readOpenAIEvalResponse(ctx context.Context, resp *http.Response, requireSSE
 		}
 		if refusal != "" {
 			return result, newOpenAIEvalRequestError("refusal", refusal, resp.StatusCode)
+		}
+		if requireText && toolCallObserved {
+			return result, newOpenAIEvalRequestError("unexpected_tool_call", "evaluation requested a tool; tools are not executed", resp.StatusCode)
 		}
 		if requireText && strings.TrimSpace(result.Text) == "" {
 			return result, newOpenAIEvalRequestError("empty_output", "completed response contained no output text", resp.StatusCode)
@@ -367,12 +380,13 @@ func readOpenAIEvalResponse(ctx context.Context, resp *http.Response, requireSSE
 			return false, newOpenAIEvalRequestError("missing_terminal", "stream ended before response.completed", resp.StatusCode)
 		}
 		var event struct {
-			Type     string                  `json:"type"`
-			Delta    string                  `json:"delta"`
-			Response *openAIEvalWireResponse `json:"response"`
-			Error    *openAIEvalWireError    `json:"error"`
-			Code     string                  `json:"code"`
-			Message  string                  `json:"message"`
+			Type     string                    `json:"type"`
+			Item     *openAIEvalWireOutputItem `json:"item"`
+			Delta    string                    `json:"delta"`
+			Response *openAIEvalWireResponse   `json:"response"`
+			Error    *openAIEvalWireError      `json:"error"`
+			Code     string                    `json:"code"`
+			Message  string                    `json:"message"`
 		}
 		if json.Unmarshal([]byte(raw), &event) != nil {
 			return false, newOpenAIEvalRequestError("invalid_response", "invalid SSE event JSON", resp.StatusCode)
@@ -382,6 +396,13 @@ func readOpenAIEvalResponse(ctx context.Context, resp *http.Response, requireSSE
 		}
 		eventName = ""
 		switch event.Type {
+		case "response.output_item.added", "response.output_item.done":
+			if event.Item != nil {
+				toolCallObserved = toolCallObserved || strings.HasSuffix(event.Item.Type, "_call")
+				if event.Type == "response.output_item.done" {
+					completedItems = append(completedItems, *event.Item)
+				}
+			}
 		case "response.output_text.delta":
 			delta.WriteString(event.Delta)
 			result.Text = delta.String()

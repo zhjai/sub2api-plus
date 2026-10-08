@@ -2440,58 +2440,9 @@
           </label>
         </div>
 
-        <div v-if="codexIdentityMode === 'preserve_client'" class="mt-3 space-y-3 border-l-2 border-gray-200 pl-4 dark:border-dark-600">
-          <div class="relative max-w-sm">
-            <label for="codex-identity-key-id" class="input-label">{{ t('admin.accounts.openai.codexIdentity.keyLabel') }}</label>
-            <input
-              id="codex-identity-key-id"
-              v-model="codexIdentityKeyText"
-              type="text"
-              inputmode="numeric"
-              autocomplete="off"
-              class="input"
-              :class="{ 'border-rose-400 dark:border-rose-500': codexIdentityKeyError }"
-              :placeholder="t('admin.accounts.openai.codexIdentity.keyPlaceholder')"
-              :aria-invalid="codexIdentityKeyError ? true : undefined"
-              aria-describedby="codex-identity-key-hint"
-              data-testid="codex-identity-key-input"
-              @input="onCodexIdentityKeyInput"
-              @focus="codexIdentityKeyOpen = codexIdentityKeyResults.length > 0"
-              @keydown.escape="codexIdentityKeyOpen = false"
-            />
-            <ul
-              v-if="codexIdentityKeyOpen && codexIdentityKeyResults.length"
-              class="absolute z-20 mt-1 max-h-56 w-full overflow-auto rounded-lg border border-gray-200 bg-white py-1 shadow-lg dark:border-dark-600 dark:bg-dark-800"
-              role="listbox"
-              :aria-label="t('admin.accounts.openai.codexIdentity.keyResults')"
-            >
-              <li v-for="key in codexIdentityKeyResults" :key="key.id">
-                <button
-                  type="button"
-                  role="option"
-                  :aria-selected="codexIdentityKeyText === String(key.id)"
-                  class="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-gray-100 focus-visible:bg-gray-100 focus-visible:outline-none dark:hover:bg-dark-700 dark:focus-visible:bg-dark-700"
-                  data-testid="codex-identity-key-option"
-                  @click="selectCodexIdentityKey(key)"
-                >
-                  <span class="truncate text-gray-900 dark:text-gray-100">{{ key.name || `#${key.id}` }}</span>
-                  <span class="shrink-0 text-xs tabular-nums text-gray-500 dark:text-gray-400">#{{ key.id }}</span>
-                </button>
-              </li>
-            </ul>
-            <p id="codex-identity-key-hint" class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              <template v-if="codexIdentityKeyPicked">{{ t('admin.accounts.openai.codexIdentity.keyPicked', { name: codexIdentityKeyPicked.name || `#${codexIdentityKeyPicked.id}`, id: codexIdentityKeyPicked.id }) }}</template>
-              <template v-else>{{ t('admin.accounts.openai.codexIdentity.keyHint') }}</template>
-            </p>
-            <p v-if="codexIdentityKeyError" class="mt-1 text-xs text-rose-700 dark:text-rose-300" role="alert" data-testid="codex-identity-key-error">{{ codexIdentityKeyError }}</p>
-          </div>
-
-          <ul class="list-disc space-y-1 pl-4 text-xs leading-relaxed text-gray-600 dark:text-gray-400">
-            <li>{{ t('admin.accounts.openai.codexIdentity.keepsOfficial') }}</li>
-            <li>{{ t('admin.accounts.openai.codexIdentity.scopeOnly') }}</li>
-            <li>{{ t('admin.accounts.openai.codexIdentity.continuation') }}</li>
-            <li>{{ t('admin.accounts.openai.codexIdentity.supportedPaths') }}</li>
-          </ul>
+        <div v-if="codexIdentityMode === 'preserve_client'" class="mt-3 space-y-2 border-l-2 border-gray-200 pl-4 dark:border-dark-600">
+          <p class="text-xs leading-relaxed text-gray-600 dark:text-gray-300">{{ t('admin.accounts.openai.codexIdentity.accountScope') }}</p>
+          <p v-if="codexIdentityServerError" class="text-xs text-rose-700 dark:text-rose-300" role="alert">{{ codexIdentityServerError }}</p>
 
           <p
             v-if="openaiOAuthResponsesWebSocketV2Mode !== OPENAI_WS_MODE_OFF"
@@ -2527,7 +2478,6 @@
           <dt class="text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.codexIdentity.savedMode') }}</dt>
           <dd class="text-gray-900 dark:text-gray-100">
             {{ savedCodexIdentity.mode === 'preserve_client' ? t('admin.accounts.openai.codexIdentity.preserve') : t('admin.accounts.openai.codexIdentity.isolated') }}
-            <template v-if="savedCodexIdentity.mode === 'preserve_client' && savedCodexIdentity.apiKeyID">{{ t('admin.accounts.openai.codexIdentity.savedKey', { id: savedCodexIdentity.apiKeyID }) }}</template>
           </dd>
           <template v-if="savedCodexIdentity.revision">
             <dt class="text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.codexIdentity.revision') }}</dt>
@@ -3303,7 +3253,6 @@ import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 
 import { adminAPI } from '@/api/admin'
-import type { SimpleApiKey } from '@/api/admin/usage'
 import { useQuotaNotifyState } from '@/composables/useQuotaNotifyState'
 import type {
   Account,
@@ -3912,17 +3861,11 @@ const codexCLIOnlyEnabled = ref(false)
 const codexCLIOnlyAppServerEnabled = ref(false)
 type CodexFingerprintMode = 'off' | 'device' | 'session' | 'full'
 const codexFingerprintMode = ref<CodexFingerprintMode>('off')
-// Codex 会话标识策略：缺省即账号隔离（旧投影不变）；preserve_client 为实验项，
-// 只对绑定的 API Key 保留客户端会话标识。namespace/revision/diagnostic 由服务端生成，只读。
+// Codex 会话标识策略：缺省即账号隔离；preserve_client 是账号级实验项。
+// namespace/revision/diagnostic 由服务端生成，只读。
 type CodexIdentityMode = 'isolated' | 'preserve_client'
 const codexIdentityMode = ref<CodexIdentityMode>('isolated')
-const codexIdentityKeyText = ref('')
-const codexIdentityKeyResults = ref<SimpleApiKey[]>([])
-const codexIdentityKeyOpen = ref(false)
-const codexIdentityKeyPicked = ref<SimpleApiKey | null>(null)
-const codexIdentityKeyTouched = ref(false)
 const codexIdentityServerError = ref('')
-let codexIdentityKeySearchTimer: ReturnType<typeof setTimeout> | null = null
 type CodexImageToolMode = 'inherit' | 'enabled' | 'disabled' | 'block'
 const codexImageToolMode = ref<CodexImageToolMode>('inherit')
 type AnthropicAPIKeyAuthScheme = 'x_api_key' | 'authorization_bearer'
@@ -3957,12 +3900,10 @@ const editResetTimezone = ref<string | null>(null)
 const savedCodexIdentity = computed(() => {
   const extra = (props.account?.extra as Record<string, unknown> | undefined) || {}
   const mode: CodexIdentityMode = extra.codex_identity_mode === 'preserve_client' ? 'preserve_client' : 'isolated'
-  const keyID = Number(extra.codex_identity_api_key_id)
   const revision = extra.codex_identity_revision
   const diagnostic = extra.codex_identity_diagnostic
   return {
     mode,
-    apiKeyID: Number.isSafeInteger(keyID) && keyID > 0 ? keyID : null,
     revision: typeof revision === 'string' || typeof revision === 'number' ? String(revision) : '',
     diagnostic: typeof diagnostic === 'string' ? diagnostic.trim() : '',
     namespaceReady: typeof extra.codex_identity_namespace === 'string' && extra.codex_identity_namespace !== ''
@@ -3974,59 +3915,9 @@ const codexIdentityOptions = computed(() => [
   { value: 'preserve_client' as CodexIdentityMode, label: t('admin.accounts.openai.codexIdentity.preserve'), hint: t('admin.accounts.openai.codexIdentity.preserveHint') }
 ])
 
-/** A positive whole number; blank or anything else is never sent (never as 0). */
-const codexIdentityKeyID = computed<number | null>(() => {
-  const raw = codexIdentityKeyText.value.trim().replace(/^#/, '')
-  if (!/^\d+$/.test(raw)) return null
-  const id = Number(raw)
-  return Number.isSafeInteger(id) && id > 0 ? id : null
-})
-
-const codexIdentityKeyError = computed(() => {
-  if (codexIdentityMode.value !== 'preserve_client' || !codexIdentityKeyTouched.value) return ''
-  if (codexIdentityKeyText.value.trim() === '') return t('admin.accounts.openai.codexIdentity.keyRequired')
-  return codexIdentityKeyID.value === null ? t('admin.accounts.openai.codexIdentity.keyInvalid') : ''
-})
-
-function onCodexIdentityKeyInput() {
-  codexIdentityKeyTouched.value = true
-  codexIdentityServerError.value = ''
-  if (codexIdentityKeyPicked.value && String(codexIdentityKeyPicked.value.id) !== codexIdentityKeyText.value.trim().replace(/^#/, '')) {
-    codexIdentityKeyPicked.value = null
-  }
-  if (codexIdentityKeySearchTimer) clearTimeout(codexIdentityKeySearchTimer)
-  const keyword = codexIdentityKeyText.value.trim().replace(/^#/, '')
-  if (!keyword || /^\d+$/.test(keyword)) {
-    // A typed ID is used as is; searching is only for finding a key by name.
-    codexIdentityKeyResults.value = []
-    codexIdentityKeyOpen.value = false
-    return
-  }
-  codexIdentityKeySearchTimer = setTimeout(async () => {
-    try {
-      codexIdentityKeyResults.value = (await adminAPI.usage.searchApiKeys(undefined, keyword)) ?? []
-      codexIdentityKeyOpen.value = codexIdentityKeyResults.value.length > 0
-    } catch {
-      codexIdentityKeyResults.value = []
-      codexIdentityKeyOpen.value = false
-    }
-  }, 300)
-}
-
-function selectCodexIdentityKey(key: SimpleApiKey) {
-  codexIdentityKeyText.value = String(key.id)
-  codexIdentityKeyPicked.value = key
-  codexIdentityKeyTouched.value = true
-  codexIdentityKeyOpen.value = false
-  codexIdentityServerError.value = ''
-}
-
 /** Back to account isolation. Fingerprint convergence is left exactly as it is. */
 function restoreCodexIdentityDefault() {
   codexIdentityMode.value = 'isolated'
-  codexIdentityKeyText.value = ''
-  codexIdentityKeyPicked.value = null
-  codexIdentityKeyTouched.value = false
   codexIdentityServerError.value = ''
 }
 
@@ -4034,8 +3925,6 @@ function loadCodexIdentity(extra: Record<string, unknown> | undefined) {
   restoreCodexIdentityDefault()
   if (extra?.codex_identity_mode !== 'preserve_client') return
   codexIdentityMode.value = 'preserve_client'
-  const id = Number(extra.codex_identity_api_key_id)
-  codexIdentityKeyText.value = Number.isSafeInteger(id) && id > 0 ? String(id) : ''
 }
 
 /** Server rejections about this setting are also shown next to it, with the server's reason. */
@@ -5469,11 +5358,6 @@ const handleSubmit = async () => {
     return
   }
   if (props.account.platform === 'openai' && props.account.type === 'oauth' && codexIdentityMode.value === 'preserve_client') {
-    codexIdentityKeyTouched.value = true
-    if (codexIdentityKeyID.value === null) {
-      appStore.showError(codexIdentityKeyError.value || t('admin.accounts.openai.codexIdentity.keyRequired'))
-      return
-    }
     if (codexFingerprintMode.value !== 'off') {
       appStore.showError(t('admin.accounts.openai.codexIdentity.conflict'))
       return
@@ -6128,9 +6012,9 @@ const handleSubmit = async () => {
           delete newExtra.codex_fingerprint_mode
         }
         // 账号隔离是缺省值：不落键，保持旧投影。服务端生成的 namespace/revision/diagnostic 原样保留，不由前端生成或修改。
-        if (codexIdentityMode.value === 'preserve_client' && codexIdentityKeyID.value !== null) {
+        if (codexIdentityMode.value === 'preserve_client') {
           newExtra.codex_identity_mode = 'preserve_client'
-          newExtra.codex_identity_api_key_id = codexIdentityKeyID.value
+          delete newExtra.codex_identity_api_key_id
         } else {
           delete newExtra.codex_identity_mode
           delete newExtra.codex_identity_api_key_id

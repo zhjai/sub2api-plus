@@ -363,16 +363,24 @@ func (s *AccountTestService) runOpenAIEvalSampleSingleSend(ctx context.Context, 
 			payload["reasoning"] = map[string]string{"effort": effort}
 		}
 	}
-	if isOAuth {
-		applyCodexOAuthTransform(payload, true, false)
-	}
 	diagnosticSession := ""
 	var diagnosticIDs *codexFingerprintIDs
 	if isOAuth {
-		diagnosticSession = uuid.NewString()
+		payload, diagnosticSession, err = newOpenAIEvalCodexPayload(credential, upstreamModel, reasoningEffort, prompt, time.Now())
+		if err != nil {
+			return nil, fmt.Errorf("build Codex evaluation turn: %w", err)
+		}
+		// Keep first-turn Lite item IDs and metadata, as the CPA plugin does.
+		// Shared OAuth normalization still handles required top-level fields.
+		input := payload["input"]
+		delete(payload, "input")
+		if transformed := applyCodexOAuthTransform(payload, true, false); transformed.Error != nil {
+			return nil, transformed.Error
+		}
+		payload["input"] = input
 		diagnosticIDs = prepareOpenAIOAuthDiagnosticPayload(payload, credential, diagnosticSession)
 	}
-	body, err := json.Marshal(payload)
+	body, err := marshalOpenAIEvalPayload(payload)
 	if err != nil {
 		return nil, fmt.Errorf("encode OpenAI evaluation request: %w", err)
 	}
@@ -426,6 +434,9 @@ func (s *AccountTestService) runOpenAIEvalSampleSingleSend(ctx context.Context, 
 	enforceCodexAcceptLanguage(req.Header)
 	if isOAuth {
 		finalizeOpenAIOAuthDiagnosticHeaders(req.Header, credential, diagnosticSession, body, diagnosticIDs)
+		if err := applyMappedGPT55LiteCompatibility(req, credential, body); err != nil {
+			return nil, err
+		}
 	}
 	for key, values := range req.Header {
 		lower := strings.ToLower(key)

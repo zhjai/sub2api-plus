@@ -98,17 +98,18 @@ func mustDecodeOpenAIEvalJSON[T any](data []byte) T {
 // OpenAIEvalOutcome is a route-scoped diagnostic. Fingerprint identity
 // evidence is intentionally separate from capability outcomes.
 type OpenAIEvalOutcome struct {
-	Status        string                       `json:"status"`
-	Reason        string                       `json:"reason,omitempty"`
-	Score         float64                      `json:"score,omitempty"`
-	SampleCount   int                          `json:"sample_count"`
-	ExpectedCount int                          `json:"expected_count"`
-	Confidence    string                       `json:"confidence"`
-	Scheduling    string                       `json:"scheduling"`
-	Attribution   *OpenAIEvalAttributionPolicy `json:"attribution,omitempty"`
-	Fingerprint   *OpenAIEvalFingerprintResult `json:"fingerprint,omitempty"`
-	ModelTrace    *OpenAIEvalModelTraceResult  `json:"modeltrace,omitempty"`
-	StateProbe    *OpenAIStateProbeResult      `json:"state_probe,omitempty"`
+	RequestProfile string                       `json:"request_profile,omitempty"`
+	Status         string                       `json:"status"`
+	Reason         string                       `json:"reason,omitempty"`
+	Score          float64                      `json:"score,omitempty"`
+	SampleCount    int                          `json:"sample_count"`
+	ExpectedCount  int                          `json:"expected_count"`
+	Confidence     string                       `json:"confidence"`
+	Scheduling     string                       `json:"scheduling"`
+	Attribution    *OpenAIEvalAttributionPolicy `json:"attribution,omitempty"`
+	Fingerprint    *OpenAIEvalFingerprintResult `json:"fingerprint,omitempty"`
+	ModelTrace     *OpenAIEvalModelTraceResult  `json:"modeltrace,omitempty"`
+	StateProbe     *OpenAIStateProbeResult      `json:"state_probe,omitempty"`
 }
 
 // Raw verdict metadata survives reinterpretation of historical evidence.

@@ -63,7 +63,7 @@ func (s *OpenAIGatewayService) validateCodexIdentityContinuation(c *gin.Context,
 	// Once an account has issued raw continuations, a missing binding cannot be
 	// assumed to belong to its new isolated policy. Ordinary default accounts
 	// without experiment history remain independent of this cache.
-	experiment := p.Mode == CodexIdentityPreserveClient || (codexIdentityHasHistory(account) && codexIdentityString(account, CodexIdentityModeKey) != CodexIdentityPreserveClient) || (codexIdentityString(account, CodexIdentityModeKey) == CodexIdentityPreserveClient && CodexIdentityAPIKeyID(account) == getAPIKeyIDFromContext(c))
+	experiment := p.Mode == CodexIdentityPreserveClient || codexIdentityHasHistory(account)
 	if !ok {
 		if experiment {
 			return rejectCodexIdentityRequest(c, "CODEX_IDENTITY_CONTINUATION_UNSUPPORTED", "Shared identity continuation metadata is unavailable; start a new session")

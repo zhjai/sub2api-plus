@@ -86,9 +86,38 @@ func TestCodexIdentityConcurrentSaveConflictIsBadRequest(t *testing.T) {
 	require.ErrorContains(t, err, "actual credential namespace")
 }
 
+func TestCodexIdentityAccountSaveDoesNotRequireAPIKey(t *testing.T) {
+	for _, duplicate := range []bool{false, true} {
+		t.Run(map[bool]string{false: "account_enabled", true: "duplicate_credential"}[duplicate], func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			defer db.Close()
+			client := dbent.NewClient(dbent.Driver(entsql.OpenDB(dialect.Postgres, db)))
+			a := &service.Account{ID: 41, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth,
+				Credentials: map[string]any{"chatgpt_account_id": "shared"},
+				Extra:       map[string]any{service.CodexIdentityModeKey: service.CodexIdentityPreserveClient}}
+			require.NoError(t, service.NormalizeCodexIdentityConfig(a, nil))
+			rows := sqlmock.NewRows([]string{"id", "platform", "type", "credentials", "extra"})
+			if duplicate {
+				extra, err := json.Marshal(a.Extra)
+				require.NoError(t, err)
+				rows.AddRow(42, "openai", "oauth", []byte(`{"chatgpt_account_id":"shared"}`), extra)
+			}
+			mock.ExpectQuery(`SELECT .* FROM "accounts"`).WillReturnRows(rows)
+			err = validateCodexIdentityBinding(context.Background(), client, a, 0, 0)
+			if duplicate {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
 func TestCodexIdentityUnchangedSaveDoesNotRequireLiveKey(t *testing.T) {
 	for _, changed := range []bool{false, true} {
-		t.Run(map[bool]string{false: "ordinary_edit", true: "new_key_binding"}[changed], func(t *testing.T) {
+		t.Run(map[bool]string{false: "ordinary_edit", true: "ignored_legacy_key"}[changed], func(t *testing.T) {
 			db, mock, err := sqlmock.New()
 			require.NoError(t, err)
 			defer db.Close()
@@ -105,14 +134,10 @@ func TestCodexIdentityUnchangedSaveDoesNotRequireLiveKey(t *testing.T) {
 				[]string{"id", "platform", "type", "credentials", "extra"}).AddRow(41, "openai", "oauth", credentials, extra))
 			if changed {
 				a.Extra[service.CodexIdentityAPIKeyIDKey] = 78
-				mock.ExpectQuery(`SELECT .* FROM "api_keys"`).WillReturnRows(sqlmock.NewRows([]string{"id"}))
 			}
 			err = normalizeAccountCodexIdentity(context.Background(), client, a)
-			if changed {
-				require.Equal(t, "CODEX_IDENTITY_API_KEY_UNAVAILABLE", infraerrors.Reason(err))
-			} else {
-				require.NoError(t, err, "unchanged grants must not query key liveness during unrelated edits")
-			}
+			require.NoError(t, err, "account configuration must not query key liveness during unrelated edits")
+			require.NotContains(t, a.Extra, service.CodexIdentityAPIKeyIDKey)
 			require.NoError(t, mock.ExpectationsWereMet())
 		})
 	}

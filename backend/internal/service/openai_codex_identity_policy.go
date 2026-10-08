@@ -164,9 +164,6 @@ func NormalizeCodexIdentityConfig(a, previous *Account) error {
 		if namespace == "" {
 			return codexIdentityError("CODEX_IDENTITY_NAMESPACE_REQUIRED", "preserve_client requires a stable credential namespace")
 		}
-		if keyID == 0 {
-			return codexIdentityError("CODEX_IDENTITY_API_KEY_REQUIRED", "preserve_client requires a positive integer codex_identity_api_key_id")
-		}
 		if a.GetCodexFingerprintMode() != codexFingerprintOff {
 			return codexIdentityError("CODEX_IDENTITY_FINGERPRINT_CONFLICT", "preserve_client conflicts with device/session/full fingerprint convergence; set codex_fingerprint_mode to off")
 		}
@@ -177,7 +174,10 @@ func NormalizeCodexIdentityConfig(a, previous *Account) error {
 		delete(extra, CodexIdentityAPIKeyIDKey)
 		keyID = 0
 	} else {
-		extra[CodexIdentityAPIKeyIDKey] = keyID
+		// The experiment is enabled per OAuth account. Authorization is checked
+		// against the actual request principal, not a key pinned in account data.
+		delete(extra, CodexIdentityAPIKeyIDKey)
+		keyID = 0
 	}
 	revision := codexIdentityString(previous, CodexIdentityRevisionKey)
 	if revision == "" || mode != codexIdentityString(previous, CodexIdentityModeKey) || keyID != CodexIdentityAPIKeyID(previous) || credentialChanged || a.GetCodexFingerprintMode() != previous.GetCodexFingerprintMode() || codexIdentityString(a, codexFingerprintSeedExtraKey) != codexIdentityString(previous, codexFingerprintSeedExtraKey) {
@@ -211,18 +211,16 @@ func normalizeAndValidateCodexIdentitySave(ctx context.Context, repo AccountRepo
 	}
 	if previous != nil &&
 		codexIdentityString(previous, CodexIdentityModeKey) == CodexIdentityPreserveClient &&
-		CodexIdentityAPIKeyID(previous) == CodexIdentityAPIKeyID(a) &&
 		codexIdentityString(previous, CodexIdentityRevisionKey) == codexIdentityString(a, CodexIdentityRevisionKey) {
-		// Ordinary account edits must remain possible if the bound key later
-		// expires, is disabled, or exhausts quota. Actual requests still recheck
-		// the grant immediately before sending.
+		// Ordinary account edits don't depend on any one API key. Requests still
+		// validate their current principal immediately before sending.
 		return nil
 	}
 	validator, ok := repo.(CodexIdentityBindingRepository)
 	if !ok {
 		return codexIdentityError("CODEX_IDENTITY_VALIDATION_UNAVAILABLE", "repository cannot validate the identity experiment binding")
 	}
-	return validator.ValidateCodexIdentityBinding(ctx, a, CodexIdentityAPIKeyID(a), 0)
+	return validator.ValidateCodexIdentityBinding(ctx, a, 0, 0)
 }
 
 func EffectiveCodexIdentityPolicy(c *gin.Context, account *Account) CodexIdentityPolicy {
@@ -272,10 +270,6 @@ func (s *OpenAIGatewayService) stageCodexIdentityPolicy(ctx context.Context, c *
 	if keyID <= 0 {
 		return source
 	}
-	p.Reason = "nonbound_api_key"
-	if keyID != CodexIdentityAPIKeyID(selected) {
-		return source
-	}
 	p.Reason = "principal_unavailable"
 	if p.UserID <= 0 {
 		return source
@@ -303,10 +297,10 @@ func (s *OpenAIGatewayService) stageCodexIdentityPolicy(ctx context.Context, c *
 		return source
 	}
 	p.Reason = "binding_conflict_or_key_unavailable"
-	if p.Revision == "" || CodexIdentityAPIKeyID(fresh) != keyID || validator.ValidateCodexIdentityBinding(ctx, fresh, keyID, p.UserID) != nil {
+	if p.Revision == "" || validator.ValidateCodexIdentityBinding(ctx, fresh, keyID, p.UserID) != nil {
 		return source
 	}
-	p.Mode, p.Reason, p.APIKeyID = CodexIdentityPreserveClient, "pinned_api_key", keyID
+	p.Mode, p.Reason, p.APIKeyID = CodexIdentityPreserveClient, "account_enabled_request_principal", keyID
 	copySource := *source
 	source = &copySource
 	source.codexIdentityGrant = &p
@@ -428,7 +422,7 @@ func (s *OpenAIGatewayService) validateCodexIdentityBeforeSend(req *http.Request
 	if err != nil {
 		return codexIdentityError("CODEX_IDENTITY_VALIDATION_UNAVAILABLE", "Cannot validate current identity policy; start a new session")
 	}
-	if fresh == nil || codexIdentityString(fresh, CodexIdentityModeKey) != CodexIdentityPreserveClient || codexIdentityString(fresh, CodexIdentityRevisionKey) != p.Revision || CodexIdentityNamespace(fresh) != p.Namespace || codexIdentityString(fresh, CodexIdentityNamespaceKey) != p.Namespace || CodexIdentityAPIKeyID(fresh) != p.APIKeyID || fresh.GetCodexFingerprintMode() != codexFingerprintOff {
+	if fresh == nil || codexIdentityString(fresh, CodexIdentityModeKey) != CodexIdentityPreserveClient || codexIdentityString(fresh, CodexIdentityRevisionKey) != p.Revision || CodexIdentityNamespace(fresh) != p.Namespace || codexIdentityString(fresh, CodexIdentityNamespaceKey) != p.Namespace || fresh.GetCodexFingerprintMode() != codexFingerprintOff {
 		return codexIdentityError("CODEX_IDENTITY_POLICY_CHANGED", "Identity policy changed before send; start a new session")
 	}
 	if err := validator.ValidateCodexIdentityBinding(req.Context(), fresh, p.APIKeyID, p.UserID); err != nil {

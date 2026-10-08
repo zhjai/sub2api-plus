@@ -141,24 +141,17 @@ func TestCodexIdentityFullForwardWireAndContinuation(t *testing.T) {
 			body := []byte(`{"model":"gpt-5.4","input":"test","stream":true,"previous_response_id":"resp_prior","prompt_cache_key":"same","client_metadata":{"session_id":"same","thread_id":"distinct-thread"}}`)
 			c := identityPolicyContext(key, body)
 			c.Request.Header.Set("User-Agent", codexCLIUserAgent)
-			if key == 77 {
-				_, err := s.prepareCodexAccountIdentitySource(context.Background(), c, a)
-				require.NoError(t, err)
-				s.bindCodexIdentityContinuation(context.Background(), c, a, "response", "resp_prior")
-			}
-			_, err := s.Forward(context.Background(), c, a, body)
+			_, err := s.prepareCodexAccountIdentitySource(context.Background(), c, a)
+			require.NoError(t, err)
+			s.bindCodexIdentityContinuation(context.Background(), c, a, "response", "resp_prior")
+			_, err = s.Forward(context.Background(), c, a, body)
 			require.NoError(t, err)
 			require.NotNil(t, upstream.lastReq)
-			if key == 77 {
-				require.Equal(t, "same", upstream.lastReq.Header.Get("session_id"))
-				require.Equal(t, "distinct-thread", upstream.lastReq.Header.Get("thread-id"))
-				require.Equal(t, "resp_prior", gjson.GetBytes(upstream.lastBody, "previous_response_id").String())
-				require.JSONEq(t, gjson.GetBytes(body, "client_metadata").Raw, gjson.GetBytes(upstream.lastBody, "client_metadata").Raw)
-				require.Equal(t, "same", gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String())
-			} else {
-				require.NotEqual(t, "same", upstream.lastReq.Header.Get("session_id"))
-				require.NotEqual(t, "same", gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String())
-			}
+			require.Equal(t, "same", upstream.lastReq.Header.Get("session_id"))
+			require.Equal(t, "distinct-thread", upstream.lastReq.Header.Get("thread-id"))
+			require.Equal(t, "resp_prior", gjson.GetBytes(upstream.lastBody, "previous_response_id").String())
+			require.JSONEq(t, gjson.GetBytes(body, "client_metadata").Raw, gjson.GetBytes(upstream.lastBody, "client_metadata").Raw)
+			require.Equal(t, "same", gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String())
 			require.Equal(t, codexOutboundAcceptLanguage, upstream.lastReq.Header.Get("Accept-Language"))
 		}
 	}
@@ -201,7 +194,7 @@ func TestCodexIdentityHTTPMintAndContinueAcrossInstances(t *testing.T) {
 			require.Len(t, secondUpstream.requests, 1)
 			require.Equal(t, "resp_minted", gjson.GetBytes(secondUpstream.lastBody, "previous_response_id").String())
 			require.Equal(t, "minted-ticket", secondUpstream.lastReq.Header.Get(openAIWSTurnStateHeader))
-			for _, mismatch := range []string{"other_key", "revision", "namespace", "duplicate", "shadow"} {
+			for _, mismatch := range []string{"other_key", "other_user", "revision", "namespace", "duplicate", "shadow"} {
 				t.Run(mismatch, func(t *testing.T) {
 					selected := *a
 					selected.Extra = make(map[string]any)
@@ -228,6 +221,9 @@ func TestCodexIdentityHTTPMintAndContinueAcrossInstances(t *testing.T) {
 					repo.rows[selected.ID] = &selected
 					defer func() { delete(repo.rows, selected.ID); repo.rows[a.ID] = a }()
 					c := identityPolicyContext(key, continuation)
+					if mismatch == "other_user" {
+						c.Set("api_key", &APIKey{ID: 78, UserID: 10})
+					}
 					_, err := reader.Forward(context.Background(), c, &selected, continuation)
 					require.Error(t, err)
 					require.Equal(t, http.StatusBadRequest, c.Writer.Status())
@@ -257,7 +253,7 @@ func (r *identityPolicyRepo) ValidateCodexIdentityBinding(_ context.Context, a *
 	return nil
 }
 func identityPolicyAccount(t *testing.T) *Account {
-	a := &Account{ID: 41, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"chatgpt_account_id": "test-credential", "access_token": "test-token"}, Extra: map[string]any{CodexIdentityModeKey: CodexIdentityPreserveClient, CodexIdentityAPIKeyIDKey: 77}}
+	a := &Account{ID: 41, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"chatgpt_account_id": "test-credential", "access_token": "test-token"}, Extra: map[string]any{CodexIdentityModeKey: CodexIdentityPreserveClient}}
 	require.NoError(t, NormalizeCodexIdentityConfig(a, nil))
 	return a
 }
@@ -280,6 +276,9 @@ func TestCodexIdentityPolicyFinalHTTPRequests(t *testing.T) {
 			upstream := &openCodeSessionHTTPUpstream{}
 			s := &OpenAIGatewayService{accountRepo: repo, httpUpstream: upstream}
 			c := identityPolicyContext(key, body)
+			if key == 78 {
+				c.Set("api_key", &APIKey{ID: key, UserID: 10})
+			}
 			_, err := s.prepareCodexAccountIdentitySource(context.Background(), c, a)
 			require.NoError(t, err)
 			stageCodexClientIdentityBody(c, body)
@@ -300,16 +299,10 @@ func TestCodexIdentityPolicyFinalHTTPRequests(t *testing.T) {
 			require.Equal(t, codexOutboundAcceptLanguage, req.Header.Get("Accept-Language"))
 			require.NotEmpty(t, req.Header.Get("originator"))
 			require.NotEmpty(t, req.Header.Get("version"))
-			if key == 77 {
-				for _, name := range []string{"session_id", "session-id", "thread-id", "x-client-request-id", "conversation_id", "x-codex-window-id", "x-codex-turn-metadata"} {
-					require.Equal(t, c.Request.Header.Get(name), req.Header.Get(name), name)
-				}
-				require.JSONEq(t, string(body), string(wire))
-			} else {
-				require.NotEqual(t, "same", req.Header.Get("session_id"))
-				require.NotEqual(t, "same", gjson.GetBytes(wire, "prompt_cache_key").String())
-				require.NotEqual(t, "same", gjson.GetBytes(wire, "client_metadata.session_id").String())
+			for _, name := range []string{"session_id", "session-id", "thread-id", "x-client-request-id", "conversation_id", "x-codex-window-id", "x-codex-turn-metadata"} {
+				require.Equal(t, c.Request.Header.Get(name), req.Header.Get(name), name)
 			}
+			require.JSONEq(t, string(body), string(wire))
 			require.Nil(t, a.codexIdentityGrant, "shared source must never receive request authorization")
 		}
 	}
@@ -320,7 +313,7 @@ func TestCodexIdentityPolicyFinalHTTPRequests(t *testing.T) {
 }
 
 func TestCodexIdentityPolicyRevocationAndFallback(t *testing.T) {
-	for _, reason := range []string{"duplicate", "namespace", "key", "fingerprint", "internal", "nonbound"} {
+	for _, reason := range []string{"duplicate", "namespace", "key", "fingerprint", "internal", "principal_missing"} {
 		t.Run(reason, func(t *testing.T) {
 			a := identityPolicyAccount(t)
 			repo := &identityPolicyRepo{rows: map[int64]*Account{a.ID: a}}
@@ -339,10 +332,11 @@ func TestCodexIdentityPolicyRevocationAndFallback(t *testing.T) {
 				a.Extra["codex_fingerprint_mode"] = "device"
 			case "internal":
 				key = 0
-			case "nonbound":
-				key = 78
 			}
 			c := identityPolicyContext(key, nil)
+			if reason == "principal_missing" {
+				c.Set("api_key", &APIKey{ID: key})
+			}
 			_, err := s.prepareCodexAccountIdentitySource(context.Background(), c, a)
 			require.NoError(t, err)
 			require.Equal(t, CodexIdentityIsolated, EffectiveCodexIdentityPolicy(c, a).Mode)
@@ -374,8 +368,18 @@ func TestCodexIdentityConfigServerOwnedAndSemanticRevision(t *testing.T) {
 	for _, key := range []any{nil, 0, -1, 1.5, "77"} {
 		a = identityPolicyAccount(t)
 		a.Extra[CodexIdentityAPIKeyIDKey] = key
-		require.Error(t, NormalizeCodexIdentityConfig(a, nil))
+		require.NoError(t, NormalizeCodexIdentityConfig(a, nil))
+		require.NotContains(t, a.Extra, CodexIdentityAPIKeyIDKey, "legacy fixed key is no longer account configuration")
 	}
+	a = identityPolicyAccount(t)
+	legacy := *a
+	legacy.Extra = map[string]any{}
+	for key, value := range a.Extra {
+		legacy.Extra[key] = value
+	}
+	legacy.Extra[CodexIdentityAPIKeyIDKey] = 77
+	require.NoError(t, NormalizeCodexIdentityConfig(a, &legacy))
+	require.NotEqual(t, legacy.Extra[CodexIdentityRevisionKey], a.Extra[CodexIdentityRevisionKey], "removing the fixed-key grant revokes its continuations")
 	a = identityPolicyAccount(t)
 	a.Credentials = nil
 	a.Extra[codexFingerprintSeedExtraKey] = "11111111-1111-4111-8111-111111111111"

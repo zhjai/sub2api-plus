@@ -18,16 +18,18 @@ func (r *accountRepository) ValidateCodexIdentityBinding(ctx context.Context, a 
 }
 
 func validateCodexIdentityBinding(ctx context.Context, client *dbent.Client, a *service.Account, keyID, userID int64) error {
-	key, err := client.APIKey.Get(ctx, keyID)
-	if err != nil || key == nil || key.DeletedAt != nil || key.Status != service.StatusActive || (key.ExpiresAt != nil && !key.ExpiresAt.After(time.Now())) || (key.Quota > 0 && key.QuotaUsed >= key.Quota) {
-		return infraerrors.BadRequest("CODEX_IDENTITY_API_KEY_UNAVAILABLE", "bound API key must exist, be active, unexpired and have available quota")
-	}
-	if userID > 0 && key.UserID != userID {
-		return infraerrors.BadRequest("CODEX_IDENTITY_PRINCIPAL_CHANGED", "bound API key principal changed; reauthenticate and start a new session")
-	}
-	owner, err := client.User.Get(ctx, key.UserID)
-	if err != nil || owner == nil || owner.DeletedAt != nil || owner.Status != service.StatusActive {
-		return infraerrors.BadRequest("CODEX_IDENTITY_API_KEY_UNAVAILABLE", "bound API key owner is unavailable")
+	if keyID > 0 {
+		key, err := client.APIKey.Get(ctx, keyID)
+		if err != nil || key == nil || key.DeletedAt != nil || key.Status != service.StatusActive || (key.ExpiresAt != nil && !key.ExpiresAt.After(time.Now())) || (key.Quota > 0 && key.QuotaUsed >= key.Quota) {
+			return infraerrors.BadRequest("CODEX_IDENTITY_API_KEY_UNAVAILABLE", "request API key must exist, be active, unexpired and have available quota")
+		}
+		if userID > 0 && key.UserID != userID {
+			return infraerrors.BadRequest("CODEX_IDENTITY_PRINCIPAL_CHANGED", "request API key principal changed; reauthenticate and start a new session")
+		}
+		owner, err := client.User.Get(ctx, key.UserID)
+		if err != nil || owner == nil || owner.DeletedAt != nil || owner.Status != service.StatusActive {
+			return infraerrors.BadRequest("CODEX_IDENTITY_API_KEY_UNAVAILABLE", "request API key owner is unavailable")
+		}
 	}
 	namespace := service.CodexIdentityNamespace(a)
 	if namespace == "" {
@@ -76,13 +78,11 @@ func normalizeAccountCodexIdentity(ctx context.Context, client *dbent.Client, a 
 	}
 	if a.Extra[service.CodexIdentityModeKey] == service.CodexIdentityPreserveClient {
 		if previous != nil && previous.Extra[service.CodexIdentityModeKey] == service.CodexIdentityPreserveClient &&
-			service.CodexIdentityAPIKeyID(previous) == service.CodexIdentityAPIKeyID(a) &&
 			previous.Extra[service.CodexIdentityRevisionKey] == a.Extra[service.CodexIdentityRevisionKey] {
-			// Key liveness is a send-time condition, not a prerequisite for
-			// unrelated account edits. Changed grants still validate below.
+			// Identity is account-scoped; live principal checks happen per request.
 			return nil
 		}
-		return validateCodexIdentityBinding(ctx, client, a, service.CodexIdentityAPIKeyID(a), 0)
+		return validateCodexIdentityBinding(ctx, client, a, 0, 0)
 	}
 	return nil
 }
