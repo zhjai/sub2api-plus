@@ -38,6 +38,10 @@ func macroRankingFactors(cells []OpenAIEvalRankingFactors) OpenAIEvalRankingFact
 	errorKnown, qualityKnown := 0, 0
 	quality := new(big.Rat)
 	for _, f := range cells {
+		if recovery := f.RuntimeRecovery; recovery != nil && (out.RuntimeRecovery == nil || recovery.NextTrialAt.Before(out.RuntimeRecovery.NextTrialAt)) {
+			copy := *recovery
+			out.RuntimeRecovery = &copy
+		}
 		errorScore += f.ErrorRate.Score
 		ttftScore += f.TTFT.Score
 		out.ErrorRate.SampleCount += f.ErrorRate.SampleCount
@@ -213,6 +217,7 @@ func buildAccountOverview(gen *openAIRankingGeneration, cfg *OpenAIEvalConfig, s
 		// The pool is the whole fleet for this exact model/effort, never a group.
 		for _, row := range scoreOpenAIEvalRanking("", OpenAIEvalRankingWeights{}, pool, now, oauthRate) {
 			policy, weights := openAIEvalRankingWeights(cfg, key.model, key.effort)
+			row.Factors.RuntimeRecovery = rankingRuntimeRecovery(policy, openAIEvalSchedulingThresholds(cfg), row.Factors, now)
 			models[row.AccountID] = append(models[row.AccountID], OpenAIEvalAccountModel{key.model, key.effort, row.UpstreamModels, row.Factors, overviewSources(row.Factors), policy, weights})
 			if expiry := rankingFactorExpiry(row.Factors, OpenAIEvalRankingWeights{ErrorRate: 1, TTFT: 1, Quality: 1}, gen.policy); expiry != nil && expiry.Before(gen.deadline) {
 				gen.deadline = *expiry

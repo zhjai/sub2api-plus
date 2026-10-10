@@ -368,8 +368,6 @@ const defaultClientTab = computed(() => {
       return 'claude'
     case 'typesafe':
       return 'systemone'
-    case 'prism':
-      return 'codex'
     default:
       return 'claude'
   }
@@ -504,12 +502,6 @@ const clientTabs = computed((): TabConfig[] => {
       return [
         { id: 'systemone', label: t('keys.useKeyModal.cliTabs.systemOne'), icon: TerminalIcon }
       ]
-    // Prism is served through the Responses gateway only; there is no Messages dispatch.
-    case 'prism':
-      return [
-        { id: 'codex', label: t('keys.useKeyModal.cliTabs.codexCli'), icon: TerminalIcon },
-        { id: 'opencode', label: t('keys.useKeyModal.cliTabs.opencode'), icon: TerminalIcon }
-      ]
     case 'deepseek':
     case 'minimax':
     case 'composite':
@@ -556,7 +548,6 @@ const currentTabs = computed(() => {
 })
 
 const platformDescription = computed(() => {
-  if (props.platform === 'prism') return t('keys.useKeyModal.prism.description')
   if (activeClientTab.value === 'codex' &&
     props.platform !== 'openai' &&
     props.platform !== 'grok' &&
@@ -603,7 +594,6 @@ const platformDescription = computed(() => {
 })
 
 const platformNote = computed(() => {
-  if (props.platform === 'prism') return t('keys.useKeyModal.prism.note')
   if (activeClientTab.value === 'codex' &&
     props.platform !== 'openai' &&
     props.platform !== 'grok' &&

@@ -264,7 +264,6 @@ func loadCodexGroupCatalogAccounts(ctx context.Context, repo AccountRepository, 
 			PlatformDeepseek,
 			PlatformMiniMax,
 			PlatformOpenCodeGo,
-			PlatformPrism,
 		},
 		false,
 	)
@@ -426,7 +425,6 @@ type configuredCodexModelDescriptor struct {
 
 type codexModelMetadataOverride struct {
 	UpstreamModelMetadata
-	prism                   bool
 	reasoningConflict       bool
 	inputModalitiesConflict bool
 }
@@ -867,9 +865,7 @@ func (s *GatewayService) BuildCodexModelsManifestForGroup(
 	modelIDs []string,
 ) ([]byte, error) {
 	if s == nil || s.accountRepo == nil || group == nil {
-		if platformOverride == PlatformPrism || (group != nil && group.Platform == PlatformPrism) {
-			return nil, fmt.Errorf("Prism catalog account repository unavailable")
-		}
+
 		return BuildCodexModelsManifest(modelIDs)
 	}
 	effectivePlatform := strings.TrimSpace(platformOverride)
@@ -882,34 +878,8 @@ func (s *GatewayService) BuildCodexModelsManifestForGroup(
 
 	_, catalog, err := loadCodexGroupCatalogAccounts(ctx, s.accountRepo, group.ID)
 	if err != nil {
-		if effectivePlatform == PlatformPrism {
-			return nil, err
-		}
+
 		return BuildCodexModelsManifest(modelIDs)
-	}
-	hasPrism := effectivePlatform == PlatformPrism
-	for _, account := range catalog {
-		hasPrism = hasPrism || account.Platform == PlatformPrism
-	}
-	if hasPrism {
-		// Requery persistent members: the generic helper's schedulable-only
-		// fallback could widen capabilities when a restricted account cools down.
-		all := catalog
-		catalog, err = s.accountRepo.ListModelAvailabilityCandidates(ctx, &group.ID, []string{PlatformPrism}, false)
-		if err != nil {
-			return nil, err
-		}
-		if effectivePlatform == PlatformComposite {
-			for _, account := range all {
-				if account.Platform != PlatformPrism {
-					catalog = append(catalog, account)
-				}
-			}
-		}
-		catalog, err = s.hydratePrismCodexAccounts(ctx, catalog)
-		if err != nil {
-			return nil, err
-		}
 	}
 	var compositeRoutes []CompositeModelRoute
 	compositeRoutesAvailable := true
@@ -1011,20 +981,9 @@ func buildCodexModelsManifest(
 		descriptor.SupportsSearchTool = searchToolModels[modelID]
 		if metadata, ok := modelMetadata[modelID]; ok {
 			applyUpstreamModelMetadataToCodexDescriptor(&descriptor, metadata)
-			if metadata.prism {
-				descriptor.officialMetadata = nil
-				descriptor.InputModalities = []string{"text"}
-				descriptor.SupportsSearchTool = false
-				descriptor.AutoCompactTokenLimit = nil
-				descriptor.CompHash = nil
-				descriptor.UseResponsesLite = false
-				descriptor.AdditionalSpeedTiers = []string{}
-				descriptor.ServiceTiers = []configuredCodexServiceTier{}
-				descriptor.DefaultServiceTier = nil
-				descriptor.SupportsImageDetailOriginal = false
-			}
+
 		}
-		if imageInputModels[modelID] && !modelMetadata[modelID].prism {
+		if imageInputModels[modelID] {
 			// Apply the capability-derived modality after upstream metadata so
 			// a stale official Astra snapshot cannot downgrade the catalog.
 			descriptor.InputModalities = []string{"text", "image"}

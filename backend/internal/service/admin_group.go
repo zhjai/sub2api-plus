@@ -110,7 +110,6 @@ func (s *adminServiceImpl) GetGroupModelsListCandidates(ctx context.Context, id 
 	for _, model := range candidates {
 		seen[model] = struct{}{}
 	}
-	prismLifecycle := NewPrismAccountService(s)
 	for _, acc := range accounts {
 		if platform == PlatformComposite {
 			if !isConcreteRequestPlatform(acc.Platform) {
@@ -119,19 +118,7 @@ func (s *adminServiceImpl) GetGroupModelsListCandidates(ctx context.Context, id 
 		} else if acc.Platform != platform {
 			continue
 		}
-		if acc.Platform == PlatformPrism {
-			catalog, catalogErr := prismLifecycle.Catalog(ctx, acc.ID, false)
-			if catalogErr != nil {
-				continue
-			}
-			for _, model := range PrismPublicModels(&acc, catalog) {
-				if _, ok := seen[model.ID]; !ok {
-					seen[model.ID] = struct{}{}
-					candidates = append(candidates, model.ID)
-				}
-			}
-			continue
-		}
+
 		for model := range acc.GetModelMapping() {
 			model = strings.TrimSpace(model)
 			if model == "" {
@@ -314,7 +301,7 @@ func defaultModelsListCandidateIDs(platform string) []string {
 	case PlatformTypeSafe:
 		return []string{typesafe.JevLatestModel}
 	case PlatformPrism:
-		return nil // Only account-scoped live entitlements may advertise Prism models.
+		return nil // Retired groups must not advertise another platform's defaults.
 	case PlatformComposite:
 		return compositeDefaultModelsListCandidateIDs()
 	default:
@@ -363,7 +350,6 @@ func groupSupportsOAuthOnlyFilter(platform string) bool {
 		platform == PlatformAnthropic ||
 		platform == PlatformGemini ||
 		platform == PlatformGrok ||
-		platform == PlatformPrism ||
 		platform == PlatformComposite
 }
 
@@ -398,6 +384,9 @@ func normalizeUpdateGroupInputForSimpleMode(input *UpdateGroupInput) {
 }
 
 func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupInput) (*Group, error) {
+	if input.Platform == PlatformPrism {
+		return nil, infraerrors.BadRequest("CHANNEL_REMOVED", "Prism channel has been removed")
+	}
 	if s.cfg != nil && s.cfg.RunMode == config.RunModeSimple && NormalizeGroupPlatform(input.Platform) == PlatformComposite {
 		return nil, infraerrors.BadRequest("SIMPLE_MODE_GROUP_NOT_BINDABLE", "composite groups are not supported in simple mode")
 	}
@@ -767,6 +756,9 @@ func (s *adminServiceImpl) validateFallbackGroupOnInvalidRequest(ctx context.Con
 }
 
 func (s *adminServiceImpl) UpdateGroup(ctx context.Context, id int64, input *UpdateGroupInput) (*Group, error) {
+	if input.Platform == PlatformPrism {
+		return nil, infraerrors.BadRequest("CHANNEL_REMOVED", "Prism channel has been removed")
+	}
 	group, err := s.groupRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err

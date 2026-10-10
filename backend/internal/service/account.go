@@ -182,7 +182,7 @@ func (a *Account) EffectiveLoadFactor() int {
 }
 
 func (a *Account) IsSchedulable() bool {
-	if !a.IsActive() || !a.Schedulable {
+	if a.Platform == PlatformPrism || !a.IsActive() || !a.Schedulable {
 		return false
 	}
 	now := time.Now()
@@ -305,7 +305,7 @@ func (a *Account) IsCNProvider() bool {
 // openai/grok 原生走 OpenAI 网关；国产供应商同为 OpenAI Chat Completions
 // 兼容上游，也经 OpenAI 网关转发。OpenCode 同样经 OpenAI 网关按模型分流。
 func (a *Account) IsOpenAICompatible() bool {
-	return a != nil && (a.Platform == PlatformOpenAI || a.Platform == PlatformGrok || a.Platform == PlatformPrism || a.IsCNProvider() || a.IsOpenCodeGo())
+	return a != nil && (a.Platform == PlatformOpenAI || a.Platform == PlatformGrok || a.IsCNProvider() || a.IsOpenCodeGo())
 }
 
 func (a *Account) GeminiOAuthType() string {
@@ -861,19 +861,6 @@ func resolveRequestedModelInMapping(mapping map[string]string, requestedModel st
 // per-(账号,模型) 30 分钟冷却；带 [1m] 上下文后缀的写法先归一化再比对。
 func (a *Account) IsModelSupported(requestedModel string) bool {
 	if a != nil && a.Platform == PlatformPrism {
-		if mapping := a.GetModelMapping(); len(mapping) > 0 && !mappingSupportsRequestedModel(mapping, requestedModel) {
-			return false
-		}
-		models, valid := ReadPrismAccountModels(a)
-		if !valid {
-			return false // Never interpret a missing entitlement snapshot as all models.
-		}
-		mapped := a.GetMappedModel(requestedModel)
-		for _, model := range models {
-			if model.ID == mapped {
-				return true
-			}
-		}
 		return false
 	}
 	// 透传模式仅替换认证、模型语义完全交由上游决定，因此放行所有模型。
@@ -1891,9 +1878,7 @@ func (a *Account) SupportsOpenAIEndpointCapability(capability OpenAIEndpointCapa
 	if !a.IsOpenAICompatible() {
 		return false
 	}
-	if a.Platform == PlatformPrism {
-		return capability == OpenAIEndpointCapabilityChatCompletions
-	}
+
 	if a.IsGrok() {
 		switch capability {
 		case OpenAIEndpointCapabilityChatCompletions:

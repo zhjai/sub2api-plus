@@ -170,15 +170,7 @@ func (s *AccountTestService) ResolveOpenAIEvalTarget(ctx context.Context, accoun
 	if err != nil {
 		return nil, fmt.Errorf("load evaluation account: %w", err)
 	}
-	if account != nil && account.Platform == "prism" {
-		if s.openaiGatewayService.prismAccountService != nil {
-			account, err = s.openaiGatewayService.prismAccountService.EnsureFresh(ctx, account)
-			if err != nil {
-				return nil, err
-			}
-		}
-		return resolvePrismEvalTarget(ctx, account, requestedModel)
-	}
+
 	if !isOpenAIEvalSupportedModel(requestedModel) {
 		return nil, fmt.Errorf("model %q is not in the supported OpenAI text-model catalog", requestedModel)
 	}
@@ -279,9 +271,7 @@ func (s *AccountTestService) runOpenAIEvalSampleSingleSend(ctx context.Context, 
 	if ctx.Err() != nil {
 		return nil, &OpenAIEvalRequestError{Code: "cancelled", Message: ctx.Err().Error()}
 	}
-	if account.Platform == "prism" {
-		return s.runPrismEvalSample(ctx, target, prompt, reasoningEffort)
-	}
+
 	if s.httpUpstream == nil {
 		return nil, errors.New("HTTP upstream is unavailable")
 	}
@@ -758,8 +748,8 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 	if err := s.checkOpenAIEvalAutomaticAccount(ctx, account); err != nil {
 		return s.sendErrorAndEnd(c, err.Error())
 	}
-	if account != nil && account.Platform == PlatformPrism {
-		return s.testPrismAccountConnection(c, account, modelID, prompt, mode, testOpts)
+	if account.Platform == PlatformPrism {
+		return s.sendErrorAndEnd(c, "Prism channel has been removed")
 	}
 
 	// Synthetic UI load-test accounts exercise the real SSE parsing and modal

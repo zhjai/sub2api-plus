@@ -554,8 +554,34 @@ describe('ModelIntegrityTestsView target editing', () => {
     await apply()
     await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
     await flushPromises()
-    expect((api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig).scheduling_thresholds).toEqual(thresholds)
+    // Every sent value is kept; the object predates scheduled recovery, so only its defaults are added.
+    expect((api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig).scheduling_thresholds).toEqual({ ...thresholds, recovery_enabled: true, recovery_interval_seconds: 1800 })
     expect((api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig).account_priority_rules).toEqual(accountRules)
+    wrapper.unmount()
+  })
+
+  it('sends a configured scheduled recovery back unchanged with a test-only edit', async () => {
+    // Switched off with a custom, non-minute interval: neither may be reset by this page.
+    const thresholds = {
+      cost_first: { error_rate: 0.2, ttft_seconds: 15 },
+      stability_first: { error_rate: 0.05, ttft_seconds: 8 },
+      avoid_degradation: { error_rate: 0.2, ttft_seconds: 15 },
+      custom_balance: { error_rate: 0.2, ttft_seconds: 15 },
+      min_error_samples: 10,
+      min_ttft_samples: 20,
+      recovery_enabled: false,
+      recovery_interval_seconds: 7201
+    }
+    api.getOpenAIEvalConfig.mockResolvedValue({ ...editableConfig(), scheduling_thresholds: thresholds })
+    const wrapper = mountView()
+    await flushPromises()
+
+    await openEdit(wrapper)
+    await choose('[data-testid="edit-effort"]', '')
+    await apply()
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    expect((api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig).scheduling_thresholds).toEqual(thresholds)
     wrapper.unmount()
   })
 

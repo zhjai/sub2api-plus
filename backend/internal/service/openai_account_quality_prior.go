@@ -50,9 +50,10 @@ func openAIEvalModelConfiguredForCandidates(cfg *OpenAIEvalConfig, model string,
 }
 
 // Call with the coordinator lock held, or while building an unpublished generation.
-// Runtime error/TTFT evidence does not prove model quality and cannot erase this prior.
+// Runtime error/TTFT evidence and sorting-cache expiry do not prove model quality
+// and cannot erase this prior. Each quality reference keeps its own expiry.
 func accountQualityPriors(gen *openAIRankingGeneration, cfg *OpenAIEvalConfig, groupID int64, model, effort string, accounts []Account, latest map[OpenAIEvalEvidenceKey]OpenAIEvalRun, now time.Time) map[int64]*OpenAIEvalAccountQualityPrior {
-	if gen == nil || cfg == nil || !cfg.EffectsEnabled || cfg.Revision != gen.summary.ConfigRevision || !now.Before(gen.deadline) {
+	if gen == nil || cfg == nil || !cfg.EffectsEnabled || cfg.Revision != gen.summary.ConfigRevision {
 		return nil
 	}
 	policy, weights := openAIEvalRankingWeights(cfg, model, effort)
@@ -87,12 +88,9 @@ func accountQualityPriors(gen *openAIRankingGeneration, cfg *OpenAIEvalConfig, g
 			continue
 		}
 		q := row.Factors.Quality
-		if q.ExpiresAt != nil && !now.Before(*q.ExpiresAt) {
-			continue
-		}
 		var modelCells []OpenAIEvalRankingFactors
 		for _, cell := range row.Models {
-			if openAIEvalQualityDimension(cell.RequestedModel) == openAIEvalQualityDimension(model) && cell.Factors.Quality.Known && cell.Factors.Quality.Selected > 0 {
+			if openAIEvalQualityDimension(cell.RequestedModel) == openAIEvalQualityDimension(model) && cell.Factors.Quality.Known && cell.Factors.Quality.Selected > 0 && cell.Factors.Quality.ExpiresAt != nil && now.Before(*cell.Factors.Quality.ExpiresAt) {
 				modelCells = append(modelCells, cell.Factors)
 			}
 		}
@@ -124,9 +122,6 @@ func accountQualityPriors(gen *openAIRankingGeneration, cfg *OpenAIEvalConfig, g
 		}
 		sources = dedupeAndSortModelIDs(sources)
 		expires := *q.ExpiresAt
-		if gen.deadline.Before(expires) {
-			expires = gen.deadline
-		}
 		basis := "aggregate_fallback"
 		if modelConfigured {
 			basis = "model_effort_fallback"

@@ -20,7 +20,7 @@ import (
 // Forward forwards request to OpenAI API
 func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
 	if account != nil && account.Platform == PlatformPrism {
-		return s.forwardPrismResponses(ctx, c, account, body)
+		return nil, fmt.Errorf("Prism channel has been removed")
 	}
 	beginUpstreamResponseModelObservation(c)
 	setOpenAIExecContract(c, body, false)

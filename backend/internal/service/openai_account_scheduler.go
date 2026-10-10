@@ -437,13 +437,15 @@ type openAIAccountRuntimeRouteKey struct {
 }
 
 type openAIAccountRuntimeStat struct {
-	metricVersion     atomic.Uint64
-	errorRateEWMABits atomic.Uint64
-	ttftEWMABits      atomic.Uint64
-	sampleCount       atomic.Int64
-	ttftSampleCount   atomic.Int64
-	observedAt        atomic.Int64
-	ttftObservedAt    atomic.Int64
+	recoveryLastAttemptAt atomic.Int64
+	recoveryInFlight      atomic.Bool
+	metricVersion         atomic.Uint64
+	errorRateEWMABits     atomic.Uint64
+	ttftEWMABits          atomic.Uint64
+	sampleCount           atomic.Int64
+	ttftSampleCount       atomic.Int64
+	observedAt            atomic.Int64
+	ttftObservedAt        atomic.Int64
 }
 
 func newOpenAIAccountRuntimeStats() *openAIAccountRuntimeStats {
@@ -816,13 +818,13 @@ func (s *defaultOpenAIAccountScheduler) Select(
 			candidate := &decision.Candidates[i]
 			if priority, matched := openAIEvalAccountPriorityFromIndex(req.accountPriorityIndex, candidate.AccountID, openAIClientModelForSchedule(req)); matched {
 				candidate.AccountRulePriority = rankingPtr(priority)
-				if openAIAccountPriorityRulesActive(req) && !req.DisableStickyEscape && selection != nil && selection.Account != nil && selection.Account.ID == candidate.AccountID && decision.Layer == openAIAccountScheduleLayerLoadBalance && !req.RouteMigrationActive {
+				if decision.ReasonCode != "runtime_recovery_trial" && openAIAccountPriorityRulesActive(req) && !req.DisableStickyEscape && selection != nil && selection.Account != nil && selection.Account.ID == candidate.AccountID && decision.Layer == openAIAccountScheduleLayerLoadBalance && !req.RouteMigrationActive {
 					decision.ReasonCode = "account_priority_rule"
 					decision.ReasonText = "highest available account priority layer; policy ordering within layer"
 				}
 			}
 		}
-		if openAIAccountPriorityRulesActive(req) && !req.DisableStickyEscape && selection != nil && selection.Account != nil && decision.Layer == openAIAccountScheduleLayerLoadBalance && !req.RouteMigrationActive {
+		if decision.ReasonCode != "runtime_recovery_trial" && openAIAccountPriorityRulesActive(req) && !req.DisableStickyEscape && selection != nil && selection.Account != nil && decision.Layer == openAIAccountScheduleLayerLoadBalance && !req.RouteMigrationActive {
 			if _, matched := openAIEvalAccountPriorityFromIndex(req.accountPriorityIndex, selection.Account.ID, openAIClientModelForSchedule(req)); !matched {
 				decision.ReasonCode, decision.ReasonText = "account_priority_fallback", "no rule account admitted; selected unmatched account by policy"
 			}
@@ -1003,10 +1005,8 @@ func (s *defaultOpenAIAccountScheduler) Select(
 	}()
 
 	previousResponseID := strings.TrimSpace(req.PreviousResponseID)
-	if NormalizeOpenAICompatiblePlatform(req.Platform) == PlatformPrism && previousResponseID != "" {
-		req.PreviousResponseCanMove = false
-	}
-	if previousResponseID != "" && (NormalizeOpenAICompatiblePlatform(req.Platform) == PlatformOpenAI || NormalizeOpenAICompatiblePlatform(req.Platform) == PlatformPrism) &&
+
+	if previousResponseID != "" && NormalizeOpenAICompatiblePlatform(req.Platform) == PlatformOpenAI &&
 		((!openAIRankedPolicyEnabled(req) && !openAIAccountPriorityRulesActive(req)) || !req.PreviousResponseCanMove || req.DisableStickyEscape) &&
 		((!req.RouteMigrationActive && !req.StickyWeighted) || !req.PreviousResponseCanMove) {
 		selection, err := s.service.selectAccountByPreviousResponseIDForCapability(
@@ -1058,7 +1058,7 @@ func (s *defaultOpenAIAccountScheduler) Select(
 
 	// A required response owner is a hard boundary, not session affinity.
 	// Reject its failed selection before trying any unrelated sticky account.
-	if (NormalizeOpenAICompatiblePlatform(req.Platform) == PlatformOpenAI || NormalizeOpenAICompatiblePlatform(req.Platform) == PlatformPrism) && req.RequiredCapability != OpenAIEndpointCapabilityEmbeddings && previousResponseID != "" && !req.PreviousResponseCanMove {
+	if NormalizeOpenAICompatiblePlatform(req.Platform) == PlatformOpenAI && req.RequiredCapability != OpenAIEndpointCapabilityEmbeddings && previousResponseID != "" && !req.PreviousResponseCanMove {
 		decision.RankingBasis = "owner"
 		return nil, decision, noAvailableOpenAISelectionError(req.RequestedModel, false, "required_owner_unavailable")
 	}
@@ -1313,17 +1313,18 @@ func shouldEscapeStickyAccountWithMetrics(errorRate, ttft float64, hasTTFT bool,
 }
 
 type openAIAccountCandidateScore struct {
-	account             *Account
-	loadInfo            *AccountLoadInfo
-	loadKnown           bool
-	score               float64
-	priority            int
-	errorRate           float64
-	ttft                float64
-	hasTTFT             bool
-	rateMultiplier      float64
-	quality             *OpenAIEvalQualityAssessment
-	qualityContribution float64
+	thresholdRecoveryTrial bool
+	account                *Account
+	loadInfo               *AccountLoadInfo
+	loadKnown              bool
+	score                  float64
+	priority               int
+	errorRate              float64
+	ttft                   float64
+	hasTTFT                bool
+	rateMultiplier         float64
+	quality                *OpenAIEvalQualityAssessment
+	qualityContribution    float64
 }
 
 type openAIAccountCandidateHeap []openAIAccountCandidateScore
@@ -2221,6 +2222,41 @@ func (s *defaultOpenAIAccountScheduler) tryAcquireOpenAISelectionOrderWithBudget
 				continue
 			}
 		}
+		if candidate.thresholdRecoveryTrial {
+			thresholds := openAIEvalSchedulingPolicy.Load().(*openAIEvalSchedulingPolicySnapshot).Thresholds
+			recoveryRelease := s.stats.reserveRuntimeRecovery(ctx, fresh.ID, openAIClientModelForSchedule(req), req.RequestedReasoningEffort, openAIEffectiveSchedulingPolicy(req), thresholds, time.Now())
+			if recoveryRelease == nil {
+				release(result)
+				continue
+			}
+			previousRelease := result.ReleaseFunc
+			var once sync.Once
+			result.ReleaseFunc = func() {
+				once.Do(func() {
+					recoveryRelease()
+					if previousRelease != nil {
+						previousRelease()
+					}
+				})
+			}
+			if ctx.Err() != nil {
+				release(result)
+				return nil, compactBlocked, ctx.Err()
+			}
+			if req.rankingDecision != nil {
+				req.rankingDecision.ReasonCode = "runtime_recovery_trial"
+				req.rankingDecision.ReasonText = "timed retry within the existing policy and quality tier"
+				for j := range req.rankingDecision.Candidates {
+					if req.rankingDecision.Candidates[j].AccountID == fresh.ID {
+						req.rankingDecision.Candidates[j].DecisionReason = "runtime_recovery_trial"
+						if req.rankingDecision.Candidates[j].Factors != nil {
+							f := s.stats.rankingFactors(fresh.ID, openAIClientModelForSchedule(req), req.RequestedReasoningEffort, time.Now())
+							req.rankingDecision.Candidates[j].Factors.RuntimeRecovery = rankingRuntimeRecovery(openAIEffectiveSchedulingPolicy(req), thresholds, f, time.Now())
+						}
+					}
+				}
+			}
+		}
 		if req.SessionHash != "" && !req.PreserveStickyBinding {
 			_ = s.service.bindOpenAIStickySessionDuringSelection(ctx, req.GroupID, req.SessionHash, fresh.ID)
 		}
@@ -2835,9 +2871,7 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 	if account == nil {
 		return false, "account_nil"
 	}
-	if account.Platform == PlatformPrism && PrismAccountModelEligibility(ctx, account, req.RequestedModel, req.RequestedReasoningEffort) != nil {
-		return false, "prism_model_or_effort_unavailable"
-	}
+
 	if source, ok := CompositeRouteSourceFromContext(ctx); ok && source == CompositeRouteSourceAccount {
 		if publicModel, modelOK := RequestedPublicModelFromContext(ctx); modelOK && !explicitModelMappingClaims(*account, publicModel) {
 			return false, "account_model_not_owned"
@@ -2880,7 +2914,7 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 	}) {
 		return false, "shadow_parent_unhealthy"
 	}
-	if account.Platform != PlatformPrism && req.RequestedModel != "" && !account.IsModelSupported(req.RequestedModel) {
+	if req.RequestedModel != "" && !account.IsModelSupported(req.RequestedModel) {
 		return false, "model_not_supported"
 	}
 	if req.GroupID != nil && s != nil && s.service != nil &&
@@ -3325,7 +3359,6 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	useUpstreamTokenCost bool,
 ) (selected *AccountSelectionResult, finalDecision OpenAIAccountScheduleDecision, selectErr error) {
 	ctx = s.withOpenAIQuotaAutoPauseContext(ctx)
-	ctx = withPrismLifecycle(ctx, s.prismAccountService)
 	ctx = s.withOpenAIGroupPrivacyRequirement(ctx, groupID)
 	// 分组利润控制：唯一文本调度入口的防御性装门。handler 文本
 	// 入口已在请求开始经 WithOpenAIRequestPricingContext 装门并固定 pricingAt，
@@ -3337,9 +3370,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 		ctx = s.withOpenAIProfitControlGate(ctx, groupID)
 	}
 	platform = NormalizeOpenAICompatiblePlatform(platform)
-	if platform == PlatformPrism && strings.TrimSpace(previousResponseID) != "" {
-		previousResponseCanMove = false
-	}
+
 	clientRequestedModel := OpenAIClientRequestedModelFromContext(ctx)
 	if strings.TrimSpace(clientRequestedModel) == "" {
 		clientRequestedModel = requestedModel
@@ -3386,7 +3417,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	}
 	if scheduler == nil {
 		_, migrating := OpenAIRouteMigrationFromContext(ctx)
-		requiresOwner := (platform == PlatformOpenAI || platform == PlatformPrism) && requiredCapability != OpenAIEndpointCapabilityEmbeddings && strings.TrimSpace(previousResponseID) != "" && (!previousResponseCanMove || platform == PlatformPrism)
+		requiresOwner := platform == PlatformOpenAI && requiredCapability != OpenAIEndpointCapabilityEmbeddings && strings.TrimSpace(previousResponseID) != "" && !previousResponseCanMove
 		if migrating || decision.SchedulingPolicy != "" || priorityRulesActive || requiresOwner {
 			scheduler = s.persistentOpenAIAccountScheduler()
 		}

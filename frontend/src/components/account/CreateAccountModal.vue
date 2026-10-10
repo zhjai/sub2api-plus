@@ -241,15 +241,6 @@
             <PlatformIcon platform="typesafe" size="sm" />
             TypeSafe / Jev
           </button>
-          <button
-            type="button"
-            data-testid="create-platform-prism"
-            @click="emit('prism')"
-            class="flex flex-1 items-center justify-center gap-2 rounded-md px-3 py-2.5 text-sm font-medium text-gray-600 transition-all hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200"
-          >
-            <PlatformIcon platform="prism" size="sm" />
-            Prism
-          </button>
         </div>
       </div>
 
@@ -4162,8 +4153,6 @@ const props = defineProps<Props>()
 const emit = defineEmits<{
   close: []
   created: []
-  /** Prism accounts are added through PrismAccountDialog. */
-  prism: []
 }>()
 
 const appStore = useAppStore()

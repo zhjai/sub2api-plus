@@ -21,6 +21,7 @@
 
     <p v-if="orderingText" class="lb-note" data-testid="board-ordering">{{ orderingText }}</p>
     <p v-if="anyThresholdReason" class="lb-note" data-testid="board-threshold-note">{{ t('admin.modelIntegrity.scheduling.board.threshold.evidence') }}</p>
+    <p v-if="anyRecovery" class="lb-note" data-testid="board-recovery-note">{{ t('admin.modelIntegrity.scheduling.board.recovery.note') }}</p>
     <p v-if="groupId !== null" class="lb-note" data-testid="board-filter-note">{{ t('admin.modelIntegrity.scheduling.board.filterNote') }}</p>
     <p v-if="notice" class="lb-warn" role="status" data-testid="board-notice">{{ notice }}</p>
     <div v-if="loadError" class="lb-error" role="alert" data-testid="board-error">
@@ -64,6 +65,18 @@
                   :data-reason="reason"
                   :title="t('admin.modelIntegrity.scheduling.board.threshold.hint')"
                 >{{ t('admin.modelIntegrity.scheduling.board.threshold.label') }} · {{ thresholdReasonText(reason) }}</span>
+                <!-- Scheduled recovery of that move-back. Every state is still over the
+                     threshold, so none of them borrows the in-force (primary) colour. -->
+                <template v-if="recoveryOf(row.factors)">
+                  <span
+                    class="lb-recovery"
+                    :class="`lb-recovery-${recoveryOf(row.factors)!.state}`"
+                    data-testid="board-recovery"
+                    :data-state="recoveryOf(row.factors)!.code"
+                    :title="recoveryDetail(recoveryOf(row.factors)!)"
+                  >{{ recoveryLabel(recoveryOf(row.factors)!) }}</span>
+                  <span v-if="recoveryOf(row.factors)!.nextTrialAt" class="tabular-nums" data-testid="board-recovery-next">{{ t('admin.modelIntegrity.scheduling.board.recovery.nextRow', { time: formatDateTime(recoveryOf(row.factors)!.nextTrialAt!) }) }}</span>
+                </template>
                 <span v-if="!row.eligible" class="lb-out" data-testid="board-ineligible">{{ t('admin.modelIntegrity.scheduling.board.ineligible') }}</span>
               </p>
               <p class="lb-account-sub" data-testid="board-coverage">{{ coverageText(row) }}</p>
@@ -117,6 +130,9 @@
             <p v-if="row.threshold_reasons?.length" class="lb-detail-line" data-testid="board-threshold-detail">
               {{ t('admin.modelIntegrity.scheduling.board.threshold.hint') }}
             </p>
+            <p v-if="recoveryOf(row.factors)" class="lb-detail-line" data-testid="board-recovery-detail">
+              {{ recoveryDetail(recoveryOf(row.factors)!) }} {{ t('admin.modelIntegrity.scheduling.board.recovery.rowScope') }}
+            </p>
             <p v-if="row.worst_quality_model" class="lb-detail-line" data-testid="board-worst">
               {{ t('admin.modelIntegrity.scheduling.board.worst', { model: row.worst_quality_model, ratio: row.worst_quality_ratio == null ? t('admin.modelIntegrity.scheduling.board.qualityUnknown') : formatPercent(row.worst_quality_ratio) }) }}
             </p>
@@ -160,7 +176,13 @@
                 </thead>
                 <tbody>
                   <tr v-for="model in row.models" :key="`${model.requested_model}\u0000${model.reasoning_effort}`" data-testid="board-model-row">
-                    <td class="font-medium text-gray-900 dark:text-white">{{ model.requested_model }}</td>
+                    <td class="font-medium text-gray-900 dark:text-white">
+                      {{ model.requested_model }}
+                      <span v-if="recoveryOf(model.factors)" class="lb-model-recovery" data-testid="board-model-recovery" :data-state="recoveryOf(model.factors)!.code" :title="recoveryDetail(recoveryOf(model.factors)!)">
+                        <span class="lb-recovery" :class="`lb-recovery-${recoveryOf(model.factors)!.state}`">{{ recoveryLabel(recoveryOf(model.factors)!) }}</span>
+                        <span v-if="recoveryOf(model.factors)!.nextTrialAt" class="tabular-nums">{{ t('admin.modelIntegrity.scheduling.board.recovery.next', { time: formatDateTime(recoveryOf(model.factors)!.nextTrialAt!) }) }}</span>
+                      </span>
+                    </td>
                     <td>{{ model.reasoning_effort || t('admin.modelIntegrity.scheduling.rank.unspecifiedEffort') }}</td>
                     <td class="lb-upstream">{{ model.upstream_models.length ? model.upstream_models.join(', ') : '—' }}</td>
                     <td v-for="factor in MODEL_FACTORS" :key="factor" class="num" :data-testid="`board-model-${factor}`">
@@ -219,11 +241,13 @@ import {
   RANKING_FACTORS,
   rankingErrorText,
   ruleExceptionsFor,
+  runtimeRecoveryView,
   sameOverviewBinding,
   thresholdReasonKey,
   type FactorSourceKind,
   type OverviewBinding,
-  type RankingReadOutcome
+  type RankingReadOutcome,
+  type RuntimeRecoveryView
 } from '@/views/admin/modelIntegrity/modelIntegrity'
 
 /** Per-model factors; price and load are account facts and are shown once on the row. */
@@ -273,6 +297,8 @@ const summary = computed<OpenAIEvalRankingSummary | null>(() => meta.value?.summ
 const qualityFirst = computed(() => isQualityFirst(meta.value?.ordering, meta.value?.policy))
 /** True when at least one row on screen carries a threshold badge. */
 const anyThresholdReason = computed(() => rows.value.some(row => (row.threshold_reasons ?? []).length > 0))
+/** True when any row or model on screen has a scheduled recovery state. */
+const anyRecovery = computed(() => rows.value.some(row => recoveryOf(row.factors) || (row.models ?? []).some(model => recoveryOf(model.factors))))
 const stale = computed(() => isStaleEvaluation(summary.value?.config_revision, props.currentRevision))
 const policyName = computed(() => (meta.value ? policyLabel(meta.value.policy) : ''))
 const orderingText = computed(() => {
@@ -457,6 +483,19 @@ function thresholdReasonText(code: string) {
   return key === 'other'
     ? t('admin.modelIntegrity.scheduling.board.threshold.other', { code })
     : t(`admin.modelIntegrity.scheduling.board.threshold.${key}`)
+}
+
+const recoveryOf = (factors: OpenAIEvalRankingFactors | undefined) => runtimeRecoveryView(factors)
+
+/** The state's own name; a state this page does not know is shown with its code, never as recovered. */
+function recoveryLabel(view: RuntimeRecoveryView) {
+  return view.state === 'other'
+    ? t('admin.modelIntegrity.scheduling.board.recovery.other', { code: view.code || '—' })
+    : t(`admin.modelIntegrity.scheduling.board.recovery.${view.state}`)
+}
+
+function recoveryDetail(view: RuntimeRecoveryView) {
+  return t(`admin.modelIntegrity.scheduling.board.recovery.detail.${view.state}`, { code: view.code || '—' })
 }
 
 function groupNames(row: OpenAIEvalOverviewAccount) {
@@ -655,6 +694,14 @@ const formatPercent = (value: number) => `${Number((value * 100).toFixed(1))}%`
 /* A soft ordering exception, so it must not read as strongly as .lb-out (excluded). */
 .lb-threshold { @apply rounded bg-amber-100 px-1 font-medium text-amber-900 dark:bg-amber-900/40 dark:text-amber-200; }
 .lb-out { @apply font-medium text-rose-700 dark:text-rose-300; }
+/* Scheduled recovery, by closeness to a trial: waiting is plain text, ready is
+   outlined, running is filled. All stay in the threshold's amber, never primary. */
+.lb-recovery { @apply whitespace-nowrap rounded px-1 font-medium; }
+.lb-recovery-waiting { @apply px-0 text-amber-800 dark:text-amber-300; }
+.lb-recovery-ready { @apply text-amber-900 ring-1 ring-inset ring-amber-400 dark:text-amber-200 dark:ring-amber-500/60; }
+.lb-recovery-in_flight { @apply bg-amber-50 text-amber-900 ring-1 ring-inset ring-amber-400 dark:bg-amber-900/30 dark:text-amber-200 dark:ring-amber-500/60; }
+.lb-recovery-other { @apply px-0 text-gray-600 dark:text-gray-300; }
+.lb-model-recovery { @apply mt-0.5 flex flex-wrap items-baseline gap-x-1.5 text-[11px] font-normal text-gray-500 dark:text-gray-400; }
 
 /* The one emphatic element: the value the order is actually sorted by. */
 .lb-score { @apply flex flex-col items-end text-right; }

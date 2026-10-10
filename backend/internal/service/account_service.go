@@ -426,7 +426,6 @@ func (s *AccountService) Delete(ctx context.Context, id int64) error {
 	if err := s.accountRepo.Delete(ctx, id); err != nil {
 		return fmt.Errorf("delete account: %w", err)
 	}
-	InvalidatePrismAccountCatalog(id)
 
 	return nil
 }

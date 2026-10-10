@@ -422,19 +422,8 @@ export default {
         title: 'Add test targets',
         accounts: 'Accounts',
         accountsHint: 'Multiple selection supported. Only OpenAI accounts are listed.',
-        prismAccountsHint: 'Multiple selection supported. Models and efforts come from the selected accounts’ own Prism catalogs.',
         noPrismAccounts: 'No Prism accounts found.',
         source: 'Account type',
-        prismPickAccountFirst: 'Select accounts first',
-        prismLoadingModels: 'Loading the account’s Prism models…',
-        prismCatalogLoading: 'Loading models…',
-        prismCatalogError: 'Models unavailable',
-        prismCatalogCount: '{count} models',
-        prismCatalogFailed: 'Could not load the Prism models for {accounts}. Retry, or refresh the account credentials on the Accounts page.',
-        prismNoSharedModels: 'The selected accounts have no model in common. Select fewer accounts.',
-        prismNoModels: 'This account has no selectable Prism model right now. Check its aliases and catalog on the Accounts page.',
-        prismDefaultEffort: 'Default ({effort})',
-        prismNote: 'Prism targets run Candy on any catalog model; Fingerprint and ModelTrace only when a versioned baseline covers the model. State Probe does not apply.',
         searchAccounts: 'Search by account name or ID',
         noAccounts: 'No OpenAI accounts found.',
         model: 'Requested model',
@@ -447,8 +436,6 @@ export default {
       },
       edit: {
         open: 'Edit',
-        prismCatalogFailed: 'Could not load this account’s Prism models.',
-        prismNotInCatalog: '{model} (not in the account’s catalog)',
         title: 'Edit test target',
         account: 'Account',
         submit: 'Apply',
@@ -457,18 +444,7 @@ export default {
         hint: 'Automatic test plans stay the same; the change applies to future tests only. History keeps the original model and reasoning effort.',
         stateProbeDefault: 'State probe keeps running on the account\'s default reasoning effort; its automatic plan is unchanged.'
       },
-      prism: {
-        target: 'Prism account. Models and efforts follow its own catalog.',
-        targetAlias: 'Prism account. This name is an alias for {model}; tests evaluate that model.',
-        targetLoading: 'Prism account. Loading its model catalog…',
-        targetCatalogError: 'Prism account. Its model catalog could not be loaded; the server still checks every run.',
-        noFingerprintBaseline: 'No versioned Fingerprint baseline covers {model}, so this test does not run for this target.',
-        stateProbeUnsupported: 'Prism does not support the Codex state probe.',
-        unsupported: 'Not available for Prism targets.',
-        noModelTraceBaseline: 'The ModelTrace bank does not cover {model}, so this test does not run for this target.',
-        modelTraceCoverageUnknown: 'This server does not report which models the ModelTrace bank covers; an uncovered run is rejected before any request is sent.',
-        notInCatalog: '{model} is not a selectable model on this account right now. Runs will be rejected until the target is edited.'
-      },
+
       baselineNote: 'Fingerprint reference version {version}.'
     },
     scheduling: {
@@ -616,7 +592,16 @@ export default {
           ttft_seconds: '{policy}: enter a latency above 0 and up to 86,400 seconds.',
           samples: 'Enter a whole number from 1 to 1,000,000.'
         },
-        invalid: 'Some runtime thresholds are out of range. Fix the highlighted values, then save.'
+        invalid: 'Some runtime thresholds are out of range. Fix the highlighted values, then save.',
+        recovery: {
+          title: 'Scheduled recovery',
+          toggle: 'Try accounts moved back for a threshold on a schedule',
+          interval: 'Trial interval',
+          hint: 'Once an account moves back one position for its error rate or first-token latency, it may receive no requests and so no new evidence that it has improved. With this on, after each interval the next real request may undo that one-position move to try the account once. Without business traffic it only waits: no probe requests are sent and no extra test cost is incurred.',
+          rules: 'Trial requests count toward the error rate and first-token latency as usual; nothing is reset and the account is not marked healthy. If it is still over the threshold, it is tried again after the next interval; once back within the threshold, the ordinary order returns by itself. A trial undoes at most that one position and never bypasses pass rate tiers, account priority rules, groups, RPM, concurrency or cooldowns. Applies to “Lowest cost first”, “Stability first” and “Avoid degradation”; “Custom balance” uses no runtime thresholds, so it does not apply.',
+          off: 'Off: the runtime thresholds and the ordinary order are unchanged; moved-back accounts are just not tried on a schedule. The interval is kept.',
+          error: 'Enter {min} to {max} minutes. The interval is stored in whole seconds, with a storage range of {minSeconds} to {maxSeconds} seconds.'
+        }
       },
       quality: {
         title: 'Ranking evaluation interval',
@@ -821,6 +806,7 @@ export default {
         selection_budget_exhausted: 'The admission check limit was reached before any ranked account could be confirmed.',
         quality_unassessed_fallback: 'No account with a known pass rate could take the request, so one with an unknown pass rate was used.',
         quality_weighted_selection: 'Selected by custom weights, including the integrity pass rate.',
+        runtime_recovery_trial: 'Scheduled recovery trial: the selected account had moved back for a runtime threshold and was due for a trial, so this request undid that one-position move to try it. The result counts toward its error rate and first-token latency as usual; it does not mean the account has recovered.',
         unknown: 'Other reason ({code}).'
       },
       exclusion: {
@@ -968,6 +954,26 @@ export default {
           other: 'Code: {code}',
           hint: 'Real requests from this account exceeded the policy’s runtime threshold, so it moved back one position. Under “Avoid degradation” it stays within its pass rate tier. It is not disabled, and the owner, group and capacity checks still decide what can serve.',
           evidence: 'Computed from this account’s real requests, not from this evaluation.'
+        },
+        /**
+         * Scheduled recovery state. In every state the account is still over
+         * its threshold; “Ready for trial” does not mean recovered.
+         */
+        recovery: {
+          waiting: 'Waiting for trial',
+          ready: 'Ready for trial',
+          in_flight: 'Trial running',
+          other: 'Scheduled recovery: {code}',
+          nextRow: 'Earliest next trial {time}',
+          next: 'Next trial {time}',
+          detail: {
+            waiting: 'Scheduled recovery: after the next trial time, the next real request may undo the one-position move to try this account once. Without business traffic it only waits; no probe requests are sent.',
+            ready: 'Scheduled recovery: a trial is due, so the next real request may undo the one-position move to try this account. It is still over the threshold and has not recovered.',
+            in_flight: 'Scheduled recovery: a real request is trying this account now. The result counts toward its error rate and first-token latency as usual; if it is still over the threshold, it is tried again after the next interval.',
+            other: 'Scheduled recovery state: {code}.'
+          },
+          rowScope: 'Shows the earliest next trial among the models over their threshold; dispatch checks each request live.',
+          note: 'The board still shows the ordinary order after the move-back. Scheduled recovery trials happen when real requests are dispatched and appear in the dispatch records.'
         },
         ineligible: 'Unavailable at evaluation',
         moreGroups: '+{count}',
@@ -1300,7 +1306,8 @@ export default {
         required_owner_override: 'The account the request had to stay on.',
         quality_unassessed_fallback: 'Pass rate unknown, so tried after every assessed account.',
         overview_prior: 'Placed by the account ranking; no evidence for this model yet.',
-        account_prior_tier: 'Tiered by an account reference: this model and effort have no configured tests, so the account\'s pass rate on other models or efforts was used.'
+        account_prior_tier: 'Tiered by an account reference: this model and effort have no configured tests, so the account\'s pass rate on other models or efforts was used.',
+        runtime_recovery_trial: 'Scheduled recovery trial: this request undid one threshold move-back to try this account. It is still over the threshold and not treated as recovered.'
       }
     }
   }

@@ -541,20 +541,40 @@ export type ThresholdPolicy = typeof THRESHOLD_POLICIES[number]
 export const THRESHOLD_ROUND_TRIP_POLICIES = [...THRESHOLD_POLICIES, 'custom_balance'] as const
 export const THRESHOLD_SAMPLE_KEYS = ['min_error_samples', 'min_ttft_samples'] as const
 export type ThresholdSampleKey = typeof THRESHOLD_SAMPLE_KEYS[number]
+/** Edited as whole minutes, stored as seconds. */
+export const RECOVERY_INTERVAL_KEY = 'recovery_interval_seconds'
+/** A value that belongs to no single policy row. */
+export type ThresholdScalarKey = ThresholdSampleKey | typeof RECOVERY_INTERVAL_KEY
 /** Identifies one editable value, e.g. 'stability_first.error_rate' or 'min_ttft_samples'. */
-export type ThresholdField = `${ThresholdPolicy}.error_rate` | `${ThresholdPolicy}.ttft_seconds` | ThresholdSampleKey
+export type ThresholdField = `${ThresholdPolicy}.error_rate` | `${ThresholdPolicy}.ttft_seconds` | ThresholdScalarKey
 
 export const MAX_TTFT_THRESHOLD_SECONDS = 86_400
 export const MIN_THRESHOLD_SAMPLES = 1
 export const MAX_THRESHOLD_SAMPLES = 1_000_000
 
-export const DEFAULT_SCHEDULING_THRESHOLDS: OpenAIEvalSchedulingThresholds = {
+/**
+ * Scheduled recovery (定时恢复): every interval, one real request may undo an
+ * account's threshold move-back once to try it. Nothing is sent without
+ * business traffic. The range is the server's storage range; the editor offers
+ * whole minutes within it.
+ */
+export const DEFAULT_RECOVERY_INTERVAL_SECONDS = 30 * 60
+export const MIN_RECOVERY_INTERVAL_SECONDS = 5 * 60
+export const MAX_RECOVERY_INTERVAL_SECONDS = MAX_INTERVAL_SECONDS
+export const RECOVERY_INTERVALS = [5 * 60, 10 * 60, 30 * 60, HOUR, 6 * HOUR, 12 * HOUR, DAY]
+
+/** The thresholds after normalization: the optional recovery fields are always filled. */
+export type NormalizedSchedulingThresholds = OpenAIEvalSchedulingThresholds & Required<Pick<OpenAIEvalSchedulingThresholds, 'recovery_enabled' | 'recovery_interval_seconds'>>
+
+export const DEFAULT_SCHEDULING_THRESHOLDS: NormalizedSchedulingThresholds = {
   cost_first: { error_rate: 0.2, ttft_seconds: 15 },
   stability_first: { error_rate: 0.05, ttft_seconds: 8 },
   avoid_degradation: { error_rate: 0.2, ttft_seconds: 15 },
   custom_balance: { error_rate: 0.2, ttft_seconds: 15 },
   min_error_samples: 10,
-  min_ttft_samples: 20
+  min_ttft_samples: 20,
+  recovery_enabled: true,
+  recovery_interval_seconds: DEFAULT_RECOVERY_INTERVAL_SECONDS
 }
 
 const numberOr = (value: unknown, fallback: number) => (typeof value === 'number' ? value : fallback)
@@ -563,10 +583,11 @@ const numberOr = (value: unknown, fallback: number) => (typeof value === 'number
  * A fresh copy with every missing value taken from the defaults. Values the
  * server sent are kept exactly, including an explicit 0 % error rate, so a
  * save sends back what was loaded; validation reports anything out of range.
+ * A recovery interval of 0 is the server's legacy "unset" and reads as the default.
  */
-export function normalizeSchedulingThresholds(value?: Partial<OpenAIEvalSchedulingThresholds> | null): OpenAIEvalSchedulingThresholds {
+export function normalizeSchedulingThresholds(value?: Partial<OpenAIEvalSchedulingThresholds> | null): NormalizedSchedulingThresholds {
   const source = value && typeof value === 'object' ? value : {}
-  const result = { ...DEFAULT_SCHEDULING_THRESHOLDS } as OpenAIEvalSchedulingThresholds
+  const result = { ...DEFAULT_SCHEDULING_THRESHOLDS }
   for (const policy of THRESHOLD_ROUND_TRIP_POLICIES) {
     const own = source[policy]
     const fallback = DEFAULT_SCHEDULING_THRESHOLDS[policy]
@@ -576,7 +597,16 @@ export function normalizeSchedulingThresholds(value?: Partial<OpenAIEvalScheduli
     }
   }
   for (const key of THRESHOLD_SAMPLE_KEYS) result[key] = numberOr(source[key], DEFAULT_SCHEDULING_THRESHOLDS[key])
+  result.recovery_enabled = typeof source.recovery_enabled === 'boolean' ? source.recovery_enabled : DEFAULT_SCHEDULING_THRESHOLDS.recovery_enabled
+  result.recovery_interval_seconds = source.recovery_interval_seconds === 0
+    ? DEFAULT_RECOVERY_INTERVAL_SECONDS
+    : numberOr(source.recovery_interval_seconds, DEFAULT_RECOVERY_INTERVAL_SECONDS)
   return result
+}
+
+/** Whole seconds within the server's storage range, 300 to 2,147,483,647. */
+export function isValidRecoveryInterval(value: unknown): boolean {
+  return typeof value === 'number' && Number.isInteger(value) && value >= MIN_RECOVERY_INTERVAL_SECONDS && value <= MAX_RECOVERY_INTERVAL_SECONDS
 }
 
 export function isValidThresholdErrorRate(value: unknown): boolean {
@@ -604,6 +634,8 @@ export function invalidThresholdFields(thresholds?: OpenAIEvalSchedulingThreshol
     if (!isValidThresholdTTFT(value[policy].ttft_seconds)) invalid.push(`${policy}.ttft_seconds`)
   }
   for (const key of THRESHOLD_SAMPLE_KEYS) if (!isValidThresholdSamples(value[key])) invalid.push(key)
+  // Checked while switched off too: the server stores the interval either way.
+  if (!isValidRecoveryInterval(value.recovery_interval_seconds)) invalid.push(RECOVERY_INTERVAL_KEY)
   return invalid
 }
 
@@ -1039,7 +1071,9 @@ const KNOWN_DECISIONS = new Set([
   'no_selection', 'selection_error',
   // Ranked dispatch and quality-aware selection (openai_account_scheduler*.go).
   'explicit_policy_rank', 'required_owner_override', 'selection_budget_exhausted', 'quality_unassessed_fallback',
-  'quality_weighted_selection'
+  'quality_weighted_selection',
+  // A scheduled recovery trial undid one threshold move-back for this request.
+  'runtime_recovery_trial'
 ])
 
 export function decisionKey(code: string | undefined): string {
@@ -1054,7 +1088,8 @@ const KNOWN_CANDIDATE_REASONS = new Set([
   'overview_prior',
   // The requested model and effort have no configured test evidence, so the
   // tier was ordered by the separate account-wide quality reference (rc6).
-  'account_prior_tier'
+  'account_prior_tier',
+  'runtime_recovery_trial'
 ])
 
 export function candidateReasonKey(code: string | undefined): string | null {
@@ -1261,6 +1296,30 @@ export type ThresholdReason = typeof THRESHOLD_REASONS[number]
 /** Known reason codes for an i18n key; anything else is shown with its raw code. */
 export function thresholdReasonKey(code: string): ThresholdReason | 'other' {
   return (THRESHOLD_REASONS as readonly string[]).includes(code) ? code as ThresholdReason : 'other'
+}
+
+export const RUNTIME_RECOVERY_STATES = ['waiting', 'ready', 'in_flight'] as const
+export type RuntimeRecoveryState = typeof RUNTIME_RECOVERY_STATES[number]
+
+export interface RuntimeRecoveryView {
+  /** 'other' is a state this page does not know; it is shown with its raw code. */
+  state: RuntimeRecoveryState | 'other'
+  code: string
+  nextTrialAt: string | null
+}
+
+/**
+ * The scheduled-recovery state of a threshold move-back, or null when the
+ * server sent none. Every state, 'ready' included, still means the account is
+ * over its threshold: none of them is a recovery or a healthy reading.
+ */
+export function runtimeRecoveryView(factors: Pick<OpenAIEvalRankingFactors, 'runtime_recovery'> | null | undefined): RuntimeRecoveryView | null {
+  const value = factors?.runtime_recovery
+  if (!value || typeof value !== 'object') return null
+  const code = typeof value.state === 'string' ? value.state : ''
+  const state = (RUNTIME_RECOVERY_STATES as readonly string[]).includes(code) ? code as RuntimeRecoveryState : 'other'
+  const nextTrialAt = typeof value.next_trial_at === 'string' && value.next_trial_at ? value.next_trial_at : null
+  return { state, code, nextTrialAt }
 }
 
 /**

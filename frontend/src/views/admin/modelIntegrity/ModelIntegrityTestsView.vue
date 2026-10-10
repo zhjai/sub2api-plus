@@ -87,7 +87,7 @@
                   @click="selectedKey = routeKey(route)"
                 >
                   <span class="target-name">
-                    <PlatformIcon v-if="isPrismRoute(route)" platform="prism" size="xs" class="mr-1 inline text-fuchsia-600 dark:text-fuchsia-300" />{{ accountName(route.account_id) }}
+                    {{ accountName(route.account_id) }}
                   </span>
                   <span class="target-route">{{ route.requested_model }} · {{ route.reasoning_effort || t('admin.modelIntegrity.common.defaultEffort') }}</span>
                   <span class="target-foot">
@@ -115,10 +115,6 @@
               <div class="min-w-0">
                 <h2 id="detail-title" class="tests-h2 truncate">{{ accountName(selected.account_id) }} <span class="font-normal text-gray-400">#{{ selected.account_id }}</span></h2>
                 <p class="tests-hint">{{ selected.requested_model }} · {{ selected.reasoning_effort || t('admin.modelIntegrity.common.defaultEffort') }}</p>
-                <p v-if="isPrismRoute(selected)" class="prism-tag" data-testid="prism-target-note">
-                  <PlatformIcon platform="prism" size="xs" />
-                  {{ prismTargetNote(selected) }}
-                </p>
               </div>
               <div class="detail-actions">
                 <button type="button" class="detail-edit" data-testid="edit-target" @click="editing = selected">
@@ -152,8 +148,6 @@
                 :progress="runningProgress.get(runKey(selected, type))"
                 :running="isRunning(selected, type)"
                 :available="testAvailable(selected, type)"
-                :unavailable-reason="unavailableReason(selected, type)"
-                :notice="testNotice(selected, type)"
                 :max-attempts="maxAttempts"
                 :auto-note="autoNote(selected, type)"
                 @run="requestRun(selected, type)"
@@ -231,17 +225,14 @@
       </template>
     </ModelIntegrityShell>
 
-    <AddTargetsDialog :show="showAdd" :accounts="accounts" :catalog="catalog" :prism-catalogs="prismCatalogs" @close="showAdd = false" @add="addTargets" />
+    <AddTargetsDialog :show="showAdd" :accounts="accounts" :catalog="catalog" @close="showAdd = false" @add="addTargets" />
     <EditTargetDialog
       :route="editing"
       :routes="config.accounts"
       :catalog="catalog"
       :account-label="editing ? accountLabel(editing.account_id) : ''"
-      :prism="editing ? isPrismRoute(editing) : false"
-      :prism-state="editing ? prismCatalogs.get(editing.account_id) : undefined"
       @close="editing = null"
       @save="saveEdit"
-      @reload-prism="editing && prismCatalogs.reload(editing.account_id)"
     />
     <RunDetailDialog :run="detailRun" :target="detailRun ? `${accountName(detailRun.account_id)} · ${detailRun.requested_model} · ${detailRun.reasoning_effort || t('admin.modelIntegrity.common.defaultEffort')}` : ''" :catalog="catalog" @close="detailRun = null" />
 
@@ -291,7 +282,6 @@ import TestTypePanel from '@/components/admin/modelIntegrity/TestTypePanel.vue'
 import AddTargetsDialog from '@/components/admin/modelIntegrity/AddTargetsDialog.vue'
 import EditTargetDialog from '@/components/admin/modelIntegrity/EditTargetDialog.vue'
 import RunDetailDialog from '@/components/admin/modelIntegrity/RunDetailDialog.vue'
-import PlatformIcon from '@/components/common/PlatformIcon.vue'
 import AccountAutoTestControls from '@/components/admin/modelIntegrity/AccountAutoTestControls.vue'
 import { accountsAPI, type OpenAIEvalBackgroundControl, type OpenAIEvalRouteConfig, type OpenAIEvalRun } from '@/api/admin/accounts'
 import { useAppStore } from '@/stores/app'
@@ -320,7 +310,6 @@ import {
   type EvalTestType
 } from './modelIntegrity'
 import { runExplanation, runStatusLabel } from './runText'
-import { isPrismAccount, prismTestAvailability, prismUpstreamModel, usePrismEvalCatalogs } from './prismTargets'
 import { useModelIntegrityConfig } from './useModelIntegrityConfig'
 
 const { t } = useI18n()
@@ -343,42 +332,10 @@ const pendingFingerprint = ref<OpenAIEvalRouteConfig | null>(null)
 const manualSampleMode = ref('quick')
 const runningKeys = reactive(new Set<string>())
 const runningProgress = reactive(new Map<string, OpenAIEvalRun>())
-const prismCatalogs = usePrismEvalCatalogs()
 
 const accountOf = (accountID: number) => accounts.value.find(item => item.id === accountID)
-const isPrismRoute = (route: OpenAIEvalRouteConfig) => isPrismAccount(accountOf(route.account_id))
-function prismAvailability(route: OpenAIEvalRouteConfig, type: EvalTestType) {
-  return prismTestAvailability(type, accountOf(route.account_id), route.requested_model, catalog.value, prismCatalogs.get(route.account_id))
-}
-/** Applicability is per target: Prism by baseline coverage, OpenAI State Probe by direct OAuth. */
 function testAvailable(route: OpenAIEvalRouteConfig, type: EvalTestType) {
-  if (isPrismRoute(route)) return prismAvailability(route, type).available
-  return type !== 'state_probe' || isDirectOAuthRoute(route)
-}
-function unavailableReason(route: OpenAIEvalRouteConfig, type: EvalTestType) {
-  if (!isPrismRoute(route)) return undefined
-  const result = prismAvailability(route, type)
-  if (result.available) return undefined
-  const model = prismUpstreamModel(accountOf(route.account_id), route.requested_model)
-  if (result.reason === 'no_fingerprint_baseline') return t('admin.modelIntegrity.tests.prism.noFingerprintBaseline', { model })
-  if (result.reason === 'no_modeltrace_baseline') return t('admin.modelIntegrity.tests.prism.noModelTraceBaseline', { model })
-  return t(type === 'state_probe' ? 'admin.modelIntegrity.tests.prism.stateProbeUnsupported' : 'admin.modelIntegrity.tests.prism.unsupported')
-}
-function testNotice(route: OpenAIEvalRouteConfig, type: EvalTestType) {
-  if (!isPrismRoute(route)) return undefined
-  const result = prismAvailability(route, type)
-  if (!result.available || !result.notice) return undefined
-  if (result.notice === 'not_in_catalog') return t('admin.modelIntegrity.tests.prism.notInCatalog', { model: route.requested_model })
-  return t('admin.modelIntegrity.tests.prism.modelTraceCoverageUnknown')
-}
-function prismTargetNote(route: OpenAIEvalRouteConfig) {
-  const state = prismCatalogs.get(route.account_id)
-  if (!state || state.status === 'loading') return t('admin.modelIntegrity.tests.prism.targetLoading')
-  if (state.status === 'error') return t('admin.modelIntegrity.tests.prism.targetCatalogError')
-  const upstream = prismUpstreamModel(accountOf(route.account_id), route.requested_model)
-  return upstream !== route.requested_model
-    ? t('admin.modelIntegrity.tests.prism.targetAlias', { model: upstream })
-    : t('admin.modelIntegrity.tests.prism.target')
+  return accountOf(route.account_id)?.platform === 'openai' && (type !== 'state_probe' || isDirectOAuthRoute(route))
 }
 const progressTimers = new Set<ReturnType<typeof setInterval>>()
 
@@ -451,10 +408,6 @@ watch(() => config.accounts.length, () => {
   if (!selected.value) selectedKey.value = config.accounts[0] ? routeKey(config.accounts[0]) : ''
 })
 watch(selectedKey, () => { void loadTargetRuns() })
-// Prism targets need their account catalog for effort choices and coverage notes.
-watch(() => config.accounts.filter(isPrismRoute).map(route => route.account_id), ids => {
-  for (const id of new Set(ids)) void prismCatalogs.ensure(id)
-}, { immediate: true })
 watch(selected, value => { if (!value && historyScope.value === 'target') historyScope.value = 'all' })
 
 function autoCount(route: OpenAIEvalRouteConfig) {
@@ -470,7 +423,7 @@ function signalClass(route: OpenAIEvalRouteConfig, type: EvalTestType) {
   return run ? `signal-${resultTone(run.status)}` : 'signal-none'
 }
 function signalText(route: OpenAIEvalRouteConfig, type: EvalTestType) {
-  if (!testAvailable(route, type)) return unavailableReason(route, type) || t('admin.modelIntegrity.tests.onlyDirectOAuth')
+  if (!testAvailable(route, type)) return t('admin.modelIntegrity.tests.onlyDirectOAuth')
   const run = signalRun(route, type)
   return run ? runStatusLabel(t, run) : t('admin.modelIntegrity.tests.neverRun')
 }
@@ -494,7 +447,6 @@ function addTargets(payload: { accountIDs: number[]; model: string; effort: stri
     if (existing.has(key)) continue
     existing.add(key)
     route.direct_oauth_eligible = assumeDirectOAuth(accountID)
-    if (isPrismAccount(accountOf(accountID))) disableUnavailableSchedules(route)
     config.accounts.push(route)
     firstKey ||= key
     added++
@@ -526,23 +478,9 @@ function saveEdit(payload: { model: string; effort: string }) {
     appStore.showError(t('admin.modelIntegrity.tests.edit.duplicate', { target: `${payload.model} · ${payload.effort || t('admin.modelIntegrity.common.defaultEffort')}` }))
     return
   }
-  if (isPrismRoute(next)) disableUnavailableSchedules(next)
   config.accounts.splice(index, 1, next)
   selectedKey.value = key
   appStore.showSuccess(t('admin.modelIntegrity.tests.edit.updated'))
-}
-
-/**
- * Automatic plans for tests a Prism target cannot run are switched off so the
- * scheduler never queues an unsupported probe.
- */
-function disableUnavailableSchedules(route: OpenAIEvalRouteConfig) {
-  route.bps_mode = 'force_off'
-  route.bps_auto = false
-  route.direct_oauth_eligible = false
-  for (const type of TEST_TYPES) {
-    if (!prismAvailability(route, type).available) scheduleOf(route, type).enabled = false
-  }
 }
 
 function confirmRemove() {
@@ -741,7 +679,6 @@ onMounted(initialLoad)
 .tests-h2 { @apply text-base font-semibold text-gray-900 dark:text-white; }
 .tests-hint { @apply mt-1 text-sm leading-relaxed text-gray-600 dark:text-gray-400; }
 .tests-note { @apply text-xs text-gray-500 dark:text-gray-400; }
-.prism-tag { @apply mt-1 flex items-center gap-1.5 text-xs text-fuchsia-700 dark:text-fuchsia-300; }
 .budget-row { @apply flex flex-col gap-3 rounded-xl border border-gray-200 bg-white px-4 py-3 dark:border-dark-700 dark:bg-dark-800/60 md:flex-row md:items-start md:justify-between md:gap-6; }
 .budget { @apply max-w-[80ch] text-sm text-gray-800 dark:text-gray-200; }
 .budget-hint { @apply ml-1 text-gray-500 dark:text-gray-400; }

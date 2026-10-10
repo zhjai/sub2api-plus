@@ -193,7 +193,7 @@ func groupCodexModelMetadata(
 			}
 			lookupModel = account.GetMappedModel(modelID)
 		} else {
-			if account.Platform != PlatformPrism && !account.IsModelSupported(upstreamModel) {
+			if !account.IsModelSupported(upstreamModel) {
 				continue
 			}
 			lookupModel = account.GetMappedModel(upstreamModel)
@@ -215,9 +215,7 @@ func groupCodexModelMetadata(
 		candidates = append(candidates, metadata)
 	}
 	if len(candidates) == 0 {
-		if platform == PlatformPrism {
-			return codexModelMetadataOverride{prism: true, reasoningConflict: true, inputModalitiesConflict: true, UpstreamModelMetadata: UpstreamModelMetadata{CodexToolCapabilities: map[string]json.RawMessage{"service_tiers": json.RawMessage("[]")}}}, true
-		}
+
 		return codexModelMetadataOverride{}, false
 	}
 	metadata := intersectUpstreamModelMetadata(modelID, candidates)
@@ -230,17 +228,7 @@ func groupCodexModelMetadata(
 		metadata.DisplayName = modelID
 		metadata.Description = configuredCodexCustomDescription
 	}
-	if platform == PlatformPrism {
-		metadata.prism = true
-		metadata.inputModalitiesConflict = true
-		if missingMetadata {
-			metadata.reasoningConflict = true
-		}
-		if metadata.CodexToolCapabilities == nil {
-			metadata.CodexToolCapabilities = map[string]json.RawMessage{}
-		}
-		metadata.CodexToolCapabilities["service_tiers"] = json.RawMessage("[]")
-	}
+
 	return metadata, true
 }
 

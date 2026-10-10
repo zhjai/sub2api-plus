@@ -20,6 +20,9 @@ func (s *openAIAccountRuntimeStats) trimRuntimeStats(values *sync.Map, count *at
 	cutoff := time.Now().Add(-openAIRankingMetricTTL).UnixNano()
 	values.Range(func(key, value any) bool {
 		stat := value.(*openAIAccountRuntimeStat)
+		if stat.recoveryInFlight.Load() {
+			return true
+		}
 		at := stat.observedAt.Load()
 		if at < cutoff {
 			values.Delete(key)
@@ -48,6 +51,9 @@ func (s *openAIAccountRuntimeStats) rankingFactors(accountID int64, model, effor
 	if !ok {
 		return f
 	}
+	f.recoveryLastAttemptAt = time.Unix(0, stat.recoveryLastAttemptAt.Load())
+	f.recoveryInFlight = stat.recoveryInFlight.Load()
+	f.recoveryMetricVersion = stat.metricVersion.Load()
 	errorRate, ttft, hasTTFT := snapshotOpenAIAccountRuntimeStat(stat)
 	at := time.Unix(0, stat.observedAt.Load())
 	if count := stat.sampleCount.Load(); count > 0 && !at.After(now) && now.Sub(at) < openAIRankingMetricTTL {

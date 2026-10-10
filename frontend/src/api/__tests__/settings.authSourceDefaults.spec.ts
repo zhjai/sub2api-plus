@@ -20,7 +20,6 @@ const allNullQuotas: DefaultPlatformQuotasMap = {
   antigravity: { daily: null, weekly: null, monthly: null },
   grok: { daily: null, weekly: null, monthly: null },
   typesafe: { daily: null, weekly: null, monthly: null },
-  prism: { daily: null, weekly: null, monthly: null },
 }
 
 describe("admin settings auth source defaults helpers", () => {

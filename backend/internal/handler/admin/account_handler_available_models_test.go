@@ -112,12 +112,13 @@ func TestAccountHandlerGetAvailableModels_GrokUsesXAIModels(t *testing.T) {
 	require.Equal(t, "grok-4.3", resp.Data[0].ID)
 }
 
-func TestAccountHandlerGetAvailableModels_PrismCatalogFailureHasNoStaticFallback(t *testing.T) {
+func TestAccountHandlerGetAvailableModels_RetiredPrismHasNoStaticFallback(t *testing.T) {
 	svc := &availableModelsAdminService{stubAdminService: newStubAdminService(), account: service.Account{ID: 99, Platform: service.PlatformPrism, Type: service.AccountTypeOAuth, Credentials: map[string]any{}}}
 	router := setupAvailableModelsRouter(svc)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/99/models", nil))
-	require.NotEqual(t, http.StatusOK, rec.Code)
+	require.Equal(t, http.StatusGone, rec.Code)
+	require.Contains(t, rec.Body.String(), "Prism channel has been removed")
 	require.NotContains(t, rec.Body.String(), "claude-")
 	require.NotContains(t, rec.Body.String(), "gpt-")
 	require.Contains(t, rec.Body.String(), "message")

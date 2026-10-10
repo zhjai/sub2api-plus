@@ -178,6 +178,7 @@ func scoreOpenAIEvalRankingWithThresholds(policy string, weights OpenAIEvalRanki
 			row.PriorityScore = rankingPtr(c.Price + c.ErrorRate + c.TTFT + c.Load + c.Quality)
 		}
 		row.ThresholdReasons = rankingThresholdReasons(policy, thresholds, row.Factors)
+		row.Factors.RuntimeRecovery = rankingRuntimeRecovery(policy, thresholds, row.Factors, now)
 		rows = append(rows, row)
 	}
 	sort.Slice(rows, func(i, j int) bool {
@@ -303,6 +304,9 @@ func compareRankingQuality(a, b OpenAIEvalRankingQuality) int {
 
 func rankingFactorExpiry(f OpenAIEvalRankingFactors, weights OpenAIEvalRankingWeights, policy string) *time.Time {
 	var until *time.Time
+	if f.RuntimeRecovery != nil && f.RuntimeRecovery.State == "waiting" {
+		until = rankingPtr(f.RuntimeRecovery.NextTrialAt)
+	}
 	include := func(at *time.Time, duration time.Duration) {
 		if at != nil {
 			expiry := at.Add(duration)

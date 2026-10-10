@@ -422,19 +422,8 @@ export default {
         title: '添加测试对象',
         accounts: '账号',
         accountsHint: '支持多选，仅列出 OpenAI 账号。',
-        prismAccountsHint: '支持多选。模型与推理强度来自所选账号自身的 Prism 目录。',
         noPrismAccounts: '没有找到 Prism 账号。',
         source: '账号类型',
-        prismPickAccountFirst: '请先选择账号',
-        prismLoadingModels: '正在读取账号的 Prism 模型…',
-        prismCatalogLoading: '读取模型中…',
-        prismCatalogError: '模型不可用',
-        prismCatalogCount: '{count} 个模型',
-        prismCatalogFailed: '无法读取 {accounts} 的 Prism 模型。请重试，或到账号管理页刷新凭据。',
-        prismNoSharedModels: '所选账号没有共同的模型，请减少所选账号。',
-        prismNoModels: '此账号目前没有可选的 Prism 模型。请到账号管理页检查其别名与目录。',
-        prismDefaultEffort: '默认（{effort}）',
-        prismNote: 'Prism 目标可对目录中任一模型运行 Candy；Fingerprint 与 ModelTrace 仅在有版本化基线覆盖该模型时可用。状态探针不适用。',
         searchAccounts: '搜索账号名称或 ID',
         noAccounts: '未找到 OpenAI 账号。',
         model: '请求模型',
@@ -447,8 +436,6 @@ export default {
       },
       edit: {
         open: '编辑',
-        prismCatalogFailed: '无法读取此账号的 Prism 模型。',
-        prismNotInCatalog: '{model}（不在账号目录中）',
         title: '编辑测试对象',
         account: '账号',
         submit: '应用',
@@ -457,18 +444,7 @@ export default {
         hint: '自动测试计划保持不变，修改只影响之后的测试。历史记录仍按原模型和推理强度保留。',
         stateProbeDefault: '状态探针会继续按账号的默认推理强度运行，自动计划不变。'
       },
-      prism: {
-        target: 'Prism 账号。模型与推理强度以其自身目录为准。',
-        targetAlias: 'Prism 账号。此名称是 {model} 的别名，测试评估的是该模型。',
-        targetLoading: 'Prism 账号。正在读取模型目录…',
-        targetCatalogError: 'Prism 账号。无法读取模型目录，每次运行仍由服务器校验。',
-        noFingerprintBaseline: '没有版本化 Fingerprint 基线覆盖 {model}，此目标不运行该测试。',
-        stateProbeUnsupported: 'Prism 不支持 Codex 状态探针。',
-        unsupported: 'Prism 目标不可用。',
-        noModelTraceBaseline: 'ModelTrace 题库未覆盖 {model}，此目标不运行该测试。',
-        modelTraceCoverageUnknown: '此服务器未提供 ModelTrace 题库的覆盖范围；未覆盖的模型会在发出请求前被拒绝。',
-        notInCatalog: '{model} 目前不是此账号可选的模型。编辑目标前，运行会被拒绝。'
-      },
+
       baselineNote: '行为指纹参考样本版本 {version}。'
     },
     scheduling: {
@@ -616,7 +592,16 @@ export default {
           ttft_seconds: '{policy}：请输入大于 0、不超过 86,400 秒的延迟。',
           samples: '请输入 1 到 1,000,000 之间的整数。'
         },
-        invalid: '部分运行阈值超出范围，请修正标出的数值后再保存。'
+        invalid: '部分运行阈值超出范围，请修正标出的数值后再保存。',
+        recovery: {
+          title: '定时恢复',
+          toggle: '定时试用因阈值后移的账号',
+          interval: '试用间隔',
+          hint: '账号因错误率或首包延迟超过阈值后移一位后，如果一直没有请求落到它上面，就没有新的证据说明它已好转。开启后，每到一个间隔，下一个真实业务请求可以撤销这一位后移，试用该账号一次。没有业务请求时只等待，不会发出探测请求，也不会产生额外测试费用。',
+          rules: '试用请求照常计入错误率和首包延迟，不会清空统计，也不会把账号标为正常；仍超过阈值时下个间隔再试，回到阈值以内后自动恢复普通排序。试用最多撤销这一位后移，不绕过通过率档、账号优先规则、分组、RPM、并发和冷却等限制。适用于「优先低价」「优先稳定」「避免降智」；「自定义平衡」不使用运行阈值，不适用。',
+          off: '已关闭：运行阈值和普通排序不变，只是不再定时试用后移的账号。间隔设置会保留。',
+          error: '请输入 {min} 到 {max} 分钟。间隔按整数秒存储，存储范围为 {minSeconds} 到 {maxSeconds} 秒。'
+        }
       },
       quality: {
         title: '调度评估间隔',
@@ -821,6 +806,7 @@ export default {
         selection_budget_exhausted: '准入检查次数已用完，未能确认任何排名账号。',
         quality_unassessed_fallback: '通过率已知的账号都无法承接该请求，改用通过率未知的账号。',
         quality_weighted_selection: '按包含降智通过率的自定义权重选择。',
+        runtime_recovery_trial: '定时恢复试用：所选账号因运行阈值后移，已到试用时间，本次请求撤销这一位后移试用它。试用结果照常计入错误率和首包延迟，不代表账号已恢复。',
         unknown: '其他原因（{code}）。'
       },
       exclusion: {
@@ -967,6 +953,25 @@ export default {
           other: '取值：{code}',
           hint: '该账号的真实请求超过了当前策略的运行阈值，因此向后移动一位；「避免降智」下仍留在本通过率档内。账号不会被停用，能否调度仍由归属、分组和容量等条件决定。',
           evidence: '由该账号的真实请求计算，不来自本次评估。'
+        },
+        /**
+         * 定时恢复的状态。三种状态下账号都仍超过阈值，「可试用」不是已恢复。
+         */
+        recovery: {
+          waiting: '等待试用',
+          ready: '可试用',
+          in_flight: '试用中',
+          other: '定时恢复：{code}',
+          nextRow: '最早下次试用 {time}',
+          next: '下次试用 {time}',
+          detail: {
+            waiting: '定时恢复：到下次试用时间后，下一个真实请求可撤销这一位后移，试用该账号一次。没有业务请求时只等待，不会发出探测请求。',
+            ready: '定时恢复：已到试用时间，下一个真实请求可撤销这一位后移试用该账号。账号仍超过阈值，尚未恢复。',
+            in_flight: '定时恢复：一个真实请求正在试用该账号，结果照常计入错误率和首包延迟；仍超过阈值时下个间隔再试。',
+            other: '定时恢复状态：{code}。'
+          },
+          rowScope: '按超过阈值的模型中最早的下次试用时间显示；实际调度时逐个请求实时判断。',
+          note: '排行榜仍显示后移后的普通顺序；定时恢复试用发生在真实请求调度时，记录在实际调度中。'
         },
         ineligible: '评估时不可用',
         moreGroups: '+{count}',
@@ -1299,7 +1304,8 @@ export default {
         required_owner_override: '该请求必须留在的账号。',
         quality_unassessed_fallback: '通过率未知，在所有已评估账号之后尝试。',
         overview_prior: '按账号总排行排位；该模型暂无证据。',
-        account_prior_tier: '按账号参考分档：该模型与推理强度没有配置测试项，因此使用该账号在其他模型或推理强度上的通过率参考。'
+        account_prior_tier: '按账号参考分档：该模型与推理强度没有配置测试项，因此使用该账号在其他模型或推理强度上的通过率参考。',
+        runtime_recovery_trial: '定时恢复试用：本次撤销阈值后移一位试用此账号，仍超过阈值，未视为已恢复。'
       }
     }
   }

@@ -81,13 +81,17 @@ type OpenAIEvalRankingMonitor struct {
 	PingLatencyMS *int      `json:"ping_latency_ms"`
 }
 type OpenAIEvalRankingFactors struct {
-	Price            OpenAIEvalRankingPrice     `json:"price"`
-	ErrorRate        OpenAIEvalRankingErrorRate `json:"error_rate"`
-	TTFT             OpenAIEvalRankingTTFT      `json:"ttft"`
-	Load             OpenAIEvalRankingLoad      `json:"load"`
-	Quality          OpenAIEvalRankingQuality   `json:"quality"`
-	Monitoring       []OpenAIEvalRankingMonitor `json:"monitoring,omitempty"`
-	monitorExpiresAt *time.Time
+	RuntimeRecovery       *OpenAIEvalRuntimeRecovery `json:"runtime_recovery,omitempty"`
+	recoveryLastAttemptAt time.Time
+	recoveryInFlight      bool
+	recoveryMetricVersion uint64
+	Price                 OpenAIEvalRankingPrice     `json:"price"`
+	ErrorRate             OpenAIEvalRankingErrorRate `json:"error_rate"`
+	TTFT                  OpenAIEvalRankingTTFT      `json:"ttft"`
+	Load                  OpenAIEvalRankingLoad      `json:"load"`
+	Quality               OpenAIEvalRankingQuality   `json:"quality"`
+	Monitoring            []OpenAIEvalRankingMonitor `json:"monitoring,omitempty"`
+	monitorExpiresAt      *time.Time
 }
 type OpenAIEvalRankingExclusion struct {
 	Code       string    `json:"code"`

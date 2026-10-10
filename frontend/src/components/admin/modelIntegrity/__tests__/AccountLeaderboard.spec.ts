@@ -408,3 +408,95 @@ describe('AccountLeaderboard', () => {
     expect(quality.get('[data-testid="board-ordering"]').text()).toContain('先按通过率从高到低排列')
   })
 })
+
+describe('AccountLeaderboard scheduled recovery', () => {
+  const at = '2026-10-08T09:30:00Z'
+  const recovering = (state: string, nextTrialAt = at) => ({ ...factors(), runtime_recovery: { state, next_trial_at: nextTrialAt } })
+
+  it.each([
+    ['waiting', '等待试用'],
+    ['ready', '可试用'],
+    ['in_flight', '试用中']
+  ])('names the %s state with the earliest next trial, beside the unchanged move-back badge', async (state, label) => {
+    api.getOpenAIEvalAccountOverview.mockResolvedValueOnce(page({
+      accounts: [account(12, 1), account(11, 2, { threshold_reasons: ['error_rate_threshold'], factors: recovering(state) })]
+    }))
+    const wrapper = mountBoard()
+    await flushPromises()
+
+    const row = wrapper.findAll('[data-testid="board-row"]')[1]
+    // The board keeps the ordinary moved-back order and badge; recovery is described, not applied.
+    expect(row.get('[data-testid="board-rank"]').text()).toBe('2')
+    expect(row.get('[data-testid="board-threshold"]').text()).toContain('超出阈值后移一位')
+    const badge = row.get('[data-testid="board-recovery"]')
+    expect(badge.text()).toBe(label)
+    expect(badge.attributes('data-state')).toBe(state)
+    expect(badge.classes()).toContain(`lb-recovery-${state}`)
+    expect(badge.text()).not.toMatch(/已恢复|正常|健康/)
+    expect(row.get('[data-testid="board-recovery-next"]').text()).toBe(`最早下次试用 ${new Date(at).toLocaleString()}`)
+    expect(wrapper.get('[data-testid="board-recovery-note"]').text()).toContain('排行榜仍显示后移后的普通顺序')
+    // Nothing else on the row turns healthy: the clean row is the only one without a badge.
+    expect(wrapper.findAll('[data-testid="board-row"]')[0].find('[data-testid="board-recovery"]').exists()).toBe(false)
+
+    await row.get('[data-testid="board-toggle"]').trigger('click')
+    const detail = wrapper.get('[data-testid="board-recovery-detail"]').text()
+    expect(detail).toContain('最早的下次试用时间')
+    expect(detail).not.toMatch(/已恢复|恢复正常/)
+  })
+
+  it('says a ready account is still over its threshold, not recovered', async () => {
+    api.getOpenAIEvalAccountOverview.mockResolvedValueOnce(page({
+      accounts: [account(11, 1, { threshold_reasons: ['ttft_threshold'], factors: recovering('ready') })]
+    }))
+    const wrapper = mountBoard()
+    await flushPromises()
+
+    await wrapper.get('[data-testid="board-toggle"]').trigger('click')
+    expect(wrapper.get('[data-testid="board-recovery-detail"]').text()).toContain('账号仍超过阈值，尚未恢复')
+    // The move-back badge stays: ready is not a recovery.
+    expect(wrapper.get('[data-testid="board-threshold"]').exists()).toBe(true)
+  })
+
+  it('shows each over-threshold model its own state and next trial', async () => {
+    const base = account(11, 1)
+    api.getOpenAIEvalAccountOverview.mockResolvedValueOnce(page({
+      accounts: [{
+        ...base,
+        factors: recovering('waiting'),
+        models: [
+          { ...base.models[0], factors: { ...base.models[0].factors, runtime_recovery: { state: 'in_flight', next_trial_at: '2026-10-08T10:00:00Z' } } },
+          base.models[1]
+        ]
+      }]
+    }))
+    const wrapper = mountBoard()
+    await flushPromises()
+
+    await wrapper.get('[data-testid="board-toggle"]').trigger('click')
+    const models = wrapper.findAll('[data-testid="board-model-row"]')
+    const recovery = models[0].get('[data-testid="board-model-recovery"]')
+    expect(recovery.attributes('data-state')).toBe('in_flight')
+    expect(recovery.text()).toContain('试用中')
+    expect(recovery.text()).toContain(`下次试用 ${new Date('2026-10-08T10:00:00Z').toLocaleString()}`)
+    expect(models[1].find('[data-testid="board-model-recovery"]').exists()).toBe(false)
+  })
+
+  it('shows an unknown state by its code and no time when none was sent', async () => {
+    api.getOpenAIEvalAccountOverview.mockResolvedValueOnce(page({
+      accounts: [account(11, 1, { factors: recovering('paused', '') })]
+    }))
+    const wrapper = mountBoard()
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="board-recovery"]').text()).toBe('定时恢复：paused')
+    expect(wrapper.find('[data-testid="board-recovery-next"]').exists()).toBe(false)
+  })
+
+  it('adds nothing when the server sent no recovery state', async () => {
+    const wrapper = mountBoard()
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="board-recovery"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="board-recovery-note"]').exists()).toBe(false)
+  })
+})

@@ -13,7 +13,6 @@ const concretePlatforms = [
   'minimax',
   'opencode_go',
   'typesafe',
-  'prism'
 ]
 
 describe('platform option catalogs', () => {

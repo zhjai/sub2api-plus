@@ -433,6 +433,7 @@ func (s *defaultOpenAIAccountScheduler) selectByExplicitRanking(ctx context.Cont
 		})
 	}
 	req.rankingDecision = decision
+	order = s.runtimeRecoveryOrder(req, rows, order, time.Now())
 	result, compactBlocked, err := s.tryAcquireOpenAISelectionOrderWithBudget(ctx, req, order, budget)
 	if err != nil || result != nil {
 		return result, len(eligible), len(order), 0, err
@@ -464,6 +465,11 @@ func (s *defaultOpenAIAccountScheduler) selectByExplicitRanking(ctx context.Cont
 	// Waiting follows the frozen order too. No affinity or score recalculation.
 	cfg := s.service.schedulingConfig()
 	for _, candidate := range order {
+		// A WaitPlan is not an acquired slot and cannot own a retry permit.
+		// Keep waiting in the ordinary demoted order, not the trial insertion.
+		if candidate.thresholdRecoveryTrial {
+			continue
+		}
 		fresh := s.service.resolveFreshSchedulableOpenAIAccount(ctx, candidate.account, req.Platform, req.RequestedModel, false, req.RequiredCapability)
 		if fresh == nil || !s.isAccountRequestCompatible(ctx, fresh, req) || !s.isAccountTransportCompatible(fresh, req.RequiredTransport) {
 			continue

@@ -10,9 +10,6 @@ information is retained in the source tree and is attributed to Wesley Liddick
 and upstream contributors.
 
 Fork-specific changes are maintained by the `zhjai/sub2api-plus` contributors.
-The native Prism integration includes MIT-licensed OAIprism source; see
-[Prism third-party attribution](docs/PRISM_THIRD_PARTY.md) for the pinned source,
-adaptation boundaries, copyright and retained license notices.
 The current release line includes OpenAI Responses/SSE terminal-state handling,
 partial-stream accounting, failover safety after meaningful output, and related
 gateway metadata changes.

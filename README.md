@@ -42,7 +42,6 @@ Fork releases are published at [zhjai/sub2api-plus/releases](https://github.com/
 
 Versioning follows the upstream baseline without impersonating upstream releases. The current fork line is `0.2.13-zhjai.18`: `0.2.13` identifies the upstream baseline and `-zhjai.18` identifies this fork revision. The updater only considers releases with this derived suffix; legacy unqualified fork tags are not treated as current releases.
 
-The native Prism channel supports Cookie import, authorization login and account-specific model catalogs with existing groups and scheduling policies, without an additional proxy service. See [Prism channel configuration and limits](docs/PRISM_CHANNEL.md).
 
 ## Sponsorship
 

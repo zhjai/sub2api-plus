@@ -69,7 +69,6 @@ type AccountHandler struct {
 	ollamaCloudUsage        *service.OllamaCloudUsageService
 	openAIGatewayService    *service.OpenAIGatewayService
 	openAIEvalService       *service.OpenAIEvalService
-	prismAccountService     *service.PrismAccountService
 	opencodeGoUsage         *service.OpenCodeGoUsageService
 	cfg                     *config.Config
 }
@@ -87,9 +86,6 @@ func (h *AccountHandler) SetOllamaCloudUsageService(usage *service.OllamaCloudUs
 // changing the long-standing constructor used by focused admin tests.
 func (h *AccountHandler) SetOpenAIGatewayService(gateway *service.OpenAIGatewayService) {
 	h.openAIGatewayService = gateway
-	if gateway != nil {
-		gateway.SetPrismAccountService(h.prismAccountService)
-	}
 }
 
 func (h *AccountHandler) SetOpenAIEvalService(eval *service.OpenAIEvalService) {
@@ -155,7 +151,6 @@ func NewAccountHandler(
 ) *AccountHandler {
 	return &AccountHandler{
 		adminService:            adminService,
-		prismAccountService:     service.NewPrismAccountService(adminService),
 		oauthService:            oauthService,
 		openaiOAuthService:      openaiOAuthService,
 		geminiOAuthService:      geminiOAuthService,
@@ -2860,14 +2855,9 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 		return
 	}
 
-	// Prism has an account-scoped live catalog; never advertise static fallback models.
+	// Retired platform data remains readable, but no models are advertised.
 	if account.Platform == service.PlatformPrism {
-		account, models, catalogErr := h.prismAccountService.CatalogSnapshot(c.Request.Context(), accountID, false)
-		if catalogErr != nil {
-			prismAdminError(c, catalogErr)
-			return
-		}
-		response.Success(c, service.PrismPublicModels(account, models))
+		response.Error(c, http.StatusGone, "Prism channel has been removed")
 		return
 	}
 

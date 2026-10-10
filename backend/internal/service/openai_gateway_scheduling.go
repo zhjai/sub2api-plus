@@ -292,7 +292,10 @@ func (s *OpenAIGatewayService) SelectAccountForTokenCount(
 // handler 调度入口仍需导出，保持导出名。）
 func NormalizeOpenAICompatiblePlatform(platform string) string {
 	switch platform {
-	case PlatformGrok, PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax, PlatformOpenCodeGo, PlatformPrism:
+	case PlatformPrism:
+		// A retired platform must never silently become an OpenAI route.
+		return PlatformPrism
+	case PlatformGrok, PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax, PlatformOpenCodeGo:
 		return platform
 	default:
 		return PlatformOpenAI
@@ -405,15 +408,7 @@ func openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx context.Con
 	if account.Platform != platform || !account.IsOpenAICompatible() {
 		return "platform_mismatch"
 	}
-	if account.Platform == PlatformPrism {
-		effort := ""
-		if requestedEffort := RequestedReasoningEffortFromContext(ctx); requestedEffort != nil {
-			effort = *requestedEffort
-		}
-		if PrismAccountModelEligibility(ctx, account, requestedModel, effort) != nil {
-			return "prism_model_or_effort_unavailable"
-		}
-	}
+
 	if !account.IsSchedulableForModelWithContext(ctx, requestedModel) {
 		if account.IsSchedulable() {
 			return "model_rate_limited"
@@ -450,7 +445,7 @@ func openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx context.Con
 			return "quota_auto_pause"
 		}
 	}
-	if account.Platform != PlatformPrism && requestedModel != "" && !account.IsModelSupported(requestedModel) {
+	if requestedModel != "" && !account.IsModelSupported(requestedModel) {
 		return "model_not_supported"
 	}
 	if !account.SupportsOpenAIEndpointCapability(requiredCapability) {

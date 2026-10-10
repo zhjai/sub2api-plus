@@ -63,7 +63,7 @@ func TestEvalChatResponseCompletion(t *testing.T) {
 	}
 }
 
-func TestEvalPrismChatCompletionsRunsAllTextTests(t *testing.T) {
+func TestEvalNamedPrismAPIAccountRunsAllTextTests(t *testing.T) {
 	for _, tc := range []struct {
 		testType string
 		requests int

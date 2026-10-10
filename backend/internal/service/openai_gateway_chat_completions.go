@@ -73,7 +73,7 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 ) (*OpenAIForwardResult, error) {
 	rememberOpenCodeInboundBody(c, body)
 	if account != nil && account.Platform == PlatformPrism {
-		return s.forwardPrismChat(ctx, c, account, body)
+		return nil, fmt.Errorf("Prism channel has been removed")
 	}
 	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)

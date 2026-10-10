@@ -137,7 +137,7 @@ func assertLatestVerdict(t *testing.T, s *OpenAIEvalService, ratio float64) {
 	require.Equal(t, 1, OpenAIEvalQualityRefreshStatus().RouteCount)
 }
 
-func TestOpenAIEvalLatestVerdictPrismPassesBothTypes(t *testing.T) {
+func TestOpenAIEvalLatestVerdictAllSelectedTypesPass(t *testing.T) {
 	s, repo, _ := latestVerdictHarness(t)
 	summary, err := s.EvaluateScheduling(context.Background(), 1)
 	require.NoError(t, err)

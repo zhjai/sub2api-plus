@@ -49,7 +49,7 @@ func RegisterGatewayRoutes(
 		switch getGroupPlatform(c) {
 		case service.PlatformOpenAI, service.PlatformGrok,
 			service.PlatformKimi, service.PlatformZhipu, service.PlatformDeepseek,
-			service.PlatformMiniMax, service.PlatformOpenCodeGo, service.PlatformPrism:
+			service.PlatformMiniMax, service.PlatformOpenCodeGo:
 			// 国产 OpenAI 兼容供应商与 openai/grok 一样经 OpenAI 网关转发。
 			return true
 		default:
@@ -59,7 +59,7 @@ func RegisterGatewayRoutes(
 	countTokensHandler := func(c *gin.Context) {
 		switch getGroupPlatform(c) {
 		case service.PlatformPrism:
-			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request_error", "code": "unsupported_operation", "message": "Prism does not support token-count endpoints"}})
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request_error", "code": "unsupported_operation", "message": "Prism channel has been removed"}})
 		case service.PlatformOpenAI, service.PlatformKimi, service.PlatformZhipu, service.PlatformDeepseek, service.PlatformMiniMax, service.PlatformOpenCodeGo:
 			h.OpenAIGateway.CountTokens(c)
 		case service.PlatformGrok:
@@ -167,7 +167,7 @@ func RegisterGatewayRoutes(
 	guardResponsesSubpath := func(next gin.HandlerFunc) gin.HandlerFunc {
 		return func(c *gin.Context) {
 			if getGroupPlatform(c) == service.PlatformPrism {
-				c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request_error", "code": "unsupported_operation", "message": "Prism does not support Responses compact or auxiliary subpaths"}})
+				c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request_error", "code": "unsupported_operation", "message": "Prism channel has been removed"}})
 				return
 			}
 			if !service.IsForwardableOpenAIResponsesRequestPath(c) {
@@ -196,6 +196,7 @@ func RegisterGatewayRoutes(
 	gateway.Use(endpointNorm)
 	gateway.Use(gin.HandlerFunc(apiKeyAuth))
 	gateway.GET("/sub2api/billing", h.Gateway.KeyBillingInfo)
+	gateway.Use(rejectRetiredGatewayPlatform)
 	gateway.Use(groupModelAllowlist)
 	gateway.Use(compositeTarget)
 	gateway.Use(requireGroupAnthropic)
@@ -203,7 +204,7 @@ func RegisterGatewayRoutes(
 		// /v1/messages: auto-route based on group platform
 		gateway.POST("/messages", func(c *gin.Context) {
 			if getGroupPlatform(c) == service.PlatformPrism {
-				c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request_error", "code": "unsupported_operation", "message": "Use Responses or Chat Completions with Prism"}})
+				c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request_error", "code": "unsupported_operation", "message": "Prism channel has been removed"}})
 				return
 			}
 			if isOpenAIResponsesCompatibleGatewayPlatform(c) {
@@ -244,7 +245,7 @@ func RegisterGatewayRoutes(
 		gateway.POST("/alpha/search", textBodyLimit, h.OpenAIGateway.AlphaSearch)
 		gateway.GET("/responses", func(c *gin.Context) {
 			if getGroupPlatform(c) == service.PlatformPrism {
-				c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request_error", "code": "unsupported_operation", "message": "Prism supports HTTP Responses streaming, not WebSocket"}})
+				c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request_error", "code": "unsupported_operation", "message": "Prism channel has been removed"}})
 				return
 			}
 			h.OpenAIGateway.ResponsesWebSocket(c)
@@ -361,6 +362,7 @@ func RegisterGatewayRoutes(
 	gemini.Use(opsErrorLogger)
 	gemini.Use(endpointNorm)
 	gemini.Use(middleware.APIKeyAuthWithSubscriptionGoogle(apiKeyService, subscriptionService, cfg))
+	gemini.Use(rejectRetiredGatewayPlatform)
 	gemini.Use(groupModelAllowlist)
 	gemini.Use(compositeGeminiTarget)
 	gemini.Use(requireGroupGoogle)
@@ -382,7 +384,7 @@ func RegisterGatewayRoutes(
 	// 根路径别名共用中间件链：白名单准入在 apiKeyAuth 之后、compositeTarget
 	// 之前，避免逐条路由手工维护链导致漏挂。
 	rootRoute := func(method, path string, limit gin.HandlerFunc, handler gin.HandlerFunc) {
-		r.Handle(method, path, limit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), groupModelAllowlist, compositeTarget, requireGroupAnthropic, handler)
+		r.Handle(method, path, limit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), rejectRetiredGatewayPlatform, groupModelAllowlist, compositeTarget, requireGroupAnthropic, handler)
 	}
 	for _, prefix := range []string{"/api/v3", "/v3", "/v1", ""} {
 		rootRoute(http.MethodPost, prefix+"/contents/generations/tasks", bodyLimit, h.OpenAIGateway.SeedanceTasks)
@@ -394,7 +396,7 @@ func RegisterGatewayRoutes(
 	rootRoute(http.MethodPost, "/alpha/search", textBodyLimit, h.OpenAIGateway.AlphaSearch)
 	rootRoute(http.MethodGet, "/responses", bodyLimit, func(c *gin.Context) {
 		if getGroupPlatform(c) == service.PlatformPrism {
-			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request_error", "code": "unsupported_operation", "message": "Prism supports HTTP Responses streaming, not WebSocket"}})
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request_error", "code": "unsupported_operation", "message": "Prism channel has been removed"}})
 			return
 		}
 		h.OpenAIGateway.ResponsesWebSocket(c)
@@ -403,7 +405,7 @@ func RegisterGatewayRoutes(
 	rootRoute(http.MethodGet, "/models/:model", bodyLimit, h.Gateway.Models)
 	rootRoute(http.MethodPost, "/messages/count_tokens", bodyLimit, countTokensHandler)
 	codexDirect := r.Group("/backend-api/codex")
-	codexDirect.Use(bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), groupModelAllowlist, compositeTarget, requireGroupAnthropic)
+	codexDirect.Use(bodyLimit, clientRequestID, opsErrorLogger, endpointNorm, gin.HandlerFunc(apiKeyAuth), rejectRetiredGatewayPlatform, groupModelAllowlist, compositeTarget, requireGroupAnthropic)
 	{
 		codexDirect.POST("/realtime/calls", h.OpenAIGateway.Live)
 		codexDirect.GET("/:call_id", h.OpenAIGateway.LiveSideband)
@@ -412,7 +414,7 @@ func RegisterGatewayRoutes(
 		codexDirect.POST("/alpha/search", textBodyLimit, h.OpenAIGateway.AlphaSearch)
 		codexDirect.GET("/responses", func(c *gin.Context) {
 			if getGroupPlatform(c) == service.PlatformPrism {
-				c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request_error", "code": "unsupported_operation", "message": "Prism supports HTTP Responses streaming, not WebSocket"}})
+				c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request_error", "code": "unsupported_operation", "message": "Prism channel has been removed"}})
 				return
 			}
 			h.OpenAIGateway.ResponsesWebSocket(c)
@@ -520,6 +522,7 @@ func RegisterGatewayRoutes(
 	antigravityV1.Use(endpointNorm)
 	antigravityV1.Use(middleware.ForcePlatform(service.PlatformAntigravity))
 	antigravityV1.Use(gin.HandlerFunc(apiKeyAuth))
+	antigravityV1.Use(rejectRetiredGatewayPlatform)
 	antigravityV1.Use(groupModelAllowlist)
 	antigravityV1.Use(requireGroupAnthropic)
 	{
@@ -536,6 +539,7 @@ func RegisterGatewayRoutes(
 	antigravityV1Beta.Use(endpointNorm)
 	antigravityV1Beta.Use(middleware.ForcePlatform(service.PlatformAntigravity))
 	antigravityV1Beta.Use(middleware.APIKeyAuthWithSubscriptionGoogle(apiKeyService, subscriptionService, cfg))
+	antigravityV1Beta.Use(rejectRetiredGatewayPlatform)
 	antigravityV1Beta.Use(groupModelAllowlist)
 	antigravityV1Beta.Use(requireGroupGoogle)
 	{
@@ -552,6 +556,18 @@ func dispatchCodexModelsGateway(c *gin.Context, openAIHandler, generatedHandler 
 		return
 	}
 	generatedHandler(c)
+}
+
+// Persisted Prism groups remain readable, but must not be dispatched through a
+// generic handler after the native channel has been removed.
+func rejectRetiredGatewayPlatform(c *gin.Context) {
+	if getGroupPlatform(c) == service.PlatformPrism {
+		c.AbortWithStatusJSON(http.StatusGone, gin.H{"error": gin.H{
+			"type": "invalid_request_error", "code": "channel_removed", "message": "Prism channel has been removed",
+		}})
+		return
+	}
+	c.Next()
 }
 
 // getGroupPlatform extracts the group platform from the API Key stored in context.

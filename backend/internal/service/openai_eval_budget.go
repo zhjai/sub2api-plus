@@ -660,10 +660,9 @@ func (s *OpenAIEvalService) beginBackgroundRun(ctx context.Context, target *Open
 	if err != nil {
 		return ctx, nil, err
 	}
-	if target.Account.Platform == "prism" {
-		// Prism has a separate dispatcher; never pretend this HTTP observer
-		// budgets a transport that has not integrated its physical-send hook.
-		return ctx, nil, c.deny("evaluation_budget_transport_unsupported")
+
+	if target.Account.Platform == PlatformPrism {
+		return ctx, nil, errors.New("Prism channel has been removed")
 	}
 	rpm, err := target.Account.AccountRPMLimit()
 	if err != nil {

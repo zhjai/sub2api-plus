@@ -1094,7 +1094,10 @@ describe('ModelIntegritySchedulingView runtime thresholds', () => {
       avoid_degradation: { error_rate: 0.2, ttft_seconds: 15 },
       custom_balance: { error_rate: 0.2, ttft_seconds: 15 },
       min_error_samples: 10,
-      min_ttft_samples: 20
+      min_ttft_samples: 20,
+      // A legacy config gets the scheduled recovery defaults the server applies when they are omitted.
+      recovery_enabled: true,
+      recovery_interval_seconds: 1800
     })
   })
 
@@ -1112,7 +1115,8 @@ describe('ModelIntegritySchedulingView runtime thresholds', () => {
 
     await wrapper.get('[data-testid="policy-stability_first"]').setValue(true)
     await save(wrapper)
-    expect((api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig).scheduling_thresholds).toEqual(configured)
+    // Every sent value is kept; the object predates scheduled recovery, so only its defaults are added.
+    expect((api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig).scheduling_thresholds).toEqual({ ...configured, recovery_enabled: true, recovery_interval_seconds: 1800 })
     // The re-read after saving shows the same object, unchanged.
     expect(valueOf(wrapper, 'cost_first-error_rate')).toBe('0')
     expect(valueOf(wrapper, 'min_ttft_samples')).toBe('100')
@@ -1829,5 +1833,131 @@ describe('ModelIntegritySchedulingView account priority rules', () => {
     expect(server.stored().account_priority_rules![0]).not.toHaveProperty('condition')
     expect(server.stored().account_priority_rules![1].condition).toEqual({ metric: 'quality_ratio', operator: 'gte', threshold: 1 })
     reopened.unmount()
+  })
+})
+
+describe('ModelIntegritySchedulingView scheduled recovery', () => {
+  const thresholds = {
+    cost_first: { error_rate: 0.2, ttft_seconds: 15 },
+    stability_first: { error_rate: 0.05, ttft_seconds: 8 },
+    avoid_degradation: { error_rate: 0.2, ttft_seconds: 15 },
+    custom_balance: { error_rate: 0.2, ttft_seconds: 15 },
+    min_error_samples: 10,
+    min_ttft_samples: 20
+  }
+  const toggle = (wrapper: ReturnType<typeof mountView>) => wrapper.get('[data-testid="threshold-recovery-enabled"]')
+  const select = (wrapper: ReturnType<typeof mountView>) => wrapper.get('[data-testid="threshold-recovery_interval"]')
+  const minutes = (wrapper: ReturnType<typeof mountView>) => wrapper.find('[data-testid="threshold-recovery_interval_minutes"]')
+  const saved = () => (api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig).scheduling_thresholds
+  const save = async (wrapper: ReturnType<typeof mountView>) => {
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+  }
+
+  it('is on every 30 minutes for a legacy config and says idle accounts only wait, at no test cost', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    expect(toggle(wrapper).attributes('aria-checked')).toBe('true')
+    expect((select(wrapper).element as HTMLSelectElement).value).toBe('1800')
+    expect(minutes(wrapper).exists()).toBe(false)
+    expect(wrapper.find('[data-testid="threshold-recovery-off"]').exists()).toBe(false)
+    const text = wrapper.get('[data-testid="threshold-recovery"]').text()
+    expect(text).toContain('没有业务请求时只等待，不会发出探测请求，也不会产生额外测试费用')
+    expect(text).toContain('不会清空统计，也不会把账号标为正常')
+    expect(text).toContain('「自定义平衡」不使用运行阈值，不适用')
+    // The presets start at five minutes.
+    const options = select(wrapper).findAll('option').map(option => option.text())
+    expect(options).toEqual(['每 5 分钟', '每 10 分钟', '每 30 分钟', '每 1 小时', '每 6 小时', '每 12 小时', '每 24 小时', '自定义'])
+    expect(wrapper.text()).not.toContain('有未保存的更改')
+  })
+
+  it('switches off and picks a preset without touching the thresholds', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    await toggle(wrapper).trigger('click')
+    expect(toggle(wrapper).attributes('aria-checked')).toBe('false')
+    expect(wrapper.get('[data-testid="threshold-recovery-off"]').text()).toContain('运行阈值和普通排序不变')
+    await select(wrapper).setValue('300')
+    expect(wrapper.text()).toContain('有未保存的更改')
+    await save(wrapper)
+    expect(saved()).toEqual({ ...thresholds, recovery_enabled: false, recovery_interval_seconds: 300 })
+  })
+
+  it('keeps a configured switched-off recovery through an unrelated save', async () => {
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ scheduling_thresholds: { ...thresholds, recovery_enabled: false, recovery_interval_seconds: 21600 } }))
+    const wrapper = mountView()
+    await flushPromises()
+
+    expect(toggle(wrapper).attributes('aria-checked')).toBe('false')
+    expect((select(wrapper).element as HTMLSelectElement).value).toBe('21600')
+    expect(wrapper.find('[data-testid="threshold-recovery-off"]').exists()).toBe(true)
+    expect(wrapper.text()).not.toContain('有未保存的更改')
+
+    await wrapper.get('[data-testid="policy-cost_first"]').setValue(true)
+    await save(wrapper)
+    expect(saved()).toEqual({ ...thresholds, recovery_enabled: false, recovery_interval_seconds: 21600 })
+    // The re-read after saving shows the same settings.
+    expect(toggle(wrapper).attributes('aria-checked')).toBe('false')
+    expect((select(wrapper).element as HTMLSelectElement).value).toBe('21600')
+  })
+
+  it('reads an interval of 0 as the 30-minute default', async () => {
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ scheduling_thresholds: { ...thresholds, recovery_interval_seconds: 0 } }))
+    const wrapper = mountView()
+    await flushPromises()
+
+    expect((select(wrapper).element as HTMLSelectElement).value).toBe('1800')
+    expect(wrapper.text()).not.toContain('有未保存的更改')
+    await wrapper.get('[data-testid="policy-cost_first"]').setValue(true)
+    await save(wrapper)
+    expect(saved()?.recovery_interval_seconds).toBe(1800)
+    expect(saved()?.recovery_enabled).toBe(true)
+  })
+
+  it('opens a saved non-preset interval as custom minutes and saves a custom entry', async () => {
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ scheduling_thresholds: { ...thresholds, recovery_interval_seconds: 2700 } }))
+    const wrapper = mountView()
+    await flushPromises()
+
+    expect((select(wrapper).element as HTMLSelectElement).value).toBe('custom')
+    expect((minutes(wrapper).element as HTMLInputElement).value).toBe('45')
+    expect(minutes(wrapper).element.closest('label')?.textContent).toContain('存储上限 35,791,394')
+
+    await minutes(wrapper).setValue('90')
+    await save(wrapper)
+    expect(saved()?.recovery_interval_seconds).toBe(5400)
+  })
+
+  it('keeps custom chosen while typing minutes that match a preset', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    await select(wrapper).setValue('custom')
+    expect((minutes(wrapper).element as HTMLInputElement).value).toBe('30')
+    await minutes(wrapper).setValue('60')
+    expect((select(wrapper).element as HTMLSelectElement).value).toBe('custom')
+    expect(minutes(wrapper).exists()).toBe(true)
+    await save(wrapper)
+    expect(saved()?.recovery_interval_seconds).toBe(3600)
+  })
+
+  it.each(['4', '', '5.001', '35791395'])('blocks saving custom minutes "%s" and names the storage range', async value => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    await select(wrapper).setValue('custom')
+    await minutes(wrapper).setValue(value)
+    expect(minutes(wrapper).attributes('aria-invalid')).toBe('true')
+    const error = wrapper.get(`#${minutes(wrapper).attributes('aria-describedby')}`).text()
+    expect(error).toContain('5 到 35,791,394 分钟')
+    expect(error).toContain('存储范围为 300 到 2,147,483,647 秒')
+
+    await save(wrapper)
+    expect(api.saveOpenAIEvalConfig).not.toHaveBeenCalled()
+    expect(store.showError).toHaveBeenCalledWith('部分运行阈值超出范围，请修正标出的数值后再保存。')
+    // The typed value stays next to its error.
+    expect((minutes(wrapper).element as HTMLInputElement).value).toBe(value)
   })
 })

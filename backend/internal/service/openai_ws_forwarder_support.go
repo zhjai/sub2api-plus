@@ -609,15 +609,13 @@ func (s *OpenAIGatewayService) resolveAccountByPreviousResponseIDForCapability(
 	// survive an HTTP fallback. Official API-key Responses HTTP requests are
 	// different: previous_response_id is supported by the provider and scoped to
 	// the selected key/project, so the response-id binding must retain that key.
-	if account.Platform != PlatformPrism && !account.IsOpenAIApiKey() && s.getOpenAIWSProtocolResolver().Resolve(account).Transport != OpenAIUpstreamTransportResponsesWebsocketV2 {
+	if !account.IsOpenAIApiKey() && s.getOpenAIWSProtocolResolver().Resolve(account).Transport != OpenAIUpstreamTransportResponsesWebsocketV2 {
 		return 0, nil, "", nil
 	}
-	if shouldClearStickySession(account, requestedModel) || (!account.IsOpenAI() && account.Platform != PlatformPrism) || !account.IsSchedulable() {
+	if shouldClearStickySession(account, requestedModel) || !account.IsOpenAI() || !account.IsSchedulable() {
 		return 0, nil, "", nil
 	}
-	if account.Platform == PlatformPrism && PrismAccountModelEligibility(ctx, account, requestedModel, "") != nil {
-		return 0, nil, "", nil
-	}
+
 	if !parentHealthyForShadow(account, s.parentAccountLookup(ctx)) {
 		return 0, nil, "", nil
 	}
@@ -645,12 +643,10 @@ func (s *OpenAIGatewayService) resolveAccountByPreviousResponseIDForCapability(
 		if latestErr != nil || latest == nil {
 			return 0, nil, "", nil
 		}
-		if shouldClearStickySession(latest, requestedModel) || (!latest.IsOpenAI() && latest.Platform != PlatformPrism) || !latest.IsSchedulable() {
+		if shouldClearStickySession(latest, requestedModel) || !latest.IsOpenAI() || !latest.IsSchedulable() {
 			return 0, nil, "", nil
 		}
-		if latest.Platform == PlatformPrism && PrismAccountModelEligibility(ctx, latest, requestedModel, "") != nil {
-			return 0, nil, "", nil
-		}
+
 		if !s.openAIAccountMatchesSchedulingGroup(latest, groupID) {
 			return 0, nil, "", nil
 		}

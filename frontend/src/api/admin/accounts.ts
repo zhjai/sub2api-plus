@@ -282,6 +282,17 @@ export interface OpenAIEvalSchedulingThresholds {
   min_error_samples: number
   /** Real first-token measurements (1–1,000,000) needed before latency is judged. */
   min_ttft_samples: number
+  /**
+   * Scheduled recovery (定时恢复) of a threshold move-back for cost first,
+   * stability first and avoid degradation. Older configs omit it, which means
+   * enabled. Turning it off changes neither the thresholds nor the ordinary order.
+   */
+  recovery_enabled?: boolean
+  /**
+   * Seconds between real-request trials of a moved-back account, 300 to
+   * 2,147,483,647. Omitted or 0 means the 1800-second default.
+   */
+  recovery_interval_seconds?: number
 }
 
 export interface OpenAIEvalConfig {
@@ -616,6 +627,13 @@ export interface OpenAIEvalRankingFactors {
     evidence_error_message?: string
   }
   /**
+   * Scheduled recovery of a runtime-threshold move-back. Present only while a
+   * relevant threshold is exceeded and recovery is enabled. On an account
+   * overview row it carries the earliest next trial among the models over
+   * their threshold; dispatch checks it live.
+   */
+  runtime_recovery?: OpenAIEvalRuntimeRecovery | null
+  /**
    * Matched channel probes, diagnostic only. latency_ms is a full round trip,
    * never first-output latency.
    */
@@ -627,6 +645,17 @@ export interface OpenAIEvalRankingFactors {
     latency_ms: number | null
     ping_latency_ms: number | null
   }>
+}
+
+/**
+ * 'waiting' until next_trial_at; 'ready' means the next real request may undo
+ * the move-back once to try the account (it is still over the threshold, not
+ * recovered); 'in_flight' means such a trial request is running now.
+ */
+export interface OpenAIEvalRuntimeRecovery {
+  state: 'waiting' | 'ready' | 'in_flight' | string
+  /** ISO UTC. */
+  next_trial_at: string
 }
 
 /** Where a candidate route came from while the order was built. */

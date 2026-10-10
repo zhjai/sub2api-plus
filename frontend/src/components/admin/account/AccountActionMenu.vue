@@ -28,22 +28,7 @@
               {{ t('admin.accounts.duplicateAccount') }}
             </button>
             <!-- 影子账号不持凭据:重授权/刷新 token 对其无效(后端拒绝),故隐藏(外审 G4)。 -->
-            <!-- Prism has its own sign-in and refresh flow; the generic OAuth actions do not apply. -->
-            <template v-if="isPrism">
-              <button @click="$emit('prism-models', account); $emit('close')" class="flex w-full items-center gap-2 px-4 py-2 text-sm text-fuchsia-700 hover:bg-gray-100 dark:text-fuchsia-300 dark:hover:bg-dark-700" data-testid="prism-menu-models">
-                <Icon name="cube" size="sm" />
-                {{ t('admin.accounts.prism.catalog.menuItem') }}
-              </button>
-              <button @click="$emit('prism-relogin', account); $emit('close')" class="flex w-full items-center gap-2 px-4 py-2 text-sm text-blue-600 hover:bg-gray-100 dark:hover:bg-dark-700" data-testid="prism-menu-relogin">
-                <Icon name="login" size="sm" />
-                {{ t('admin.accounts.prism.reloginTitle') }}
-              </button>
-              <button @click="$emit('prism-refresh', account); $emit('close')" class="flex w-full items-center gap-2 px-4 py-2 text-sm text-purple-600 hover:bg-gray-100 dark:hover:bg-dark-700" data-testid="prism-menu-refresh">
-                <Icon name="refresh" size="sm" />
-                {{ t('admin.accounts.prism.catalog.refreshCredentials') }}
-              </button>
-            </template>
-            <template v-else-if="(account.type === 'oauth' || account.type === 'setup-token') && !isShadow">
+            <template v-if="(account.type === 'oauth' || account.type === 'setup-token') && !isShadow && account.platform !== 'prism'">
               <button @click="$emit('reauth', account); $emit('close')" class="flex w-full items-center gap-2 px-4 py-2 text-sm text-blue-600 hover:bg-gray-100 dark:hover:bg-dark-700">
                 <Icon name="link" size="sm" />
                 {{ t('admin.accounts.reAuthorize') }}
@@ -85,7 +70,7 @@ import { Icon } from '@/components/icons'
 import type { Account } from '@/types'
 
 const props = defineProps<{ show: boolean; account: Account | null; anchorRect: DOMRect | null }>()
-const emit = defineEmits(['close', 'test', 'stats', 'schedule', 'duplicate', 'reauth', 'refresh-token', 'recover-state', 'reset-quota', 'set-privacy', 'create-spark-shadow', 'prism-models', 'prism-relogin', 'prism-refresh'])
+const emit = defineEmits(['close', 'test', 'stats', 'schedule', 'duplicate', 'reauth', 'refresh-token', 'recover-state', 'reset-quota', 'set-privacy', 'create-spark-shadow'])
 const { t } = useI18n()
 const menuRef = ref<HTMLElement | null>(null)
 const { width: viewportWidth, height: viewportHeight } = useWindowSize()
@@ -144,7 +129,6 @@ const hasRecoverableState = computed(() => {
 })
 const isAntigravityOAuth = computed(() => props.account?.platform === 'antigravity' && props.account?.type === 'oauth')
 const isOpenAIOAuth = computed(() => props.account?.platform === 'openai' && props.account?.type === 'oauth')
-const isPrism = computed(() => props.account?.platform === 'prism')
 // 影子账号(链接型,持 parent_account_id)不持凭据、type 不可变,凭据/隐私类操作对其无效。
 const isShadow = computed(() => props.account?.parent_account_id != null)
 // A "parent" OpenAI OAuth account is one that is NOT itself a shadow (parent_account_id == null)

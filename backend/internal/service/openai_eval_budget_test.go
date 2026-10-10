@@ -237,7 +237,7 @@ func TestOpenAIEvalBudgetPrismAlwaysFailsClosed(t *testing.T) {
 	target := &OpenAIEvalTarget{Account: account, Credential: account, UpstreamModel: "gpt-5.4", RequestedModel: "gpt-5.4"}
 	_, release, err := svc.beginBackgroundRun(ctx, target, OpenAIEvalRunRequest{AccountID: 995, TestType: OpenAIEvalTypeCandy}, "scheduled", "prism-test", 1)
 	_ = release
-	require.ErrorContains(t, err, "evaluation_budget_transport_unsupported")
+	require.ErrorContains(t, err, "Prism channel has been removed")
 }
 
 func TestOpenAIEvalBudgetDuplicateCredentialControls(t *testing.T) {
@@ -456,7 +456,7 @@ func TestOpenAIEvalBudgetSeparateTransportFailsClosed(t *testing.T) {
 	spy := &evalBudgetSpy{}
 	svc.accountTest.openaiGatewayService.cache = spy
 	_, release, err := svc.beginBackgroundRun(t.Context(), &OpenAIEvalTarget{Account: a, Credential: a}, OpenAIEvalRunRequest{AccountID: 995, TestType: OpenAIEvalTypeCandy}, "manual", "fixture-owner", 1)
-	require.ErrorContains(t, err, "evaluation_budget_transport_unsupported")
+	require.ErrorContains(t, err, "Prism channel has been removed")
 	require.Nil(t, release)
 	require.Zero(t, spy.sends)
 }

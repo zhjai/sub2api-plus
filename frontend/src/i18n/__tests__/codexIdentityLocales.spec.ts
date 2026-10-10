@@ -22,12 +22,10 @@ describe('Codex identity experiment copy', () => {
     expect(text).toMatch(/unknown, expired, or other-credential, other-key or other-revision continuations are rejected/)
   })
 
-  it('explains unsupported Prism budget transport in both locales', () => {
+  it('explains unsupported budget transport in both locales', () => {
     const zhText: string = (zh as any).admin.modelIntegrity.tests.background.deferredReasons.evaluation_budget_transport_unsupported
     const enText: string = (en as any).admin.modelIntegrity.tests.background.deferredReasons.evaluation_budget_transport_unsupported
-    expect(zhText).toContain('Prism')
     expect(zhText).toContain('实际发送计数')
-    expect(enText).toContain('Prism')
     expect(enText).toContain('actual sends')
   })
 })

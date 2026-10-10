@@ -185,10 +185,7 @@ export default {
         systemOne: 'System One',
         opencode: 'OpenCode',
       },
-      prism: {
-        description: 'Use this key with Codex or other Responses API clients. Models and reasoning efforts follow each Prism account’s catalog.',
-        note: 'Codex tool calls are bridged by this gateway, not run natively by Prism. Context compaction is not supported; long conversations are sent in full.',
-      },
+
       typesafe: {
         description: 'Call Jev through the native TypeSafe System One endpoint.',
         note: 'System One is non-streaming and is not compatible with Chat Completions, Responses, Claude Code, or Codex clients.',

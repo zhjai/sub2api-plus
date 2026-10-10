@@ -11,12 +11,14 @@ type OpenAIEvalRuntimeThreshold struct {
 }
 
 type OpenAIEvalSchedulingThresholds struct {
-	CostFirst        OpenAIEvalRuntimeThreshold `json:"cost_first"`
-	StabilityFirst   OpenAIEvalRuntimeThreshold `json:"stability_first"`
-	AvoidDegradation OpenAIEvalRuntimeThreshold `json:"avoid_degradation"`
-	CustomBalance    OpenAIEvalRuntimeThreshold `json:"custom_balance"`
-	MinErrorSamples  int64                      `json:"min_error_samples"`
-	MinTTFTSamples   int64                      `json:"min_ttft_samples"`
+	CostFirst               OpenAIEvalRuntimeThreshold `json:"cost_first"`
+	StabilityFirst          OpenAIEvalRuntimeThreshold `json:"stability_first"`
+	AvoidDegradation        OpenAIEvalRuntimeThreshold `json:"avoid_degradation"`
+	CustomBalance           OpenAIEvalRuntimeThreshold `json:"custom_balance"`
+	MinErrorSamples         int64                      `json:"min_error_samples"`
+	MinTTFTSamples          int64                      `json:"min_ttft_samples"`
+	RecoveryEnabled         *bool                      `json:"recovery_enabled,omitempty"`
+	RecoveryIntervalSeconds int                        `json:"recovery_interval_seconds,omitempty"`
 }
 
 func defaultOpenAIEvalSchedulingThresholds() OpenAIEvalSchedulingThresholds {
@@ -26,6 +28,7 @@ func defaultOpenAIEvalSchedulingThresholds() OpenAIEvalSchedulingThresholds {
 		AvoidDegradation: OpenAIEvalRuntimeThreshold{.2, 15},
 		CustomBalance:    OpenAIEvalRuntimeThreshold{.2, 15},
 		MinErrorSamples:  10, MinTTFTSamples: 20,
+		RecoveryEnabled: rankingPtr(true), RecoveryIntervalSeconds: 1800,
 	}
 }
 
@@ -42,6 +45,15 @@ func normalizeOpenAIEvalSchedulingThresholds(config *OpenAIEvalConfig) error {
 		config.SchedulingThresholds = &value
 	}
 	t := config.SchedulingThresholds
+	if t.RecoveryEnabled == nil {
+		t.RecoveryEnabled = rankingPtr(true)
+	}
+	if t.RecoveryIntervalSeconds == 0 {
+		t.RecoveryIntervalSeconds = 1800
+	}
+	if t.RecoveryIntervalSeconds < 300 || int64(t.RecoveryIntervalSeconds) > OpenAIEvalMaxIntervalSeconds {
+		return fmt.Errorf("scheduling_thresholds.recovery_interval_seconds must be between 300 and %d", OpenAIEvalMaxIntervalSeconds)
+	}
 	if t.MinErrorSamples < 1 || t.MinErrorSamples > 1000000 || t.MinTTFTSamples < 1 || t.MinTTFTSamples > 1000000 {
 		return fmt.Errorf("scheduling_thresholds sample counts must be between 1 and 1000000")
 	}

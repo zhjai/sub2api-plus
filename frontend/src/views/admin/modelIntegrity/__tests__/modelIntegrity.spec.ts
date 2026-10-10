@@ -49,8 +49,10 @@ import {
   THRESHOLD_POLICIES,
   errorRatePercentText,
   invalidThresholdFields,
+  isValidRecoveryInterval,
   normalizeSchedulingThresholds,
   parseThresholdInput,
+  RECOVERY_INTERVALS,
   maxRequestsPerRun,
   normalizeMaxRequestAttempts,
   stateProbeChains,
@@ -483,6 +485,52 @@ describe('scheduling thresholds', () => {
     expect(invalidThresholdFields(DEFAULT_SCHEDULING_THRESHOLDS)).toEqual([])
     const kept = normalizeSchedulingThresholds({ custom_balance: { error_rate: 0.07, ttft_seconds: 30 } })
     expect(kept.custom_balance).toEqual({ error_rate: 0.07, ttft_seconds: 30 })
+  })
+})
+
+describe('scheduled recovery settings', () => {
+  it('defaults an older object to on every 30 minutes, and reads 0 as the default', () => {
+    expect(DEFAULT_SCHEDULING_THRESHOLDS.recovery_enabled).toBe(true)
+    expect(DEFAULT_SCHEDULING_THRESHOLDS.recovery_interval_seconds).toBe(1800)
+    const legacy = normalizeSchedulingThresholds({ min_error_samples: 3 })
+    expect(legacy.recovery_enabled).toBe(true)
+    expect(legacy.recovery_interval_seconds).toBe(1800)
+    expect(normalizeSchedulingThresholds({ recovery_interval_seconds: 0 }).recovery_interval_seconds).toBe(1800)
+  })
+
+  it('keeps a configured switch and interval exactly, including off and a non-minute value', () => {
+    const configured = normalizeSchedulingThresholds({ recovery_enabled: false, recovery_interval_seconds: 301 })
+    expect(configured.recovery_enabled).toBe(false)
+    expect(configured.recovery_interval_seconds).toBe(301)
+    expect(invalidThresholdFields(configured)).toEqual([])
+    expect(toSavePayload({ effects_enabled: false, bps_auto_enabled: false, accounts: [], scheduling_thresholds: configured }).scheduling_thresholds).toEqual(configured)
+    // A save from either page carries the defaults when the config never had them.
+    expect(toSavePayload({ effects_enabled: false, bps_auto_enabled: false, accounts: [] }).scheduling_thresholds).toMatchObject({ recovery_enabled: true, recovery_interval_seconds: 1800 })
+  })
+
+  it('accepts the whole storage range, 300 to 2,147,483,647 seconds, and nothing else', () => {
+    expect([...RECOVERY_INTERVALS]).toEqual([300, 600, 1800, 3600, 21600, 43200, 86400])
+    for (const value of [300, 301, 1800, 2_147_483_647]) expect(isValidRecoveryInterval(value)).toBe(true)
+    for (const value of [299, 0, -300, 300.5, 2_147_483_648, NaN, Infinity, '1800', null]) expect(isValidRecoveryInterval(value)).toBe(false)
+    // Out of range is reported, not corrected, so a save cannot change it silently.
+    const bad = normalizeSchedulingThresholds({ recovery_interval_seconds: 240 })
+    expect(bad.recovery_interval_seconds).toBe(240)
+    expect(invalidThresholdFields(bad)).toEqual(['recovery_interval_seconds'])
+    // Still checked while switched off: the server stores the interval either way.
+    expect(invalidThresholdFields({ ...bad, recovery_enabled: false })).toEqual(['recovery_interval_seconds'])
+  })
+
+  it('has the recovery copy in both locales', () => {
+    for (const locale of [en, zhLocale] as unknown as Record<string, any>[]) {
+      const copy = locale.admin.modelIntegrity.scheduling.thresholds.recovery
+      for (const key of ['title', 'toggle', 'interval', 'hint', 'rules', 'off', 'error']) expect(typeof copy[key]).toBe('string')
+      expect(copy.error).toContain('{maxSeconds}')
+      const board = locale.admin.modelIntegrity.scheduling.board.recovery
+      for (const key of ['waiting', 'ready', 'in_flight', 'other', 'next', 'nextRow', 'rowScope', 'note']) expect(typeof board[key]).toBe('string')
+      for (const key of ['waiting', 'ready', 'in_flight', 'other']) expect(typeof board.detail[key]).toBe('string')
+      expect(typeof locale.admin.modelIntegrity.scheduling.decision.runtime_recovery_trial).toBe('string')
+      expect(typeof locale.admin.modelIntegrity.scheduling.candidateReason.runtime_recovery_trial).toBe('string')
+    }
   })
 })
 

@@ -5,13 +5,6 @@
         <span class="input-label">{{ t('admin.modelIntegrity.tests.edit.account') }}</span>
         <p class="text-sm text-gray-900 dark:text-gray-100" data-testid="edit-account">{{ accountLabel }}</p>
       </div>
-      <div v-if="prism && prismState?.status !== 'ready'" class="text-xs" :class="prismState?.status === 'error' ? 'text-rose-600 dark:text-rose-400' : 'text-gray-500 dark:text-gray-400'" role="status" data-testid="edit-prism-catalog">
-        <template v-if="prismState?.status === 'error'">
-          {{ t('admin.modelIntegrity.tests.edit.prismCatalogFailed') }}
-          <button type="button" class="ml-1 font-medium underline-offset-2 hover:underline" @click="emit('reload-prism')">{{ t('admin.modelIntegrity.common.retry') }}</button>
-        </template>
-        <template v-else>{{ t('admin.modelIntegrity.tests.add.prismLoadingModels') }}</template>
-      </div>
       <div class="grid gap-3 sm:grid-cols-2">
         <label class="flex flex-col gap-1">
           <span class="input-label">{{ t('admin.modelIntegrity.tests.add.model') }}</span>
@@ -50,22 +43,17 @@ import { useI18n } from 'vue-i18n'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import type { OpenAIEvalModelCatalog, OpenAIEvalRouteConfig } from '@/api/admin/accounts'
 import { routeKey } from '@/views/admin/modelIntegrity/modelIntegrity'
-import type { PrismCatalogState } from '@/views/admin/modelIntegrity/prismTargets'
 
 const props = defineProps<{
   route: OpenAIEvalRouteConfig | null
   routes: OpenAIEvalRouteConfig[]
   catalog: OpenAIEvalModelCatalog | null
   accountLabel: string
-  /** Set for a Prism target: its account catalog replaces the OpenAI list. */
-  prism?: boolean
-  prismState?: PrismCatalogState
 }>()
 
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'save', payload: { model: string; effort: string }): void
-  (e: 'reload-prism'): void
 }>()
 
 const { t } = useI18n()
@@ -77,26 +65,16 @@ const effort = ref('')
 
 // A saved target may use a model or effort the current catalog no longer
 // lists; keep it selectable so opening the dialog never changes it silently.
-const prismModels = computed(() => (props.prismState?.status === 'ready' ? props.prismState.selectable : []))
 const models = computed(() => {
-  const items = props.prism
-    ? prismModels.value.map(item => ({ id: item.id, label: item.label && item.label !== item.id ? `${item.id} · ${item.label}` : item.id }))
-    : (props.catalog?.items ?? []).map(item => ({ id: item.id, label: item.display_name || item.id }))
+  const items = (props.catalog?.items ?? []).map(item => ({ id: item.id, label: item.display_name || item.id }))
   const current = props.route?.requested_model
   if (current && !items.some(item => item.id === current)) {
-    const missing = props.prism && props.prismState?.status === 'ready'
-    items.unshift({ id: current, label: missing ? t('admin.modelIntegrity.tests.edit.prismNotInCatalog', { model: current }) : current })
+    items.unshift({ id: current, label: current })
   }
   return items
 })
 const efforts = computed(() => {
-  let values: string[]
-  if (props.prism) {
-    const entry = prismModels.value.find(item => item.id === model.value)
-    values = ['', ...(entry?.reasoning_efforts ?? [])]
-  } else {
-    values = props.catalog?.reasoning_efforts?.length ? [...props.catalog.reasoning_efforts] : ['']
-  }
+  const values = props.catalog?.reasoning_efforts?.length ? [...props.catalog.reasoning_efforts] : ['']
   const current = props.route?.reasoning_effort ?? ''
   if (!values.includes(current) && model.value === props.route?.requested_model) values.push(current)
   return values

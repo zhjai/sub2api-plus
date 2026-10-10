@@ -138,6 +138,7 @@ var AllowedQuotaPlatforms = []string{
 	PlatformMiniMax,
 	PlatformOpenCodeGo,
 	PlatformTypeSafe,
+	// Retained for existing quota records; not an active channel.
 	PlatformPrism,
 }
 

@@ -92,9 +92,7 @@ func NewGatewayHandler(
 	}
 
 	// 初始化用户消息串行队列 helper
-	if gatewayService != nil {
-		gatewayService.SetPrismGateway(openAIGatewayService)
-	}
+
 	var umqHelper *UserMsgQueueHelper
 	if userMsgQueueService != nil && cfg != nil {
 		umqHelper = NewUserMsgQueueHelper(userMsgQueueService, SSEPingFormatClaude, pingInterval)
@@ -1328,7 +1326,7 @@ func (h *GatewayHandler) compositeAvailableModels(ctx context.Context, groupID *
 	seen := make(map[string]struct{})
 	models := make([]string, 0)
 	schedulablePlatforms := h.gatewayService.GetSchedulablePlatforms(ctx, groupID)
-	for _, platform := range []string{service.PlatformAnthropic, service.PlatformGemini, service.PlatformOpenAI, service.PlatformAntigravity, service.PlatformGrok, service.PlatformKimi, service.PlatformZhipu, service.PlatformDeepseek, service.PlatformMiniMax, service.PlatformOpenCodeGo, service.PlatformTypeSafe, service.PlatformPrism} {
+	for _, platform := range []string{service.PlatformAnthropic, service.PlatformGemini, service.PlatformOpenAI, service.PlatformAntigravity, service.PlatformGrok, service.PlatformKimi, service.PlatformZhipu, service.PlatformDeepseek, service.PlatformMiniMax, service.PlatformOpenCodeGo, service.PlatformTypeSafe} {
 		if platform == service.PlatformTypeSafe && !includeSystemOne {
 			continue
 		}

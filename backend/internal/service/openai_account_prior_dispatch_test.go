@@ -405,8 +405,83 @@ func priorRowIDs(rows []OpenAIEvalRankedAccount) []int64 {
 	return ids
 }
 
+func TestOpenAIAccountPriorSurvivesExpiredRankingSnapshot(t *testing.T) {
+	for _, reference := range []string{"model_effort_fallback", "aggregate_fallback"} {
+		t.Run(reference, func(t *testing.T) {
+			evaluation, repository, accounts, gateway := rankingHarness(t)
+			repository.config.SchedulingPolicy = OpenAIEvalSchedulingPolicyAvoidDegradation
+			repository.config.Revision++
+			accounts.items[0].RateMultiplier = rankingPtr(0.)
+			schedule := OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 300}
+			repository.config.Accounts = []OpenAIEvalAccountConfig{
+				{AccountID: 1, RequestedModel: "gpt-6.1-sol", ReasoningEffort: "medium", CandySchedule: schedule},
+				{AccountID: 2, RequestedModel: "gpt-6.1-sol", ReasoningEffort: "medium", CandySchedule: schedule},
+			}
+			now := time.Now()
+			repository.runs = []OpenAIEvalRun{
+				overviewQualityRun(1, 1, "gpt-6.1-sol", "medium", OpenAIEvalTypeCandy, false, now),
+				overviewQualityRun(2, 2, "gpt-6.1-sol", "medium", OpenAIEvalTypeCandy, true, now),
+			}
+			model := "gpt-6.1-sol"
+			if reference == "aggregate_fallback" {
+				model = "gpt-6-astra"
+			}
+			scheduler := gateway.persistentOpenAIAccountScheduler().(*defaultOpenAIAccountScheduler)
+			// Keep the dispatch on the live path, including after ordinary traffic.
+			gateway.openaiAccountStats.reportForRequest(1, model, "high", true, rankingPtr(200))
+			_, err := evaluation.EvaluateScheduling(context.Background(), 1)
+			require.NoError(t, err)
+			gen := evaluation.ranking.current
+			gen.deadline = time.Now().Add(-time.Second)
+			req := OpenAIAccountScheduleRequest{GroupID: rankingPtr(int64(7)), Platform: PlatformOpenAI,
+				RequestedModel: model, RequestedReasoningEffort: "high"}
+			rows, trace, err := scheduler.explicitRanking(context.Background(), req, accounts.items, nil)
+			require.NoError(t, err)
+			require.Equal(t, "live_fallback", trace.RankingBasis)
+			require.Equal(t, "snapshot_expired", *trace.RankingFallbackReason)
+			require.EqualValues(t, 2, rows[0].AccountID, "a stale ranking must not erase fresh 0%% vs 100%% quality evidence")
+			for _, row := range rows {
+				require.Equal(t, reference, row.QualityBasis)
+				require.NotNil(t, row.AccountQualityPrior)
+				require.True(t, row.AccountQualityPrior.ExpiresAt.After(time.Now()))
+				require.True(t, row.AccountQualityPrior.ExpiresAt.After(gen.deadline))
+			}
+			ctx := WithRequestedReasoningEffort(context.Background(), "high")
+			selected, decision, err := gateway.SelectAccountWithScheduler(ctx, req.GroupID, "", "", model, nil, OpenAIUpstreamTransportAny, false)
+			require.NoError(t, err)
+			require.EqualValues(t, 2, selected.Account.ID)
+			selected.ReleaseFunc()
+			require.Equal(t, "live_fallback", decision.RankingBasis)
+			for _, candidate := range decision.Candidates {
+				require.Equal(t, reference, candidate.QualityBasis)
+				require.NotNil(t, candidate.AccountQualityPrior)
+			}
+			require.Same(t, gen, evaluation.ranking.current, "dispatch must not rebuild the fleet overview")
+			// Live exclusion still wins over quality, even with an expired cache.
+			selected, _, err = gateway.SelectAccountWithScheduler(ctx, req.GroupID, "", "", model, map[int64]struct{}{2: {}}, OpenAIUpstreamTransportAny, false)
+			require.NoError(t, err)
+			require.EqualValues(t, 1, selected.Account.ID)
+			selected.ReleaseFunc()
+			// Quality evidence itself must expire; it is never extended by this fix.
+			for i := range gen.overview {
+				gen.overview[i].Factors.Quality.ExpiresAt = rankingPtr(time.Now().Add(-time.Second))
+				for j := range gen.overview[i].Models {
+					gen.overview[i].Models[j].Factors.Quality.ExpiresAt = rankingPtr(time.Now().Add(-time.Second))
+				}
+			}
+			selected, decision, err = gateway.SelectAccountWithScheduler(ctx, req.GroupID, "", "", model, nil, OpenAIUpstreamTransportAny, false)
+			require.NoError(t, err)
+			require.EqualValues(t, 1, selected.Account.ID)
+			selected.ReleaseFunc()
+			for _, candidate := range decision.Candidates {
+				require.Nil(t, candidate.AccountQualityPrior, "genuinely expired quality must not survive")
+			}
+		})
+	}
+}
+
 func TestOpenAIAccountPriorEligibilityAndNoLaundering(t *testing.T) {
-	for _, condition := range []string{"fresh", "revision", "generation_expired", "quality_expired", "disabled", "wrong_group", "missing_overview", "configured_missing", "configured_stale", "exact_diagnostic", "policy_override", "effects_off", "ungrouped"} {
+	for _, condition := range []string{"fresh", "revision", "generation_expired", "quality_expired", "aggregate_expired_model_fresh", "expired_model_cell", "disabled", "wrong_group", "missing_overview", "configured_missing", "configured_stale", "exact_diagnostic", "policy_override", "effects_off", "ungrouped"} {
 		t.Run(condition, func(t *testing.T) {
 			s, repo, accounts, _ := rankingHarness(t)
 			repo.config.SchedulingPolicy = OpenAIEvalSchedulingPolicyAvoidDegradation
@@ -426,6 +501,19 @@ func TestOpenAIAccountPriorEligibilityAndNoLaundering(t *testing.T) {
 				gen.deadline = now.Add(-time.Second)
 			case "quality_expired":
 				gen.overview[gen.overviewByID[2]].Factors.Quality.ExpiresAt = rankingPtr(now.Add(-time.Second))
+				for i := range gen.overview[gen.overviewByID[2]].Models {
+					gen.overview[gen.overviewByID[2]].Models[i].Factors.Quality.ExpiresAt = rankingPtr(now.Add(-time.Second))
+				}
+			case "aggregate_expired_model_fresh":
+				gen.overview[gen.overviewByID[2]].Factors.Quality.ExpiresAt = rankingPtr(now.Add(-time.Second))
+			case "expired_model_cell":
+				row := &gen.overview[gen.overviewByID[2]]
+				stale := row.Models[0]
+				stale.ReasoningEffort = "low"
+				stale.Factors.Quality.Pass = 0
+				stale.Factors.Quality.Ratio = rankingPtr(0.)
+				stale.Factors.Quality.ExpiresAt = rankingPtr(now.Add(-time.Second))
+				row.Models = append(row.Models, stale)
 			case "disabled":
 				accounts.items[1].Schedulable = false
 			case "wrong_group":
@@ -449,7 +537,7 @@ func TestOpenAIAccountPriorEligibilityAndNoLaundering(t *testing.T) {
 				gen.overview[gen.overviewByID[2]].GroupIDs = []int64{0}
 			}
 			priors := accountQualityPriors(gen, cfg, group, "gpt-6.1-sol", "high", accounts.items, latest, now)
-			if condition == "fresh" || condition == "ungrouped" || condition == "configured_missing" || condition == "configured_stale" || condition == "exact_diagnostic" {
+			if condition == "fresh" || condition == "ungrouped" || condition == "generation_expired" || condition == "aggregate_expired_model_fresh" || condition == "expired_model_cell" || condition == "configured_missing" || condition == "configured_stale" || condition == "exact_diagnostic" {
 				require.NotNil(t, priors[2])
 				require.Equal(t, 1., priors[2].Ratio)
 			} else {
@@ -473,7 +561,7 @@ func TestOpenAIAccountPriorSnapshotLiveParityAndImmutableDTO(t *testing.T) {
 	dim := rankingDimension(t, s, 7, "gpt-6.1-sol", "high")
 	require.Equal(t, int64(2), dim.Accounts[0].AccountID)
 	require.Equal(t, "model_effort_fallback", dim.Accounts[0].QualityBasis)
-	require.False(t, dim.Accounts[0].AccountQualityPrior.ExpiresAt.After(s.ranking.current.deadline))
+	require.Equal(t, *s.ranking.current.overview[s.ranking.current.overviewByID[2]].Factors.Quality.ExpiresAt, dim.Accounts[0].AccountQualityPrior.ExpiresAt)
 	require.False(t, dim.Accounts[0].Factors.Quality.Known)
 	require.False(t, dim.ValidUntil.After(dim.Accounts[0].AccountQualityPrior.ExpiresAt))
 	scheduler := gateway.persistentOpenAIAccountScheduler().(*defaultOpenAIAccountScheduler)

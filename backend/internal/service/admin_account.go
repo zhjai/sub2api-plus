@@ -256,7 +256,7 @@ func (s *adminServiceImpl) DuplicateAccount(ctx context.Context, id int64, actor
 		return nil, err
 	}
 	if source.Platform == PlatformPrism {
-		return nil, infraerrors.BadRequest("PRISM_DUPLICATE_IDENTITY", "Prism accounts are deduplicated by verified identity; use Prism import to update this account")
+		return nil, infraerrors.BadRequest("CHANNEL_REMOVED", "Prism channel has been removed")
 	}
 	if source.IsCredentialShadow() {
 		return nil, infraerrors.BadRequest(
@@ -486,9 +486,7 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 
 func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccountInput) (*Account, error) {
 	if input.Platform == PlatformPrism {
-		if authorized, _ := ctx.Value(verifiedPrismCredentialWriteKey{}).(bool); !authorized {
-			return nil, infraerrors.BadRequest("PRISM_VERIFIED_IMPORT_REQUIRED", "Use Prism Cookie import or Prism authorization to create an account")
-		}
+		return nil, infraerrors.BadRequest("CHANNEL_REMOVED", "Prism channel has been removed")
 	}
 	if err := ValidateAccountRPMExtra(input.Extra); err != nil {
 		return nil, err
@@ -603,16 +601,8 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	if account.Platform == PlatformTypeSafe && input.Type != "" && input.Type != AccountTypeAPIKey {
 		return nil, errors.New("typesafe accounts only support apikey credentials")
 	}
-	if account.Platform == PlatformPrism {
-		if input.Type != "" && input.Type != AccountTypeOAuth {
-			return nil, infraerrors.BadRequest("PRISM_OAUTH_REQUIRED", "Prism accounts use verified OAuth credentials")
-		}
-		if err := validatePrismCredentialUpdate(ctx, account.Credentials, input.Credentials); err != nil {
-			return nil, err
-		}
-		if input.Credentials != nil {
-			input.Credentials = MergeCredentials(account.Credentials, input.Credentials)
-		}
+	if account.Platform == PlatformPrism && (len(input.Credentials) > 0 || input.Type != "") {
+		return nil, infraerrors.BadRequest("CHANNEL_REMOVED", "Prism channel has been removed; credential updates are unavailable")
 	}
 	var normalizedExtra map[string]any
 	if input.Extra != nil {
@@ -956,9 +946,7 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	}
 
 	// 重新查询以确保返回完整数据（包括正确的 Proxy 关联对象）
-	if account.Platform == PlatformPrism {
-		InvalidatePrismAccountCatalog(account.ID)
-	}
+
 	updated, err := s.accountRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
@@ -1091,9 +1079,7 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	if len(input.Credentials) > 0 {
 		for _, acc := range cachedTargets {
 			if acc != nil && acc.Platform == PlatformPrism {
-				if err := validatePrismCredentialUpdate(ctx, acc.Credentials, input.Credentials); err != nil {
-					return nil, err
-				}
+				return nil, infraerrors.BadRequest("CHANNEL_REMOVED", "Prism channel has been removed; credential updates are unavailable")
 			}
 			if acc != nil && acc.IsCredentialShadow() {
 				return nil, infraerrors.Newf(http.StatusBadRequest, "SPARK_SHADOW_NO_CREDENTIALS",
@@ -1356,7 +1342,6 @@ func (s *adminServiceImpl) DeleteAccount(ctx context.Context, id int64) error {
 	if err := s.accountRepo.Delete(ctx, id); err != nil {
 		return err
 	}
-	InvalidatePrismAccountCatalog(id)
 	return nil
 }
 
