@@ -288,6 +288,7 @@ func (s *AccountTestService) runOpenAIEvalSampleSingleSend(ctx context.Context, 
 	defer cancel()
 	isOAuth := credential.IsOpenAIOAuthLike()
 	useChatCompletions := !isOAuth && shouldForwardOpenAIResponsesViaRawChatCompletions(account)
+	useCodexTurn := !useChatCompletions
 	accessToken := ""
 	if isOAuth && !credential.IsOpenAIAgentIdentity() {
 		if s.openaiGatewayService == nil {
@@ -355,20 +356,22 @@ func (s *AccountTestService) runOpenAIEvalSampleSingleSend(ctx context.Context, 
 	}
 	diagnosticSession := ""
 	var diagnosticIDs *codexFingerprintIDs
-	if isOAuth {
+	if useCodexTurn {
 		payload, diagnosticSession, err = newOpenAIEvalCodexPayload(credential, upstreamModel, reasoningEffort, prompt, time.Now())
 		if err != nil {
 			return nil, fmt.Errorf("build Codex evaluation turn: %w", err)
 		}
-		// Keep first-turn Lite item IDs and metadata, as the CPA plugin does.
-		// Shared OAuth normalization still handles required top-level fields.
-		input := payload["input"]
-		delete(payload, "input")
-		if transformed := applyCodexOAuthTransform(payload, true, false); transformed.Error != nil {
-			return nil, transformed.Error
+		if isOAuth {
+			// Keep first-turn Lite item IDs and metadata, as the CPA plugin does.
+			// Shared OAuth normalization still handles required top-level fields.
+			input := payload["input"]
+			delete(payload, "input")
+			if transformed := applyCodexOAuthTransform(payload, true, false); transformed.Error != nil {
+				return nil, transformed.Error
+			}
+			payload["input"] = input
+			diagnosticIDs = prepareOpenAIOAuthDiagnosticPayload(payload, credential, diagnosticSession)
 		}
-		payload["input"] = input
-		diagnosticIDs = prepareOpenAIOAuthDiagnosticPayload(payload, credential, diagnosticSession)
 	}
 	body, err := marshalOpenAIEvalPayload(payload)
 	if err != nil {
@@ -381,6 +384,9 @@ func (s *AccountTestService) runOpenAIEvalSampleSingleSend(ctx context.Context, 
 	req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	if useCodexTurn {
+		req.Header.Set("Accept", "text/event-stream")
+	}
 	if isOAuth {
 		req.Header.Set("Accept", "text/event-stream")
 		if accessToken != "" {
@@ -424,6 +430,13 @@ func (s *AccountTestService) runOpenAIEvalSampleSingleSend(ctx context.Context, 
 	enforceCodexAcceptLanguage(req.Header)
 	if isOAuth {
 		finalizeOpenAIOAuthDiagnosticHeaders(req.Header, credential, diagnosticSession, body, diagnosticIDs)
+	} else if useCodexTurn {
+		// Independent samples own their first-turn identity. Do not borrow a
+		// production session or apply OAuth account-convergence settings here.
+		applyOpenAIEvalCodexPayloadHeaders(req.Header, body)
+		stripOpenAILegacyResponsesBeta(req.Header)
+	}
+	if useCodexTurn {
 		if err := applyMappedGPT55LiteCompatibility(req, credential, body); err != nil {
 			return nil, err
 		}

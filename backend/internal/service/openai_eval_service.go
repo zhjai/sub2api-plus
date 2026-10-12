@@ -619,6 +619,8 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 		}
 		if target.Credential.IsOpenAIOAuthLike() && request.TestType != OpenAIEvalTypeStateProbe {
 			run.Outcome.RequestProfile = openAIEvalCodexRequestProfile
+		} else if run.Protocol == "responses" && request.TestType != OpenAIEvalTypeStateProbe {
+			run.Outcome.RequestProfile = openAIEvalAPIKeyCodexRequestProfile
 		}
 		run.CostEstimateUSD = s.estimateRunCost(target.UpstreamModel, request.RequestedModel, run.InputTokens, run.OutputTokens)
 		finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)

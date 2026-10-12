@@ -169,7 +169,9 @@ func TestEvalProtocolOverrideAndModelMapping(t *testing.T) {
 					require.Equal(t, "high", payload["reasoning_effort"])
 					return newJSONResponse(200, evalChatJSON("21", "stop")), nil
 				}
-				require.Equal(t, map[string]any{"effort": "high"}, payload["reasoning"])
+				require.Equal(t, map[string]any{"effort": "high", "context": "all_turns"}, payload["reasoning"])
+				require.Equal(t, true, payload["stream"])
+				require.IsType(t, []any{}, payload["input"])
 				return newJSONResponse(200, evalCompletedJSON("21")), nil
 			})
 			account, err := svc.accounts.GetByID(t.Context(), 995)

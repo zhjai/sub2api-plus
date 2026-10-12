@@ -14,6 +14,7 @@ import (
 )
 
 const openAIEvalCodexRequestProfile = "codex-turn-cpa-876d1ab4-v1"
+const openAIEvalAPIKeyCodexRequestProfile = "codex-turn-cpa-876d1ab4-apikey-v1"
 
 //go:embed data/codex_eval/codex_context.json
 var openAIEvalCodexContextJSON []byte
@@ -46,6 +47,9 @@ func newOpenAIEvalCodexPayload(credential *Account, model, effort, prompt string
 	}
 	session, turn, window := thread.String(), uuid.NewString(), thread.String()+":0"
 	namespace := codexAccountIdentityNamespace(credential)
+	if namespace == "" && credential != nil && credential.Type == AccountTypeAPIKey {
+		namespace = openAIEvalCredentialNamespace(credential)
+	}
 	installation := uuid.NewString()
 	if namespace != "" {
 		installation = deriveStableUUIDv4("sub2api:codex-evaluation-installation:" + namespace)

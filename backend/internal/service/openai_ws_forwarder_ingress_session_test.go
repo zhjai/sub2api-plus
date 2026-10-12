@@ -1944,6 +1944,32 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreDisabledPre
 	require.Equal(t, "world", gjson.Get(secondWrite, "input.1.text").String())
 }
 
+// This test binds a response from the client goroutine while the WS server
+// finishes binding the preceding response. The plain shared stub is not safe
+// for that concurrent use; production GatewayCache uses Redis.
+type openAIWSConcurrentBindingTestCache struct {
+	stubGatewayCache
+	mu sync.Mutex
+}
+
+func (c *openAIWSConcurrentBindingTestCache) GetSessionAccountID(ctx context.Context, groupID int64, sessionHash string) (int64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.stubGatewayCache.GetSessionAccountID(ctx, groupID, sessionHash)
+}
+
+func (c *openAIWSConcurrentBindingTestCache) SetSessionAccountID(ctx context.Context, groupID int64, sessionHash string, accountID int64, ttl time.Duration) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.stubGatewayCache.SetSessionAccountID(ctx, groupID, sessionHash, accountID, ttl)
+}
+
+func (c *openAIWSConcurrentBindingTestCache) DeleteSessionAccountID(ctx context.Context, groupID int64, sessionHash string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.stubGatewayCache.DeleteSessionAccountID(ctx, groupID, sessionHash)
+}
+
 func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreEnabledSkipsStrictPrevResponseEval(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -1975,7 +2001,7 @@ func TestOpenAIGatewayService_ProxyResponsesWebSocketFromClient_StoreEnabledSkip
 	svc := &OpenAIGatewayService{
 		cfg:              cfg,
 		httpUpstream:     &httpUpstreamRecorder{},
-		cache:            &stubGatewayCache{},
+		cache:            &openAIWSConcurrentBindingTestCache{},
 		openaiWSResolver: NewOpenAIWSProtocolResolver(cfg),
 		toolCorrector:    NewCodexToolCorrector(),
 		openaiWSPool:     pool,
