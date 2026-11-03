@@ -42,9 +42,7 @@ func openAIEvalModelConfiguredForCandidates(cfg *OpenAIEvalConfig, model string,
 		if _, ok := ids[route.AccountID]; !ok || openAIEvalQualityDimension(route.RequestedModel) != openAIEvalQualityDimension(model) {
 			continue
 		}
-		if route.CandySchedule.Enabled || route.FingerprintSchedule.Enabled || route.ModelTraceSchedule.Enabled {
-			return true
-		}
+		return true
 	}
 	return false
 }
@@ -84,48 +82,23 @@ func accountQualityPriors(gen *openAIRankingGeneration, cfg *OpenAIEvalConfig, g
 			continue
 		}
 		quality := qualityFromLatestRuns(cfg, account.ID, model, effort, latest, now)
-		if quality.Known && quality.Selected > 0 {
+		if quality.Selected > 0 || openAIEvalAccountModelConfigured(cfg, account.ID, model) {
 			continue
 		}
 		q := row.Factors.Quality
-		var modelCells []OpenAIEvalRankingFactors
-		for _, cell := range row.Models {
-			if openAIEvalQualityDimension(cell.RequestedModel) == openAIEvalQualityDimension(model) && cell.Factors.Quality.Known && cell.Factors.Quality.Selected > 0 && cell.Factors.Quality.ExpiresAt != nil && now.Before(*cell.Factors.Quality.ExpiresAt) {
-				modelCells = append(modelCells, cell.Factors)
-			}
-		}
-		// Prefer this public model across efforts. A configured but unavailable
-		// model result falls back to the account-level aggregate. This is
-		// intentional: a configured route without usable evidence is not a
-		// quality signal and must not suppress the cold-start account prior.
-		modelConfigured := len(modelCells) > 0
-		if modelConfigured {
-			q = macroRankingFactors(modelCells).Quality
-		}
 		fraction := rankingQualityFraction(q)
 		if fraction == nil || q.ExpiresAt == nil || !now.Before(*q.ExpiresAt) {
 			continue
 		}
 		sources := make([]string, 0)
-		if modelConfigured {
-			for _, route := range cfg.Accounts {
-				if route.AccountID == account.ID && openAIEvalQualityDimension(route.RequestedModel) == openAIEvalQualityDimension(model) && qualityFromLatestRuns(cfg, account.ID, model, route.ReasoningEffort, latest, now).Known {
-					sources = append(sources, route.RequestedModel+"/"+route.ReasoningEffort)
-				}
-			}
-		} else {
-			for _, cell := range row.Models {
-				if cell.Factors.Quality.Known {
-					sources = append(sources, cell.RequestedModel+"/"+cell.ReasoningEffort)
-				}
+		for _, cell := range row.Models {
+			if cell.Factors.Quality.Known {
+				sources = append(sources, cell.RequestedModel)
 			}
 		}
 		sources = dedupeAndSortModelIDs(sources)
 		expires := *q.ExpiresAt
 		basis := "aggregate_fallback"
-		if modelConfigured {
-			basis = "model_effort_fallback"
-		}
 		priors[account.ID] = &OpenAIEvalAccountQualityPrior{Ratio: *q.Ratio, Basis: basis, EvaluationID: gen.summary.EvaluationID,
 			EvaluatedAt: gen.summary.EvaluatedAt, ExpiresAt: expires, SourceModels: sources, fraction: fraction}
 	}

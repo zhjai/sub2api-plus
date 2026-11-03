@@ -37,19 +37,19 @@ func TestScoreOpenAIEvalCandyAcceptsExpectedNumberAnywhere(t *testing.T) {
 		"因此，最少需要取出 21 个糖果不够。", "所以最少要取 **21** 个不是正确答案。",
 		"分析中出现21颗。\n最后一个数字是21。", "答案：21。\n因此，最少需要取出 29 个。",
 		"至少 30 颗，21 颗不够。", "答案是 20，21 才是最大反例。", "不是21，而是29", "21不够，答案29",
-		"这里讨论21，最终29", "-21", "21/29", "21%", "答案：21。\n最终答案：29。",
+		"这里讨论21，最终29", "-21", "21/29", "21%", "21.5", "21e3", "最终答案：21.5", "答案：21。\n最终答案：29。",
 		"题中有21这个数，但不能据此作答。", "最终答案：21不够。",
 	} {
 		require.Equal(t, "pass", ScoreOpenAIEvalCandy(answer).Status, answer)
 	}
-	for _, answer := range []string{"21", "答案：21 颗。", "二十一颗", "**21** 颗。", "21颗。不同形状可以区分。", "21. Explanation follows.", "最终答案：21 颗", "最少需要 21 颗。", "先取9颗圆形，再取12颗星形。\n最终答案：21颗。", "Reasoning with 9 and 12.\nFinal answer: 21."} {
+	for _, answer := range []string{"21", "答案：21 颗。", "**21** 颗。", "21颗。不同形状可以区分。", "21. Explanation follows.", "最终答案：21 颗", "最少需要 21 颗。", "先取9颗圆形，再取12颗星形。\n最终答案：21颗。", "Reasoning with 9 and 12.\nFinal answer: 21."} {
 		outcome := ScoreOpenAIEvalCandy(answer)
 		require.Equal(t, "pass", outcome.Status, answer)
 		require.Equal(t, "neutral", outcome.Scheduling)
 		require.Equal(t, "low", outcome.Confidence)
 	}
 
-	for _, answer := range []string{"29", "二十颗", "21.5", "121", "21e3", "最终答案：21.5", "综上，最少取出21.5颗"} {
+	for _, answer := range []string{"29", "二十颗", "二十一颗", "121"} {
 		outcome := ScoreOpenAIEvalCandy(answer)
 		require.Equal(t, "warning", outcome.Status, answer)
 		require.Equal(t, "alert_only", outcome.Scheduling)
@@ -98,7 +98,7 @@ func TestOpenAIEvalCandyExtractedAnswer(t *testing.T) {
 			got, ok := leadingOpenAIEvalCandyAnswer(test.answer)
 			require.Equal(t, test.ok, ok)
 			require.Equal(t, test.want, got)
-			if !test.ok || test.want != OpenAIEvalCandyExpectedAnswer {
+			if !test.ok && test.answer != "最终答案：21.5。" || test.ok && test.want != OpenAIEvalCandyExpectedAnswer {
 				require.Equal(t, "warning", ScoreOpenAIEvalCandy(test.answer).Status)
 			} else {
 				require.Equal(t, "pass", ScoreOpenAIEvalCandy(test.answer).Status)
@@ -146,7 +146,7 @@ func TestOpenAIEvalPinnedFingerprintDataAndPlans(t *testing.T) {
 	for _, tc := range []struct {
 		mode string
 		want int
-	}{{"quick", 60}, {"standard", 200}, {"strict", 400}} {
+	}{{"quick", 3}, {"standard", 3}, {"strict", 3}, {"obsolete", 3}, {"", 3}} {
 		got, err := OpenAIEvalFingerprintSampleCount(tc.mode)
 		require.NoError(t, err)
 		require.Equal(t, tc.want, got)
@@ -461,7 +461,7 @@ func TestOpenAIEvalSchedulesHaveBoundedIntervalsAndFingerprintSampleModes(t *tes
 		{name: "candy minimum", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 299}, testType: OpenAIEvalTypeCandy, wantErr: true},
 		{name: "candy accepted", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 300}, testType: OpenAIEvalTypeCandy},
 		{name: "fingerprint below five minutes", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 299, SampleMode: "quick"}, testType: OpenAIEvalTypeFingerprint, wantErr: true},
-		{name: "fingerprint missing mode", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 86400}, testType: OpenAIEvalTypeFingerprint, wantErr: true},
+		{name: "fingerprint no longer requires legacy sample mode", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 86400}, testType: OpenAIEvalTypeFingerprint},
 		{name: "fingerprint accepted", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 5 * 60, SampleMode: "strict"}, testType: OpenAIEvalTypeFingerprint},
 		{name: "model trace minimum", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 5 * 60}, testType: OpenAIEvalTypeModelTrace},
 		{name: "state probe minimum", schedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 5 * 60}, testType: OpenAIEvalTypeStateProbe},
@@ -496,7 +496,7 @@ func TestOpenAIEvalSaveConfigDefaultsEffectsOffAndValidatesRoutes(t *testing.T) 
 	config.Accounts = append(config.Accounts, config.Accounts[0])
 	require.ErrorContains(t, svc.SaveConfig(context.Background(), config, 9), "duplicate")
 	config.Accounts = config.Accounts[:1]
-	config.Accounts[0].RequestedModel = "claude-opus"
+	config.Accounts[0].RequestedModel = "invalid\nmodel"
 	require.ErrorContains(t, svc.SaveConfig(context.Background(), config, 9), "invalid evaluation route")
 }
 
@@ -572,7 +572,7 @@ func TestOpenAIEvalEffectsDisabledSuppressesSchedulingPolicy(t *testing.T) {
 
 	SetOpenAIEvalEffectsEnabled(true)
 	require.Equal(t, OpenAIEvalSchedulingPolicyCostFirst, OpenAIEvalSchedulingPolicyForRequest("gpt-6-astra", "high"))
-	require.Equal(t, OpenAIEvalSchedulingPolicyStabilityFirst, OpenAIEvalSchedulingPolicyForRequest("gpt-6-astra", "low"))
+	require.Equal(t, OpenAIEvalSchedulingPolicyCostFirst, OpenAIEvalSchedulingPolicyForRequest("gpt-6-astra", "low"))
 }
 
 func TestOpenAIEvalRouteHealthIsScopedAndExpires(t *testing.T) {
@@ -581,20 +581,20 @@ func TestOpenAIEvalRouteHealthIsScopedAndExpires(t *testing.T) {
 	health = updateOpenAIEvalRouteHealth(health, 7, "gpt-6-astra", "high", now, true, "response_incomplete")
 	require.Equal(t, 1, health.HardFailureStreak)
 	require.Zero(t, health.Penalty)
-	_, active := ReadOpenAIEvalRouteHealthFromAccount(&Account{Extra: map[string]any{OpenAIEvalRouteHealthExtraKeyFor("gpt-6-astra", "high"): health}}, "gpt-6-astra", "high", now)
+	_, active := ReadOpenAIEvalRouteHealthFromAccount(&Account{ID: 7, Extra: map[string]any{OpenAIEvalRouteHealthExtraKeyFor("gpt-6-astra", "high"): health}}, "gpt-6-astra", "high", now)
 	require.False(t, active)
-	raw, stored := readOpenAIEvalRouteHealthStateFromAccount(&Account{Extra: map[string]any{OpenAIEvalRouteHealthExtraKeyFor("gpt-6-astra", "high"): health}}, "gpt-6-astra", "high")
+	raw, stored := readOpenAIEvalRouteHealthStateFromAccount(&Account{ID: 7, Extra: map[string]any{OpenAIEvalRouteHealthExtraKeyFor("gpt-6-astra", "high"): health}}, "gpt-6-astra", "high")
 	require.True(t, stored)
 	require.Equal(t, 1, raw.HardFailureStreak)
 
 	health = updateOpenAIEvalRouteHealth(health, 7, "gpt-6-astra", "high", now.Add(time.Minute), true, "response_incomplete")
 	require.Equal(t, 2, health.HardFailureStreak)
 	require.Equal(t, float64(1), health.Penalty)
-	account := &Account{Extra: map[string]any{OpenAIEvalRouteHealthExtraKeyFor("gpt-6-astra", "high"): health}}
+	account := &Account{ID: 7, Extra: map[string]any{OpenAIEvalRouteHealthExtraKeyFor("gpt-6-astra", "high"): health}}
 	_, active = ReadOpenAIEvalRouteHealthFromAccount(account, "gpt-6-astra", "high", now.Add(2*time.Minute))
 	require.True(t, active)
 	_, active = ReadOpenAIEvalRouteHealthFromAccount(account, "gpt-6-astra", "low", now.Add(2*time.Minute))
-	require.False(t, active)
+	require.True(t, active)
 	_, active = ReadOpenAIEvalRouteHealthFromAccount(account, "gpt-5.4", "high", now.Add(2*time.Minute))
 	require.False(t, active)
 	_, active = ReadOpenAIEvalRouteHealthFromAccount(account, "gpt-6-astra", "high", now.Add(OpenAIEvalRouteHealthTTL+2*time.Minute))
@@ -611,7 +611,7 @@ func TestOpenAIEvalRouteHealthAppearsInSchedulerCandidateExplanation(t *testing.
 	require.Equal(t, float64(1), candidates[0].EvaluationPenalty)
 	other := buildOpenAIAccountScheduleCandidates(openAIAccountLoadPlan{candidates: []openAIAccountCandidateScore{{account: account}}}, nil, "gpt-6-astra", "low")
 	require.Len(t, other, 1)
-	require.Zero(t, other[0].EvaluationPenalty)
+	require.Equal(t, float64(1), other[0].EvaluationPenalty)
 }
 
 func TestOpenAIEvalRunCandyAndFingerprintUseSafeRouteOutcomes(t *testing.T) {
@@ -657,11 +657,12 @@ func TestOpenAIEvalRunCandyAndFingerprintUseSafeRouteOutcomes(t *testing.T) {
 		require.NoError(t, err)
 		require.NotEmpty(t, run.Status)
 		require.Equal(t, "alert_only", run.Outcome.Scheduling)
-		require.Equal(t, 60, run.RequestCount)
-		require.Len(t, run.Samples, 60)
-		require.Greater(t, run.Outcome.SampleCount, 0)
-		require.Equal(t, run.Outcome.ExpectedCount, 60)
-		require.NotNil(t, run.Outcome.Fingerprint)
+		require.Equal(t, 3*OpenAIEvalDefaultMaxRequestAttempts, run.RequestCount)
+		require.Len(t, run.Samples, 3)
+		require.Equal(t, "insufficient", run.Status, "a single number is not a usable detector vector")
+		require.NotNil(t, run.Outcome.LMFingerprint)
+		require.Nil(t, run.Outcome.Fingerprint)
+		require.Equal(t, "high", run.ReasoningEffort)
 		require.Zero(t, healthRepo.setErrorID)
 		require.Zero(t, healthRepo.rateLimitedID)
 		require.Nil(t, healthRepo.updatedExtra, "Fingerprint probes are alert-only and must not mutate route health")

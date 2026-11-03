@@ -34,7 +34,7 @@ type openAIEvalQualityRoute struct {
 }
 
 func (r openAIEvalQualityRoute) key() string {
-	dimension, _ := json.Marshal([]string{r.Model, r.Effort})
+	dimension, _ := json.Marshal([]string{r.Model})
 	return fmt.Sprintf("%d:%s", r.AccountID, dimension)
 }
 
@@ -49,7 +49,7 @@ func assessOpenAIEvalQuality(route openAIEvalQualityRoute, evidence []OpenAIEval
 			if quality.TestType != testType {
 				continue
 			}
-			if found || !quality.validFor(route.AccountID, route.Model, route.Effort, now) {
+			if found || !quality.validFor(route.AccountID, route.Model, quality.ReasoningEffort, now) {
 				return OpenAIEvalQualityAssessment{}, false
 			}
 			found = true
@@ -89,6 +89,7 @@ type openAIEvalQualitySnapshotStore struct {
 var openAIEvalQualitySnapshots = &openAIEvalQualitySnapshotStore{}
 
 func normalizeOpenAIEvalQualityConfig(config *OpenAIEvalConfig) error {
+	NormalizeOpenAIEvalModelPolicies(config)
 	if _, err := buildOpenAIEvalAccountPriorityIndex(config.AccountPriorityRules); err != nil {
 		return fmt.Errorf("build account priority rules: %w", err)
 	}
@@ -135,12 +136,12 @@ func openAIEvalQualityRoutes(config *OpenAIEvalConfig) ([]openAIEvalQualityRoute
 	seen := make(map[string]int)
 	var routes []openAIEvalQualityRoute
 	for _, item := range config.Accounts {
-		route := openAIEvalQualityRoute{AccountID: item.AccountID, Model: openAIEvalQualityDimension(item.RequestedModel), Effort: openAIEvalQualityDimension(item.ReasoningEffort)}
+		route := openAIEvalQualityRoute{AccountID: item.AccountID, Model: openAIEvalQualityDimension(item.RequestedModel), Effort: ""}
 		if route.AccountID <= 0 || route.Model == "" {
 			continue
 		}
 		automatic := false
-		for i, schedule := range []OpenAIEvalSchedule{item.CandySchedule, item.FingerprintSchedule, item.ModelTraceSchedule} {
+		for i, schedule := range []OpenAIEvalSchedule{item.CandySchedule, openAIEvalDetectorSchedule(item)} {
 			if schedule.Enabled {
 				if schedule.IntervalSeconds < 300 || int64(schedule.IntervalSeconds) > OpenAIEvalMaxIntervalSeconds {
 					return nil, errors.New("invalid automatic quality test interval")
@@ -191,7 +192,7 @@ func (cache *openAIEvalQualitySnapshotStore) configure(config *OpenAIEvalConfig)
 		AttributionRule string
 		Interval        int
 		Routes          []openAIEvalQualityRoute
-	}{OpenAIEvalModelTraceRuleVersion, interval, routes})
+	}{OpenAIEvalQualityDataVersion + openAIEvalQualityAttributionRuleVersion(OpenAIEvalTypeFingerprint), interval, routes})
 	signature := sha256.Sum256(payload)
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
@@ -324,7 +325,7 @@ func (s *OpenAIEvalService) refreshOpenAIEvalQuality(ctx context.Context, force 
 	cache.mu.Unlock()
 	entries := make(map[string]OpenAIEvalQualityAssessment)
 	if enabled {
-		latest, err := s.latestQualityRefreshRuns(ctx, routes)
+		latest, err := loadOpenAIEvalModelQualityRuns(ctx, s.repo, config, now)
 		if err != nil {
 			return nil, err
 		}
@@ -357,7 +358,7 @@ func (s *OpenAIEvalService) refreshOpenAIEvalQuality(ctx context.Context, force 
 				if route.Intervals[i] == 0 {
 					continue
 				}
-				quality, ok := readOpenAIEvalQualityEvidence(accounts[route.AccountID], route.Model, route.Effort, testType, now)
+				quality, ok := readOpenAIEvalModelQualityEvidence(accounts[route.AccountID], route.Model, testType, now)
 				if run, found := latest[OpenAIEvalEvidenceKey{route.AccountID, route.Model, route.Effort, testType}]; found {
 					quality, ok = openAIEvalQualityAggregateFromRun(run, route.Intervals[i], int(interval/time.Second), now)
 				}
@@ -402,40 +403,12 @@ func (s *OpenAIEvalService) refreshOpenAIEvalQuality(ctx context.Context, force 
 	return &result, nil
 }
 
-// Rebuild derived verdicts from immutable raw runs when that repository
-// capability exists. A newer unknown outcome must not restore an older pass.
-func (s *OpenAIEvalService) latestQualityRefreshRuns(ctx context.Context, routes []openAIEvalQualityRoute) (map[OpenAIEvalEvidenceKey]OpenAIEvalRun, error) {
-	latest := make(map[OpenAIEvalEvidenceKey]OpenAIEvalRun)
-	repo, ok := s.repo.(OpenAIEvalLatestEvidenceRepository)
-	if !ok {
-		return latest, nil
+// Compatibility entry point for callers rebuilding from immutable runs.
+// Scheduling consumers select the latest usable evidence across efforts.
+func (s *OpenAIEvalService) latestQualityRefreshRuns(ctx context.Context, _ []openAIEvalQualityRoute) (map[OpenAIEvalEvidenceKey]OpenAIEvalRun, error) {
+	config, err := s.repo.GetConfig(ctx)
+	if err != nil {
+		return nil, err
 	}
-	var keys []OpenAIEvalEvidenceKey
-	selected := make(map[OpenAIEvalEvidenceKey]bool)
-	for _, route := range routes {
-		for i, testType := range openAIEvalQualityTestTypes {
-			if route.Intervals[i] != 0 {
-				key := OpenAIEvalEvidenceKey{route.AccountID, route.Model, route.Effort, testType}
-				selected[key] = true
-				keys = append(keys, key)
-			}
-		}
-	}
-	for start := 0; start < len(keys); start += 600 {
-		runs, err := repo.LatestCompletedRuns(ctx, keys[start:min(start+600, len(keys))])
-		if err != nil {
-			return nil, err
-		}
-		for _, run := range runs {
-			key := OpenAIEvalEvidenceKey{run.AccountID, openAIEvalQualityDimension(run.RequestedModel), openAIEvalQualityDimension(run.ReasoningEffort), run.TestType}
-			if !selected[key] || run.Status == "running" || run.DiagnosticOnly || !openAIEvalQualityRunSourceSupported(run.TriggerSource) {
-				continue
-			}
-			old, found := latest[key]
-			if !found || run.FinishedAt.After(old.FinishedAt) || (run.FinishedAt.Equal(old.FinishedAt) && run.ID > old.ID) {
-				latest[key] = run
-			}
-		}
-	}
-	return latest, nil
+	return loadOpenAIEvalModelQualityRuns(ctx, s.repo, config, time.Now().UTC())
 }

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/service/cpaeval"
 )
 
 const (
@@ -26,11 +28,13 @@ const (
 	// openai_eval_schedule_state.interval_seconds is a PostgreSQL INTEGER.
 	// This is a storage-safety limit, not a product limit on custom intervals.
 	OpenAIEvalMaxIntervalSeconds     = int64(1<<31 - 1)
-	OpenAIEvalMaxFingerprintRequests = 400
+	OpenAIEvalMaxFingerprintRequests = cpaeval.FingerprintTarget
 	OpenAIEvalMinStateProbeInterval  = 5 * time.Minute
 )
 
 type OpenAIEvalRunRequest struct {
+	Concurrency     int    `json:"concurrency,omitempty"`
+	Variant         string `json:"variant,omitempty"`
 	AccountID       int64  `json:"account_id"`
 	TestType        string `json:"test_type"`
 	RequestedModel  string `json:"requested_model"`
@@ -48,12 +52,23 @@ type OpenAIEvalService struct {
 	pricing     *PricingService
 }
 
+// OpenAIEvalDetectorScheduleRepository reconciles legacy automatic detector
+// plans with persisted scheduler state before any scheduled evaluation starts.
+type OpenAIEvalDetectorScheduleRepository interface {
+	ReconcileDetectorSchedules(context.Context) error
+}
+
 // Initialize restores the process-wide scheduling-effects switch before the
 // first admin request or scheduled evaluation runs. A failed read leaves the
 // safe default unchanged; callers decide whether startup should be fatal.
 func (s *OpenAIEvalService) Initialize(ctx context.Context) error {
 	if s == nil || s.repo == nil {
 		return errors.New("OpenAI evaluation service is unavailable")
+	}
+	if reconciler, ok := s.repo.(OpenAIEvalDetectorScheduleRepository); ok {
+		if err := reconciler.ReconcileDetectorSchedules(ctx); err != nil {
+			return fmt.Errorf("reconcile detector schedules: %w", err)
+		}
 	}
 	config, err := s.repo.GetConfig(ctx)
 	if err != nil {
@@ -67,6 +82,8 @@ func (s *OpenAIEvalService) Initialize(ctx context.Context) error {
 	config = &copy
 	config.Accounts = append([]OpenAIEvalAccountConfig(nil), config.Accounts...)
 	RetireOpenAIEvalBPS(config)
+	NormalizeOpenAIEvalDetectorConfig(config)
+	NormalizeOpenAIEvalModelPolicies(config)
 	if err := s.pruneDeletedAccountReferences(ctx, config, nil); err != nil {
 		return err
 	}
@@ -102,6 +119,8 @@ func (s *OpenAIEvalService) GetConfig(ctx context.Context) (*OpenAIEvalConfig, e
 		config = &copy
 		config.Accounts = append([]OpenAIEvalAccountConfig(nil), config.Accounts...)
 		RetireOpenAIEvalBPS(config)
+		NormalizeOpenAIEvalDetectorConfig(config)
+		NormalizeOpenAIEvalModelPolicies(config)
 		if err := s.pruneDeletedAccountReferences(ctx, config, nil); err != nil {
 			return nil, err
 		}
@@ -151,7 +170,10 @@ func (s *OpenAIEvalService) SaveConfig(ctx context.Context, config *OpenAIEvalCo
 	if config == nil {
 		return errors.New("evaluation config is required")
 	}
+	beforeDetectorConfig, _ := json.Marshal(config.Accounts)
 	RetireOpenAIEvalBPS(config)
+	NormalizeOpenAIEvalDetectorConfig(config)
+	NormalizeOpenAIEvalModelPolicies(config)
 	if s.accounts != nil {
 		previous, err := s.repo.GetConfig(ctx)
 		if err != nil {
@@ -253,7 +275,11 @@ func (s *OpenAIEvalService) SaveConfig(ctx context.Context, config *OpenAIEvalCo
 		item.DirectOAuthEligible = false // derived from the current account, never persisted
 		item.BPSMode = OpenAIEvalBPSModeForceOff
 		item.BPSAuto = false
-		if item.AccountID <= 0 || !isOpenAIEvalSupportedModel(item.RequestedModel) {
+		item.RequestedModel = strings.TrimSpace(item.RequestedModel)
+		// Saving a target must not depend on the bundled detector/catalog
+		// version. Unknown models keep their configuration; normalization above
+		// disables automatic fingerprinting and explains it in Warnings.
+		if item.AccountID <= 0 || item.RequestedModel == "" || len(item.RequestedModel) > 200 || strings.ContainsAny(item.RequestedModel, "\x00\r\n\t ") {
 			return fmt.Errorf("invalid evaluation route at index %d", i)
 		}
 		if effort := strings.TrimSpace(item.ReasoningEffort); effort != "" && !isAllowedOpenAIEvalReasoningEffort(effort) {
@@ -297,6 +323,14 @@ func (s *OpenAIEvalService) SaveConfig(ctx context.Context, config *OpenAIEvalCo
 			s.ranking.mu.Unlock()
 		}
 		return err
+	}
+	afterDetectorConfig, _ := json.Marshal(config.Accounts)
+	if string(beforeDetectorConfig) != string(afterDetectorConfig) {
+		// The repository save is already committed; an audit transport failure
+		// cannot safely be reported as a failed configuration save.
+		if auditErr := s.repo.RecordAuditEvent(ctx, actorID, "evaluation_detector_config_normalized", map[string]any{"before": json.RawMessage(beforeDetectorConfig), "after": json.RawMessage(afterDetectorConfig), "warnings": config.Warnings}); auditErr != nil {
+			logger.LegacyPrintf("service.openai_eval", "[OpenAI Eval] normalization audit failed: %v", auditErr)
+		}
 	}
 	if s.ranking != nil {
 		s.ranking.adoptLocked(config)
@@ -352,7 +386,10 @@ func validateOpenAIEvalSchedule(schedule *OpenAIEvalSchedule, testType string) e
 	}
 	if testType == OpenAIEvalTypeFingerprint {
 		minimum = int(OpenAIEvalMinFingerprintInterval.Seconds())
-		if _, err := OpenAIEvalFingerprintSampleCount(schedule.SampleMode); err != nil {
+		schedule.SampleMode = ""
+		var err error
+		schedule.Concurrency, err = normalizeOpenAIEvalFingerprintConcurrency(schedule.Concurrency)
+		if err != nil {
 			return err
 		}
 	}
@@ -391,7 +428,10 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 	if request.ReasoningEffort != "" && !isAllowedOpenAIEvalReasoningEffort(request.ReasoningEffort) {
 		return nil, fmt.Errorf("unsupported reasoning effort %q", request.ReasoningEffort)
 	}
-	if request.TestType != OpenAIEvalTypeCandy && request.TestType != OpenAIEvalTypeFingerprint && request.TestType != OpenAIEvalTypeModelTrace && request.TestType != OpenAIEvalTypeStateProbe {
+	if request.TestType == OpenAIEvalTypeModelTrace {
+		return nil, errors.New("ModelTrace has been retired; use fingerprint")
+	}
+	if request.TestType != OpenAIEvalTypeCandy && request.TestType != OpenAIEvalTypeFingerprint && request.TestType != OpenAIEvalTypePelican && request.TestType != OpenAIEvalTypeStateProbe {
 		return nil, fmt.Errorf("unsupported OpenAI evaluation type %q", request.TestType)
 	}
 	if source != "manual" && source != "scheduled" {
@@ -404,8 +444,25 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 		}
 	}
 	if request.TestType == OpenAIEvalTypeFingerprint {
-		if _, err := OpenAIEvalFingerprintSampleCount(request.SampleMode); err != nil {
+		var err error
+		request.Concurrency, err = normalizeOpenAIEvalFingerprintConcurrency(request.Concurrency)
+		if err != nil {
 			return nil, err
+		}
+		request.SampleMode = ""
+		if source == "scheduled" && !cpaeval.ModelEnrolled(request.RequestedModel) {
+			return nil, errors.New("automatic fingerprint requires an enrolled model")
+		}
+	}
+	if request.TestType == OpenAIEvalTypePelican {
+		if source != "manual" {
+			return nil, errors.New("Pelican is manual only")
+		}
+		if request.Variant == "" {
+			request.Variant = "original"
+		}
+		if _, ok := cpaeval.FindPelicanVariant(request.Variant); !ok {
+			return nil, fmt.Errorf("unsupported Pelican variant %q", request.Variant)
 		}
 	}
 	if request.TestType == OpenAIEvalTypeCandy {
@@ -497,8 +554,8 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 	switch request.TestType {
 	case OpenAIEvalTypeFingerprint:
 		expectedSamples, _ = OpenAIEvalFingerprintSampleCount(request.SampleMode)
-	case OpenAIEvalTypeModelTrace:
-		expectedSamples = OpenAIEvalModelTraceRequests
+	case OpenAIEvalTypePelican:
+		expectedSamples = 1
 	case OpenAIEvalTypeStateProbe:
 		expectedSamples = 2 * maximum
 	}
@@ -514,11 +571,11 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 	}
 	defer releaseBudget()
 	openAIEvalAdmissionFinished(ctx)
-	runCtx = controlledCtx
+	runCtx = withOpenAIEvalKind(controlledCtx, request.TestType)
 	run := &OpenAIEvalRun{
 		AccountID: request.AccountID, TestType: request.TestType,
 		RequestedModel: request.RequestedModel, UpstreamModel: target.UpstreamModel,
-		ReasoningEffort: request.ReasoningEffort, DataVersion: OpenAIEvalDataVersion,
+		ReasoningEffort: request.ReasoningEffort, DataVersion: OpenAIEvalDataVersion, BaselineVersion: OpenAIEvalBaselineVersion,
 		Status: "running", StartedAt: start, TriggeredBy: actorID, TriggerSource: source,
 		Outcome:         OpenAIEvalOutcome{Status: "running", Reason: "sampling", SampleCount: 0, ExpectedCount: expectedSamples, Confidence: "none", Scheduling: "disabled"},
 		SampleCount:     expectedSamples,
@@ -528,7 +585,7 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 		// Account activity is a validity boundary. Scheduling participation is
 		// only a boundary for automatic runs; a manual administrator evaluation
 		// remains quality evidence when routing is paused.
-		DiagnosticOnly: !target.Account.IsActive() || (source == "scheduled" && !target.Account.Schedulable),
+		DiagnosticOnly: request.TestType == OpenAIEvalTypePelican || !target.Account.IsActive() || (source == "scheduled" && !target.Account.Schedulable),
 	}
 	run.Protocol = "responses"
 	if !target.Credential.IsOpenAIOAuthLike() && shouldForwardOpenAIResponsesViaRawChatCompletions(target.Account) {
@@ -586,6 +643,7 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 			}
 			runErr = errors.Join(runErr, fmt.Errorf("evaluation lease lost: %w", lostErr))
 		}
+		lmFingerprint, pelican := run.Outcome.LMFingerprint, run.Outcome.Pelican
 		if runErr != nil {
 			markHardFailure(runErr)
 			run.Status = "error"
@@ -616,6 +674,19 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 				run.Error = diagnostics.DeferredReason
 			}
 			run.Outcome = OpenAIEvalOutcome{Status: "inconclusive", Reason: run.Error, SampleCount: run.CompletedSamples, ExpectedCount: run.ExpectedSamples, Confidence: "none", Scheduling: "disabled"}
+		}
+		run.Outcome.LMFingerprint, run.Outcome.Pelican = lmFingerprint, pelican
+		if request.TestType == OpenAIEvalTypePelican {
+			run.DiagnosticOnly = true
+			if runErr != nil || deferred || run.Status != "completed" {
+				run.Status, run.Outcome.Status = "failed", "failed"
+				run.PelicanHTML = ""
+				if run.Outcome.Pelican != nil {
+					run.Outcome.Pelican.HTMLBytes = 0
+					run.Outcome.Pelican.HTMLSHA256 = ""
+				}
+			}
+			run.Outcome.Scheduling = "disabled"
 		}
 		if target.Credential.IsOpenAIOAuthLike() && request.TestType != OpenAIEvalTypeStateProbe {
 			run.Outcome.RequestProfile = openAIEvalCodexRequestProfile
@@ -663,7 +734,7 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 		for i := 0; i < request.SampleCount; i++ {
 			run.Phase = "sampling"
 			result, record, sampleErr := s.accountTest.runOpenAIEvalSampleAttempts(candyCtx, target, OpenAIEvalCandyPrompt, request.ReasoningEffort, maximum)
-			record.ProbeID = fmt.Sprintf("candy-21-v4-97623969-%d", i+1)
+			record.ProbeID = fmt.Sprintf("candy-179d6dae-%d", i+1)
 			run.RequestCount += record.Attempts
 			run.CompletedSamples++
 			run.Samples = append(run.Samples, record)
@@ -690,8 +761,8 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 			validSamples++
 			outcome := ScoreOpenAIEvalCandy(result.Text)
 			allPassed = allPassed && outcome.Status == "pass"
-			if value, ok := leadingOpenAIEvalCandyAnswer(result.Text); ok {
-				run.Samples[len(run.Samples)-1].NormalizedAnswer = fmt.Sprint(value)
+			if cpaeval.HasStandalone21(result.Text) {
+				run.Samples[len(run.Samples)-1].NormalizedAnswer = "21"
 			}
 			run.Samples[len(run.Samples)-1].ErrorCode = outcome.Reason
 			persistProgress()
@@ -712,94 +783,65 @@ func (s *OpenAIEvalService) Run(ctx context.Context, request OpenAIEvalRunReques
 		return finish(nil)
 	}
 
-	if request.TestType == OpenAIEvalTypeModelTrace {
-		trace, count, inputTokens, outputTokens, traceErr := s.runModelTrace(runCtx, target, request.ReasoningEffort, maximum)
-		run.RequestCount = count
-		run.InputTokens = inputTokens
-		run.OutputTokens = outputTokens
-		if trace != nil {
-			for i := range trace.Samples {
-				sample := trace.Samples[i]
-				run.Samples = append(run.Samples, OpenAIEvalSampleRecord{ProbeID: fmt.Sprintf("modeltrace-%d", i+1), Answer: sample.Answer, Attempts: sample.Attempts, Valid: sample.Valid, ErrorCode: sample.Error, ErrorMessage: sample.ErrorMessage, AttemptErrors: sample.AttemptErrors, HTTPStatus: sample.HTTPStatus})
-				trace.Samples[i].Prompt = ""
-				trace.Samples[i].Text = ""
+	if request.TestType == OpenAIEvalTypePelican {
+		variant, _ := cpaeval.FindPelicanVariant(request.Variant)
+		pelicanCtx := withOpenAIEvalAccept(runCtx, func(answer string) error {
+			page, err := variant.Page(answer)
+			if err == nil && len(page) > 300<<10 {
+				return errors.New("Pelican HTML exceeds 300 KiB")
 			}
-			run.CompletedSamples = len(run.Samples)
-			run.Outcome = modelTraceSchedulingOutcome(run.RequestedModel, trace, traceErr)
-			run.Status = run.Outcome.Status
+			return err
+		})
+		response, record, sampleErr := s.accountTest.runOpenAIEvalSampleAttempts(pelicanCtx, target, variant.Prompt, request.ReasoningEffort, maximum)
+		record.ProbeID = "pelican-" + variant.ID
+		record.Answer = "" // only the independent artifact table contains the page
+		run.Samples = append(run.Samples, record)
+		run.RequestCount, run.CompletedSamples = record.Attempts, 1
+		run.Outcome = OpenAIEvalOutcome{Status: "failed", Confidence: "none", Scheduling: "disabled", ExpectedCount: 1,
+			Pelican: &OpenAIEvalPelicanResult{Variant: variant.ID, Attempts: record.Attempts}}
+		run.Status = "failed"
+		if response != nil {
+			run.InputTokens, run.OutputTokens = response.InputTokens, response.OutputTokens
 		}
-		if traceErr != nil && (trace == nil || trace.UsedOutputs == 0) {
-			// An incomplete collection is a neutral result, not a route health
-			// failure. It should be retried or inspected manually.
-			run.Error = safeOpenAIEvalErrorCode(traceErr)
+		if sampleErr == nil && response != nil {
+			page, pageErr := variant.Page(response.Text)
+			if pageErr == nil && len(page) > 300<<10 {
+				pageErr = errors.New("Pelican HTML exceeds 300 KiB")
+			}
+			if pageErr != nil {
+				sampleErr = &OpenAIEvalRequestError{Code: "invalid_pelican_page", Message: pageErr.Error(), Attempted: true}
+				run.Samples[0].Valid = false
+				run.Samples[0].ErrorCode, run.Samples[0].ErrorMessage = "invalid_pelican_page", sanitizeOpenAIEvalText(pageErr.Error(), openAIEvalErrorLimit)
+			} else {
+				run.PelicanHTML = page
+				run.Outcome.Pelican.HTMLBytes = len(page)
+				digest := sha256.Sum256([]byte(page))
+				run.Outcome.Pelican.HTMLSHA256 = hex.EncodeToString(digest[:])
+				run.Status, run.Outcome.Status, run.Outcome.SampleCount = "completed", "completed", 1
+			}
 		}
-		if ctxErr := runCtx.Err(); ctxErr != nil {
-			return finish(ctxErr)
+		if sampleErr != nil {
+			run.Error = safeOpenAIEvalErrorCode(sampleErr)
+			run.Outcome.Reason = run.Error
+		}
+		if err := runCtx.Err(); err != nil {
+			return finish(err)
 		}
 		return finish(nil)
 	}
 
-	cells, repeats, _ := OpenAIEvalFingerprintPlan(request.SampleMode)
-	required := cells * repeats
-	run.BaselineVersion = OpenAIEvalBaselineVersion
-	samples := make([]OpenAIEvalSample, 0, required)
-	for i := 0; i < cells; i++ {
-		probe := OpenAIEvalFingerprintProbes[i]
-		for sampleIndex := 0; sampleIndex < repeats; sampleIndex++ {
-			prompts := probe.Prompts
-			prompt := prompts[sampleIndex%len(prompts)]
-			fullPrompt := probe.Instructions + "\n" + prompt
-			result, record, sampleErr := s.accountTest.runOpenAIEvalSampleAttempts(runCtx, target, fullPrompt, request.ReasoningEffort, maximum)
-			record.ProbeID = probe.ID
-			run.RequestCount += record.Attempts
-			run.CompletedSamples++
-			run.Samples = append(run.Samples, record)
-			if result != nil {
-				run.InputTokens += result.InputTokens
-				run.OutputTokens += result.OutputTokens
-			}
-			if ctxErr := runCtx.Err(); ctxErr != nil {
-				return finish(ctxErr)
-			}
-			if sampleErr != nil {
-				markHardFailure(sampleErr)
-				code := safeOpenAIEvalErrorCode(sampleErr)
-				if isOpenAIEvalDeferredCode(code) {
-					run.Error = code
-					return finish(nil)
-				}
-				if run.Error == "" {
-					run.Error = code
-				}
-				samples = append(samples, OpenAIEvalSample{ProbeID: probe.ID, Error: code})
-				if run.CompletedSamples%5 == 0 || run.CompletedSamples == required {
-					persistProgress()
-				}
-				continue
-			}
-			normalized, valid := NormalizeOpenAIEvalFingerprintAnswer(result.Text, probe)
-			sample := OpenAIEvalSample{ProbeID: probe.ID, Answer: normalized}
-			if !valid {
-				sample.Error = "invalid_probe_answer"
-				record.ErrorMessage = "completed response was not a valid answer for this probe"
-			}
-			samples = append(samples, sample)
-			record.NormalizedAnswer, record.Valid, record.ErrorCode = normalized, valid, sample.Error
-			run.Samples[len(run.Samples)-1] = record
-			if run.CompletedSamples%5 == 0 || run.CompletedSamples == required {
-				persistProgress()
-			}
-		}
+	result := s.collectOpenAIEvalFingerprint(runCtx, target, request.RequestedModel, request.Concurrency, maximum, run, persistProgress)
+	run.Outcome = openAIEvalLMFingerprintOutcome(request.RequestedModel, result)
+	run.Status = run.Outcome.Status
+	if err := runCtx.Err(); err != nil {
+		return finish(err)
 	}
-	result := ScoreOpenAIEvalFingerprint(request.RequestedModel, samples, OpenAIEvalFingerprintBaselines, required)
-	run.Outcome = OpenAIEvalOutcome{Status: result.Status, Reason: result.Reason, SampleCount: result.ValidSamples, ExpectedCount: required, Confidence: "low", Scheduling: "alert_only", Fingerprint: &result}
-	run.Status = result.Status
 	return finish(nil)
 }
 
 func shouldRecordOpenAIEvalRouteHealth(testType string) bool {
 	switch testType {
-	case OpenAIEvalTypeCandy, OpenAIEvalTypeFingerprint, OpenAIEvalTypeModelTrace, OpenAIEvalTypeStateProbe:
+	case OpenAIEvalTypeCandy, OpenAIEvalTypeFingerprint, OpenAIEvalTypeModelTrace, OpenAIEvalTypeStateProbe, OpenAIEvalTypePelican:
 		return false
 	default:
 		return true
@@ -857,7 +899,7 @@ func updateOpenAIEvalRouteHealth(health OpenAIEvalRouteHealth, accountID int64, 
 	}
 	health.AccountID = accountID
 	health.RequestedModel = strings.TrimSpace(model)
-	health.ReasoningEffort = strings.TrimSpace(effort)
+	health.ReasoningEffort = ""
 	health.UpdatedAt = now
 	return health
 }
@@ -876,7 +918,7 @@ func (s *OpenAIEvalService) ListRuns(ctx context.Context, filter OpenAIEvalRunFi
 // Apply the current attribution policy when reading history without rewriting
 // stored evidence. Failed/incomplete runs never become likely-normal results.
 func normalizeOpenAIEvalAttributionRun(run *OpenAIEvalRun) {
-	if run == nil {
+	if run == nil || run.Outcome.LMFingerprint != nil {
 		return
 	}
 	switch run.Status {
@@ -1008,4 +1050,181 @@ func openAIEvalMeanCost(inputTokens, outputTokens int64, inputPricePerMillion, o
 		return math.NaN()
 	}
 	return (float64(inputTokens)*inputPricePerMillion + float64(outputTokens)*outputPricePerMillion) / 1_000_000
+}
+
+// NormalizeOpenAIEvalDetectorConfig projects legacy identity schedules onto
+// the new detector. Call on a copy when reading persisted configuration.
+func NormalizeOpenAIEvalDetectorConfig(config *OpenAIEvalConfig) {
+	if config == nil {
+		return
+	}
+	config.Warnings = nil
+	for i := range config.Accounts {
+		route := &config.Accounts[i]
+		route.FingerprintSchedule = openAIEvalDetectorSchedule(*route)
+		route.ModelTraceSchedule.Enabled = false
+		route.FingerprintSchedule.SampleMode = ""
+		route.FingerprintSchedule.SampleCount = 0
+		if route.FingerprintSchedule.Concurrency == 0 {
+			route.FingerprintSchedule.Concurrency = cpaeval.FingerprintTarget
+		}
+		if !cpaeval.ModelEnrolled(route.RequestedModel) {
+			route.FingerprintSchedule.Enabled = false
+			config.Warnings = append(config.Warnings, fmt.Sprintf("account %d model %s: automatic fingerprint disabled (model_not_enrolled)", route.AccountID, route.RequestedModel))
+		}
+	}
+}
+
+func openAIEvalDetectorSchedule(route OpenAIEvalAccountConfig) OpenAIEvalSchedule {
+	schedule := route.FingerprintSchedule
+	if !schedule.Enabled && route.ModelTraceSchedule.Enabled {
+		schedule = route.ModelTraceSchedule
+	}
+	if !cpaeval.ModelEnrolled(route.RequestedModel) {
+		schedule.Enabled = false
+	}
+	return schedule
+}
+
+func normalizeOpenAIEvalFingerprintConcurrency(n int) (int, error) {
+	if n == 0 {
+		return cpaeval.FingerprintTarget, nil
+	}
+	if n < 1 || n > cpaeval.FingerprintTarget {
+		return 0, errors.New("fingerprint concurrency must be between 1 and 3")
+	}
+	return n, nil
+}
+
+// A challenge holds a process-wide slot through its bounded retries, exactly
+// as the plugin does. Every physical send also takes the existing account/RPM
+// permits inside RunOpenAIEvalSample.
+var openAIEvalFingerprintSlots = make(chan struct{}, cpaeval.FingerprintGlobalConcurrency)
+
+func (s *OpenAIEvalService) collectOpenAIEvalFingerprint(ctx context.Context, target *OpenAIEvalTarget, model string, concurrency, maximum int, run *OpenAIEvalRun, progress func()) *OpenAIEvalLMFingerprintResult {
+	challenges := cpaeval.FingerprintChallenges()
+	result := &OpenAIEvalLMFingerprintResult{
+		DetectorRevision: cpaeval.DetectorRevision(), Concurrency: concurrency,
+		ComparedAs: cpaeval.FingerprintModelID(model), Enrolled: cpaeval.ModelEnrolled(model),
+		Samples: make([]OpenAIEvalLMFingerprintSample, len(challenges)),
+	}
+	type collected struct {
+		index    int
+		sample   OpenAIEvalLMFingerprintSample
+		record   OpenAIEvalSampleRecord
+		response *OpenAIEvalSampleResponse
+	}
+	jobs := make(chan int, len(challenges))
+	results := make(chan collected, len(challenges))
+	for i := range challenges {
+		jobs <- i
+	}
+	close(jobs)
+	var workers sync.WaitGroup
+	for range concurrency {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				challenge := challenges[index]
+				item := collected{index: index, sample: OpenAIEvalLMFingerprintSample{FingerprintChallenge: challenge}}
+				sampleCtx := withOpenAIEvalInstructions(ctx, challenge.Instructions)
+				sampleCtx = withOpenAIEvalAccept(sampleCtx, func(text string) error {
+					_, _, err := cpaeval.FingerprintText(text, challenge.ExpectedCount)
+					return err
+				})
+				var err error
+				select {
+				case openAIEvalFingerprintSlots <- struct{}{}:
+					item.response, item.record, err = s.accountTest.runOpenAIEvalSampleAttempts(sampleCtx, target, challenge.Prompt, "", maximum)
+					<-openAIEvalFingerprintSlots
+				case <-ctx.Done():
+					err = openAIEvalIOError(ctx, ctx.Err(), 0)
+					item.record.ErrorCode, item.record.ErrorMessage = safeOpenAIEvalErrorCode(err), sanitizeOpenAIEvalText(err.Error(), openAIEvalErrorLimit)
+				}
+				item.record.ProbeID = fmt.Sprintf("lm-fingerprint-%d", index+1)
+				item.sample.Attempts = item.record.Attempts
+				if item.response != nil {
+					var textErr error
+					item.sample.Text, item.sample.ParsedNumbers, textErr = cpaeval.FingerprintText(item.response.Text, challenge.ExpectedCount)
+					item.sample.Accepted = err == nil && textErr == nil
+				}
+				if err != nil {
+					item.sample.Error = item.record.ErrorMessage
+				}
+				item.record.Valid = item.sample.Accepted
+				results <- item
+			}
+		}()
+	}
+	go func() { workers.Wait(); close(results) }()
+	records := make([]OpenAIEvalSampleRecord, len(challenges))
+	outputs := make([]cpaeval.FingerprintOutput, len(challenges))
+	for item := range results {
+		result.Samples[item.index] = item.sample
+		records[item.index] = item.record
+		// Failed transport/tool responses must never enter attribution merely
+		// because they contain a numeric prefix. Invalid completed text is kept
+		// in the sample diagnostics but contributes no evidence.
+		if item.sample.Accepted {
+			outputs[item.index].Text = item.sample.Text
+		}
+		outputs[item.index].ExpectedCount = item.sample.ExpectedCount
+		run.RequestCount += item.record.Attempts
+		if item.record.Attempts > 0 {
+			run.CompletedSamples++
+		}
+		if item.response != nil {
+			run.InputTokens += item.response.InputTokens
+			run.OutputTokens += item.response.OutputTokens
+		}
+		run.Samples = append(run.Samples, item.record)
+		progress()
+	}
+	run.Samples = records
+	attribution, err := cpaeval.AnalyzeFingerprint(outputs)
+	result.Attribution = attribution
+	result.CollectionStatus = "failed"
+	if attribution.Used == cpaeval.FingerprintTarget {
+		result.CollectionStatus = "completed"
+	} else if attribution.Used > 0 {
+		result.CollectionStatus = "partial"
+	}
+	if err != nil && run.Error == "" {
+		for _, sample := range run.Samples {
+			if sample.ErrorCode != "" {
+				run.Error = sample.ErrorCode
+				break
+			}
+		}
+		if run.Error == "" {
+			run.Error = "insufficient_valid_samples"
+		}
+	}
+	return result
+}
+
+func openAIEvalLMFingerprintOutcome(model string, result *OpenAIEvalLMFingerprintResult) OpenAIEvalOutcome {
+	outcome := OpenAIEvalOutcome{Status: "insufficient", Reason: "insufficient_valid_samples", Confidence: "none", Scheduling: "alert_only", ExpectedCount: cpaeval.FingerprintTarget, LMFingerprint: result}
+	if result == nil {
+		return outcome
+	}
+	outcome.SampleCount = result.Attribution.Used
+	if !cpaeval.ModelEnrolled(model) {
+		outcome.Reason = "model_not_enrolled"
+		return outcome
+	}
+	if result.Attribution.Used <= 0 {
+		return outcome
+	}
+	outcome.Confidence = "low"
+	if result.Attribution.Decision == "not_model" {
+		outcome.Status, outcome.Reason = "warning", "not_model"
+	} else if result.Attribution.Prediction != "" {
+		outcome.Status, outcome.Reason = "warning", "fingerprint_target_mismatch"
+		if cpaeval.FingerprintModelID(result.Attribution.Prediction) == cpaeval.FingerprintModelID(model) {
+			outcome.Status, outcome.Reason, outcome.Score = "pass", "fingerprint_target_match", 1
+		}
+	}
+	return outcome
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/Wei-Shaw/sub2api/internal/service/cpaeval"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -78,21 +79,25 @@ func TestOpenAIEvalQualityRefreshHandlerUnavailable(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, response.Code)
 }
 
-func TestOpenAIEvalModelTraceCatalogUsesActualBank(t *testing.T) {
+func TestOpenAIEvalFingerprintCatalogUsesCurrentDetector(t *testing.T) {
 	router := gin.New()
 	router.GET("/models", (&AccountHandler{}).ListOpenAIEvalModels)
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/models", nil))
 	require.Equal(t, http.StatusOK, response.Code)
 	var result struct {
-		ModelTrace struct {
-			BankRevision   string `json:"bank_revision"`
-			CandidateCount int    `json:"candidate_count"`
-		} `json:"modeltrace"`
+		Fingerprint struct {
+			DetectorRevision string            `json:"detector_revision"`
+			Requests         int               `json:"requests"`
+			Models           []json.RawMessage `json:"models"`
+		} `json:"fingerprint"`
+		ModelTrace json.RawMessage `json:"modeltrace"`
 	}
 	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &result))
-	require.Equal(t, service.OpenAIEvalQualityModelTraceBankRevision, result.ModelTrace.BankRevision)
-	require.Equal(t, 17, result.ModelTrace.CandidateCount)
+	require.Equal(t, cpaeval.DetectorRevision(), result.Fingerprint.DetectorRevision)
+	require.Equal(t, cpaeval.FingerprintTarget, result.Fingerprint.Requests)
+	require.Len(t, result.Fingerprint.Models, len(cpaeval.Models()))
+	require.Nil(t, result.ModelTrace)
 }
 
 func TestOpenAIEvalQualityConfigMergePreservesOmittedRefreshAndQuality(t *testing.T) {

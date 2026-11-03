@@ -26,7 +26,7 @@ func TestOpenAIEvalCatalogReportsCandyPresenceVersion(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &result))
 	require.Equal(t, service.OpenAIEvalDataVersion, result.DataVersion)
-	require.Contains(t, result.DataVersion, "candy-21-v4-number-presence")
+	require.Contains(t, result.DataVersion, "lm-detector-v1")
 	require.Equal(t, service.OpenAIEvalBaselineVersion, result.BaselineVersion)
 	require.Equal(t, 21, result.Candy.ExpectedAnswer)
 }

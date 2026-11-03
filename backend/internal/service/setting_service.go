@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 
@@ -117,6 +118,8 @@ type WebSearchManagerBuilder func(cfg *WebSearchEmulationConfig, proxyURLs map[i
 
 // SettingService 系统设置服务
 type SettingService struct {
+	scopedAdminKeyRepo          ScopedAdminKeyRepository
+	settingsWriteMu             sync.Mutex // serializes system settings persistence and runtime publication
 	settingRepo                 SettingRepository
 	defaultSubGroupReader       DefaultSubscriptionGroupReader
 	proxyRepo                   ProxyRepository // for resolving websearch provider proxy URLs
@@ -307,7 +310,13 @@ func (s *SettingService) SetProxyRepository(repo ProxyRepository) {
 	s.proxyRepo = repo
 }
 
+// LoadForwardedClientIPSettings is also the existing startup runtime-settings
+// hook. Load the independent WS override here to keep startup wiring compatible;
+// either read may fail without preventing the other setting from loading.
 func (s *SettingService) LoadForwardedClientIPSettings(ctx context.Context) error {
+	if err := s.LoadOpenAIWSModeRouterV2Settings(ctx); err != nil {
+		slog.Warn("load OpenAI WS mode router v2 settings failed", "error", err)
+	}
 	if s == nil || s.cfg == nil || s.settingRepo == nil {
 		return nil
 	}

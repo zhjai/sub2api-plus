@@ -36,7 +36,9 @@ export default {
       running: 'In progress',
       healthy: 'Normal',
       degraded: 'Abnormal',
-      inconclusive: 'Insufficient evidence'
+      inconclusive: 'Insufficient evidence',
+      completed: 'Generated',
+      failed: 'Not generated'
     },
     reason: {
       stateProbe: {
@@ -108,7 +110,7 @@ export default {
       maxAttempts: {
         label: 'Max requests per sample',
         unit: 'including the first',
-        hint: 'Applies to manual and automatic Candy, Fingerprint and ModelTrace tests. 1–10, default 3. Failed requests are retried automatically and retries are billed. State probe reads the same value, but one attempt there is a whole fresh mint-and-continue chain: at most 3 chains, 6 requests in total.'
+        hint: 'Applies to manual and automatic Candy, Fingerprint and Pelican tests. 1–10, default 3. Failed requests are retried automatically and retries are billed. State probe reads the same value, but one attempt there is a whole fresh mint-and-continue chain: at most 3 chains, 6 requests in total.'
       },
       background: {
         title: 'Automatic test controls for {account}',
@@ -206,7 +208,7 @@ export default {
           hourly: 'Set by the hourly send limit.',
           rpm: 'Set by the account RPM limit, as in the server admission check.'
         },
-        fingerprintBlocked: 'Fingerprint runs of {counts} samples all exceed {capacity}. The current budget cannot finish them, so neither automatic nor manual fingerprint runs will start. Raise the limits or the window, or turn the limits off, to run fingerprint tests.',
+        fingerprintBlocked: 'A fingerprint run sends {counts} requests, more than the {capacity} the current limits allow, so neither automatic nor manual fingerprint runs will start. Raise the limits or the window, or turn the limits off, to run fingerprint tests.',
         estimate: {
           test: 'Automatic test',
           sends: 'Requests per run',
@@ -223,8 +225,7 @@ export default {
         instant: 'immediately',
         seconds: '{n} s',
         minutes: '{n} min',
-        manualBlocked: 'More than the {capacity} the current limits allow in the window; cannot finish',
-        manualBudgetNote: 'This account uses experimental limits. Manual tests count toward the budget; the server rejects a run it cannot admit and says why.',
+        manualBlocked: 'The current experimental limits allow at most {capacity} requests in the sampling window, and one run of this test needs {count}, so the server would refuse a manual run. Raise the limits or the window, or turn the limits off.',
         notPersisted: 'The server did not save the automatic test pause or limits. This version may not support them, so do not rely on the pause.'
       },
       targets: 'Test targets',
@@ -247,11 +248,16 @@ export default {
         },
         fingerprint: {
           name: 'Behavior fingerprint',
-          what: 'Samples response behavior and compares it with reference samples to find the closest model. A non-Luna attribution is marked likely normal.'
+          what: 'Draws {count} of 36 fixed challenges asking the model to write a run of integers from 1 to 355, then ranks the {candidates} models in the reference bank by how close their numbers look. A match with the tested model is normal; another model, or numbers that do not move like a language model’s, is abnormal. A tested model outside the bank is diagnosed only and not scored.',
+          whatUnknownBank: 'Draws {count} of 36 fixed challenges asking the model to write a run of integers from 1 to 355, then ranks the models in the reference bank by how close their numbers look. A match with the tested model is normal; another model, or numbers that do not move like a language model’s, is abnormal. A tested model outside the bank is diagnosed only and not scored.'
+        },
+        pelican: {
+          name: 'Pelican drawing',
+          what: 'Asks the model to write an animated SVG of a pelican riding a bicycle, for a person to look at. A finished drawing is not a pass: it is not scored, not part of the integrity pass rate and not used for scheduling.'
         },
         modeltrace: {
-          name: 'ModelTrace attribution',
-          what: 'Sends {count} requests and infers the closest of {candidates} reference models from response behavior. An attribution matching the tested model is marked normal, another non-Luna model likely normal, and a Luna-family model abnormal.'
+          name: 'ModelTrace (retired)',
+          what: 'A retired attribution test; only its history is kept.'
         },
         state_probe: {
           name: 'State probe',
@@ -289,6 +295,111 @@ export default {
       },
       candySamples: 'Requests per run',
       candySamplesHint: 'Candy requests per run, 1–10. Default: 1.',
+      candyPrompt: 'Show the question',
+      fingerprint: {
+        concurrency: 'Send at once',
+        concurrencyOption: '{n} challenges',
+        concurrencyHint: 'How many of the 3 challenges in a run are sent at the same time, 1–3, default 3. Account RPM and concurrency limits still apply; extra challenges wait.',
+        effortNote: 'Fingerprint requests send no reasoning effort (the bank was collected without one); results are still recorded under this target’s “{effort}”.',
+        notEnrolled: 'The reference bank has no candidate for {model}, so automatic fingerprint cannot be turned on. You can still run it manually as a diagnostic; the result is not scored.',
+        notEnrolledEnabled: 'The reference bank has no candidate for {model}, so results cannot be scored. The server turns this automatic fingerprint off on save; you can also turn it off now.'
+      },
+      pelican: {
+        manualOnly: 'Manual only',
+        draw: 'Draw',
+        drawing: 'The model is drawing; one attempt can take up to about 10 minutes',
+        variant: 'Version',
+        variants: {
+          original: 'Original',
+          allInOne: 'All-in-one'
+        },
+        effort: 'Reasoning effort: {effort}',
+        prompt: 'Show the prompt',
+        notScored: 'Not part of the integrity pass rate',
+        notScoredShort: 'A finished drawing is not a pass; look at it yourself.',
+        notScoredLong: 'Pelican only draws a page for a person to look at. It is not scored, not part of the integrity pass rate and not used for scheduling. The page runs in an isolated frame: its scripts work, but it cannot reach this page, the network or the top window.',
+        made: 'Drew the {variant} page ({size}).',
+        notMade: 'No page was drawn.',
+        open: 'Play full size',
+        openLabel: 'Play the page drawn at {time} full size',
+        frameTitle: 'Pelican page: {variant}',
+        loading: 'Loading the page',
+        loadFailed: 'The page could not be loaded: {error}',
+        loadFailedGeneric: 'Could not get the page address',
+        retry: 'Reload',
+        bytes: 'Page size',
+        sha: 'Page SHA-256'
+      },
+      lm: {
+        prediction: 'Closest model',
+        family: 'Model family',
+        probability: 'Attribution probability',
+        noProbability: 'Not computed',
+        usedOutputs: 'Valid answers',
+        closest: 'Closest to {model}.',
+        closestWithProbability: 'Closest to {model} ({probability}).',
+        comparison: {
+          match: 'Matches the tested model',
+          mismatch: 'Does not match the tested model',
+          not_model: 'The numbers do not look written by a language model',
+          not_enrolled: 'The tested model is not in the reference bank; diagnostic only'
+        },
+        comparisonSentence: {
+          match: 'Matches the tested model {target}.',
+          mismatch: 'Does not match the tested model {target}; run it again to confirm.',
+          not_model: 'The numbers do not look written by a language model.',
+          not_enrolled: '{target} is not in the reference bank and is not scored.'
+        },
+        partial: 'Fewer than three valid answers: the ranking shows scores only, without probabilities.',
+        partialShort: 'Only {used}/{total} valid answers; no probability.',
+        notModel: 'Consecutive numbers do not move like the language-model answers in the bank — typical of generated, sorted or shuffled numbers — so there is no ranking.',
+        notModelShort: 'Consecutive numbers do not move like a language model’s; no ranking.',
+        sequence: 'Autocorrelation {ac}; steps of 20 or less: {ss}.',
+        aliasNote: 'The bank enrolls {model} answers as {candidate}, so the run is compared as {candidate}.',
+        notEnrolledNote: 'The bank has no candidate for {model}. The ranking below is diagnostic only and not scored.',
+        lineup: 'Candidate ranking',
+        lineupProbability: 'By attribution probability',
+        lineupScore: 'By ranking score (no probability)',
+        targetMark: 'Candidate for the tested model',
+        showAll: 'Show all {count} candidates',
+        noRanking: 'This record does not include the candidate ranking.',
+        requestEffort: 'Effort sent',
+        effortNotSent: 'Not sent',
+        recordedUnder: 'Recorded under target',
+        concurrency: 'Sent at once',
+        collection: 'Collection',
+        collectionStatus: {
+          completed: 'All 3 valid',
+          partial: 'Partly valid',
+          failed: 'No valid answer',
+          cancelled: 'Stopped',
+          skipped: 'Skipped'
+        },
+        comparedAs: 'Compared as',
+        detector: 'Detector version',
+        challenges: 'Challenges',
+        challengeRequests: '{count} requests',
+        challenge: 'Challenge {n}',
+        numbers: '{parsed}/{expected} numbers',
+        minimum: 'at least {min}',
+        retries: '{count} retries',
+        accepted: 'Counted',
+        rejected: 'Not counted',
+        instructions: 'Developer instructions',
+        prompt: 'Prompt',
+        answer: 'Scored numbers',
+        identityNote: 'Probabilities compare only the candidates in the bank. The result comes from answer behavior and does not prove which model served it.'
+      },
+      legacy: {
+        tag: 'Legacy',
+        note: 'This record comes from a retired test ({test}). It is shown read-only as recorded, is not reinterpreted under the new rules and no longer counts toward the pass rate.'
+      },
+      warnings: {
+        fingerprintNotEnrolled: '{model} on {account} is not in the fingerprint candidate bank, so the server turned its automatic fingerprint off; everything else was saved. A manual fingerprint can still run as an unscored diagnostic.',
+        fingerprintNotEnrolledUnsupported: '{model} on {account} is not in the fingerprint candidate bank, so the server turned its automatic fingerprint off; everything else was saved. The model is also outside the list of testable models, so manual tests do not run either.',
+        title: 'The server adjusted some settings',
+        dismiss: 'Dismiss'
+      },
       jitter: 'Random delay (minutes)',
       jitterHint: 'Adds a random 0–{max} minute delay after each interval to stagger tests across accounts.',
       jitterUnavailable: 'Random delay is not available for this interval.',
@@ -307,6 +418,8 @@ export default {
       nextRun: 'Next {time}',
       lastRun: 'Last {time}',
       neverRun: 'Not tested yet',
+      unsupportedModel: '{model} is not in the server\'s list of testable models, so neither manual nor automatic tests run for it. The target and its schedules are still saved.',
+      autoOff: 'Turn automatic runs off',
       onlyDirectOAuth: 'Only for direct OpenAI OAuth accounts.',
       stateProbeDefaultEffort: 'State probe runs on the account\'s default reasoning effort, whatever effort this target tests.',
       goScheduling: 'Configure the scheduling policy',
@@ -360,7 +473,8 @@ export default {
         bankRevision: 'Reference bank revision',
         attributionRule: 'Attribution rule',
         reinterpreted: 'Originally recorded as {status} under rule {rule}. The result above applies the current rule {current} to the same recorded outputs; the test was not run again.',
-        attributionNote: 'Attribution is inferred from response behavior and does not prove the actual route. When this test is set to run automatically, its latest completed attribution counts toward the integrity pass rate, manual or automatic. ModelTrace can attribute from one valid output, with failed requests kept for diagnosis; Fingerprint attributes only when every planned sample is valid.',
+        attributionNote: 'Attribution is inferred from response behavior and does not prove the actual route. This record comes from a retired test and is shown under the rule it was recorded with.',
+        requestProfile: 'Request context version',
         stateProbeMetric: 'Status codes {mint} / {cont}, {ticket}',
         stateProbeMetricChains: '{chains} chains sent; last chain status codes {mint} / {cont}, {ticket}',
         newTicket: 'ticket changed',
@@ -445,7 +559,8 @@ export default {
         stateProbeDefault: 'State probe keeps running on the account\'s default reasoning effort; its automatic plan is unchanged.'
       },
 
-      baselineNote: 'Fingerprint reference version {version}.'
+      baselineNote: 'Fingerprint reference version {version}.',
+      detectorNote: 'Fingerprint detector version {version}.'
     },
     scheduling: {
       title: 'Scheduling policy',
@@ -565,7 +680,7 @@ export default {
             summaryJoin: ', then '
           }
         },
-        avoidNote: 'The integrity pass rate is counted per test: of the selected Candy, Fingerprint and ModelTrace tests, how many had a passed or likely passed verdict in their latest completed run, divided by the number selected. A test is selected when it is set to run automatically; its latest result counts whether that run was manual or automatic, and a run still in progress does not replace it. Two selected with one passing is 50%; three selected with one passing is 33.3%. Each test counts once by its final verdict, whatever its sample count or retries. If the latest result of any selected test has no valid verdict (no valid output, a failed or cancelled run, or expired), the rate is unknown and counts as neither passed nor degraded; an older passing result is not used instead. “Avoid degradation” always chooses from the best pass rate tier first and orders it by price; the next tier is tried only when no account in that tier can serve the request. A runtime threshold moves an account back at most one position within its own tier and never places a lower tier first. Accounts with an unknown pass rate are tried after every assessed account. Account disabling, model support, capacity and continued-response account binding are still checked live.',
+        avoidNote: 'The integrity pass rate is counted per test: of the selected Candy and Fingerprint tests, how many had a passed or likely passed verdict in their latest completed run, divided by the number selected. A test is selected when it is set to run automatically; its latest result counts whether that run was manual or automatic, and a run still in progress does not replace it. Two selected with one passing is 50%; both passing is 100%. Each test counts once by its final verdict, whatever its sample count or retries. If the latest result of any selected test has no valid verdict (no valid output, a failed or cancelled run, or expired), the rate is unknown and counts as neither passed nor degraded; an older passing result is not used instead. “Avoid degradation” always chooses from the best pass rate tier first and orders it by price; the next tier is tried only when no account in that tier can serve the request. A runtime threshold moves an account back at most one position within its own tier and never places a lower tier first. Accounts with an unknown pass rate are tried after every assessed account. Account disabling, model support, capacity and continued-response account binding are still checked live.',
         sharedNote: 'With any policy other than “System default” in force, the published order replaces account priority, the system scheduling weights and movable session affinity. Only a required binding, such as continuing a previous response, still keeps a request on its account. Load weight is adjustable only under “Custom balance”; the other policies use a fixed weight.'
       },
       thresholds: {
@@ -617,20 +732,30 @@ export default {
       },
       rules: {
         title: 'Model rules',
-        hint: 'Set a separate policy for a model. Rules take precedence over the default policy; rules with a reasoning effort take precedence over rules without.',
+        hint: 'Set a separate policy for a model. Rules take precedence over the default policy and match the requested model only, whatever the reasoning effort.',
         empty: 'No rules configured. All models use the default policy.',
         model: 'Model',
-        effort: 'Reasoning effort',
         policy: 'Policy',
         add: 'Add rule',
         remove: 'Delete rule',
-        duplicate: 'A rule for this model and reasoning effort already exists.',
+        duplicate: '{model} already has a rule. Each model keeps one rule, a disabled one included.',
+        merged: {
+          title: 'Older model rules split by reasoning effort were merged into one rule per model',
+          kept: '{model}: the last rule, {rule}, is kept; {effect}. No longer applied: {dropped}.',
+          cleared: '{model}: {rule} is no longer limited to that effort; {effect}.',
+          rule: '“{policy}” (was effort {effort}{state})',
+          disabled: ', off',
+          join: '; ',
+          effectOn: 'it now applies to every request for the model',
+          effectOff: 'the rule is off, so the model uses the default policy',
+          hint: 'Requests are already scheduled this way; the next save stores it. To use another policy, edit the model\'s rule.'
+        },
         pickModel: 'Select a model',
         weights: 'Rule weights',
         weightsSeparator: ', ',
         editWeights: 'Edit weights',
         doneWeights: 'Collapse',
-        weightsFor: 'Custom weights for {model} ({effort})',
+        weightsFor: 'Custom weights for {model}',
         weightsHint: 'Applies to this rule only, independent of the default policy weights. Enter percentages; they are normalized on save.',
         enabled: 'On',
         enableLabel: 'Enable the rule for {model}',
@@ -775,12 +900,12 @@ export default {
         qualityContribution: 'Score contribution {value}',
         qualityUnknown: 'Unknown',
         qualityEvidenceError: 'Latest evaluation not counted:',
-        qualityHint: 'Selected tests whose latest completed verdict, manual or automatic, passed or likely passed ÷ tests selected; each test has equal weight. Unknown when the latest result of any selected test has no valid verdict; it is not 100%. When this model and effort have no configured tests, the measured cell stays unknown and the tier comes from the account reference below, which reads the account\'s other models or efforts and is not a measured pass rate for this model and effort.',
+        qualityHint: 'Selected tests whose latest completed verdict, manual or automatic, passed or likely passed ÷ tests selected; each test has equal weight. Unknown when the latest result of any selected test has no valid verdict; it is not 100%. Scheduling counts per account and requested model, so tests of one model at any reasoning effort count together, each by its latest valid verdict. When this model has no configured tests, its pass rate stays unknown and the tier comes from the account reference below, which reads the account\'s other models and is not a measured pass rate for this model.',
         accountReference: 'Account reference {ratio}',
         accountReferenceHint: 'Pass rate across this account\'s other models or efforts: {sources}. Evaluated {evaluated}, usable until {expires} (the earlier of the diagnostic expiry and this evaluation\'s expiry). It is not a measured pass rate for this model and effort.',
         accountReferenceNoSources: 'none recorded',
         accountReferenceTrace: 'This order used an account reference for its quality tiers: this model and effort have no configured tests, so the account\'s pass rate on other models or efforts set the tiers. The pass rate for this model and effort itself is still unknown.',
-        qualityUnknownAccountReference: 'This model and effort have no configured tests, so there is no evidence of this model\'s pass rate and it stays unknown. The tier used the account reference shown below.',
+        qualityUnknownAccountReference: 'This model has no configured tests, so there is no evidence of its pass rate and it stays unknown. The tier used the account reference shown below.',
         verdict: {
           selected: 'Selected',
           topK: 'Candidate',
@@ -903,7 +1028,7 @@ export default {
       },
       board: {
         title: 'Account ranking',
-        hint: 'One row per account across every group, ranked by the default policy from real evidence aggregated over all models. Requests are dispatched by evidence for the requested model first, then the same model at other reasoning efforts, then this aggregate ranking. Scores and ranks come from the server and are never recalculated in the browser.',
+        hint: 'One row per account across every group, ranked by the default policy from real evidence aggregated over all models. Requests are ordered by the account\'s evidence for the requested model; this aggregate ranking is used only when that model has none. Scores and ranks come from the server and are never recalculated in the browser.',
         group: 'Group',
         allGroups: 'All groups',
         ungrouped: 'No group',
@@ -979,13 +1104,13 @@ export default {
         moreGroups: '+{count}',
         coverage: 'Evidence for {models} models, pass rate known for {known}',
         coverageNone: 'No model evidence yet',
-        coverageDetail: 'Real evidence for {models} models: pass rate known for {known}, unknown for {unknown}. The account pass rate averages the known models equally; within a model, reasoning efforts are averaged first.',
+        coverageDetail: 'Real evidence for {models} models: pass rate known for {known}, unknown for {unknown}. The account pass rate averages the known models equally; evidence for one model at different reasoning efforts counts as that one model.',
         coverageNoneDetail: 'This account has no real requests, valid integrity test results or matched probes yet. Models that only appear in the catalog or a mapping do not count. Missing factors are scored at the labelled default.',
         cells: 'Model and effort cells: pass rate known for {known}, unknown for {unknown}.',
         worst: 'Lowest pass rate: {model}, {ratio}',
         contributions: 'Score breakdown',
         contribution: '{factor} +{value}',
-        ruleException: '{model} ({effort}) has a model rule, “{policy}”. Requests for it follow that rule, not this ranking.',
+        ruleException: '{model} has a model rule, “{policy}”. Requests for it follow that rule, not this ranking.',
         exclusionScope: {
           account: 'Account: ',
           route: 'Route: ',
@@ -996,10 +1121,12 @@ export default {
         noModels: 'No model evidence counts toward this account.',
         models: {
           model: 'Model',
-          effort: 'Reasoning effort',
           upstream: 'Upstream model',
           policy: 'Policy',
-          defaultPolicy: 'Default policy'
+          defaultPolicy: 'Default policy',
+          projected: 'Combined from {count} reasoning-effort records',
+          projectedHint: 'The server sent records split by reasoning effort, so this page shows them as one row: error rate and first-output latency are weighted by sample count, and the pass rate averages only the known parts; an unknown part is not 0%. Scheduling works per account and model.',
+          withSamples: '{value} ({count} samples)'
         },
         showDetails: 'Show details',
         hideDetails: 'Hide details',

@@ -2,8 +2,11 @@ package repository
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql/driver"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -58,7 +61,9 @@ func TestOpenAIEvalFinishAndHistoryPreserveSampleEvidence(t *testing.T) {
 		Outcome: service.OpenAIEvalOutcome{Status: "insufficient", ExpectedCount: 1},
 		Samples: []service.OpenAIEvalSampleRecord{{ProbeID: "candy-21-v3-1", Answer: "partial answer", Attempts: 3, ErrorCode: "server_error", ErrorMessage: "capacity busy", HTTPStatus: 503, AttemptErrors: []service.OpenAIEvalAttemptError{{Attempt: 1, Code: "server_error", Message: "capacity busy", HTTPStatus: 503}}}},
 	}
+	mock.ExpectBegin()
 	mock.ExpectExec(`UPDATE\s+openai_eval_runs\s+SET\s+status=\$2`).WithArgs(run.ID, run.Status, evalJSONArgument{run.Outcome}, evalJSONArgument{run.Samples}, 3, int64(0), int64(0), nil, int64(0), now, run.Error, run.UpstreamModel, "").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
 	require.NoError(t, repo.FinishRun(context.Background(), run.ID, run))
 	outcome, _ := json.Marshal(run.Outcome)
 	samples, _ := json.Marshal(run.Samples)
@@ -181,8 +186,11 @@ func TestOpenAIEvalSaveConfigPreservesUnchangedNextRunAt(t *testing.T) {
 			[]driver.Value{int64(17), service.OpenAIEvalTypeModelTrace, "gpt-6-astra", "high"},
 			[]driver.Value{int64(17), service.OpenAIEvalTypeStateProbe, "gpt-6-astra", "high"},
 		))
+	mock.ExpectExec(`UPDATE\s+openai_eval_schedule_state\s+SET\s+enabled\s*=\s*FALSE`).
+		WithArgs(int64(17), service.OpenAIEvalTypeModelTrace, "gpt-6-astra", "high").
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	expectOpenAIEvalScheduleUpsert(mock, 17, service.OpenAIEvalTypeCandy, config.Accounts[0].CandySchedule, nonNilTimeArgument{})
-	for _, testType := range []string{service.OpenAIEvalTypeFingerprint, service.OpenAIEvalTypeModelTrace, service.OpenAIEvalTypeStateProbe} {
+	for _, testType := range []string{service.OpenAIEvalTypeFingerprint, service.OpenAIEvalTypeStateProbe} {
 		expectOpenAIEvalScheduleUpsert(mock, 17, testType, service.OpenAIEvalSchedule{}, nil)
 	}
 	expectOpenAIEvalConfigSaveAuditAndCommit(mock, 9)
@@ -201,7 +209,7 @@ func TestOpenAIEvalSaveConfigDisablesRemovedRoutes(t *testing.T) {
 		WithArgs(int64(99), service.OpenAIEvalTypeCandy, "gpt-6-astra", "high").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	expectOpenAIEvalScheduleUpsert(mock, 17, service.OpenAIEvalTypeCandy, config.Accounts[0].CandySchedule, nonNilTimeArgument{})
-	for _, testType := range []string{service.OpenAIEvalTypeFingerprint, service.OpenAIEvalTypeModelTrace, service.OpenAIEvalTypeStateProbe} {
+	for _, testType := range []string{service.OpenAIEvalTypeFingerprint, service.OpenAIEvalTypeStateProbe} {
 		expectOpenAIEvalScheduleUpsert(mock, 17, testType, service.OpenAIEvalSchedule{}, nil)
 	}
 	expectOpenAIEvalConfigSaveAuditAndCommit(mock, 11)
@@ -217,7 +225,7 @@ func TestOpenAIEvalSaveConfigSchedulesNewRoute(t *testing.T) {
 	mock.ExpectQuery(`SELECT\s+account_id,\s+test_type,\s+requested_model,\s+reasoning_effort`).
 		WillReturnRows(scheduleStateRows())
 	expectOpenAIEvalScheduleUpsert(mock, 23, service.OpenAIEvalTypeCandy, config.Accounts[0].CandySchedule, nonNilTimeArgument{})
-	for _, testType := range []string{service.OpenAIEvalTypeFingerprint, service.OpenAIEvalTypeModelTrace, service.OpenAIEvalTypeStateProbe} {
+	for _, testType := range []string{service.OpenAIEvalTypeFingerprint, service.OpenAIEvalTypeStateProbe} {
 		expectOpenAIEvalScheduleUpsert(mock, 23, testType, service.OpenAIEvalSchedule{}, nil)
 	}
 	expectOpenAIEvalConfigSaveAuditAndCommit(mock, 13)
@@ -233,7 +241,7 @@ func TestOpenAIEvalSaveConfigIncrementsRevision(t *testing.T) {
 	mock.ExpectQuery(`SELECT\s+account_id,\s+test_type,\s+requested_model,\s+reasoning_effort`).
 		WillReturnRows(scheduleStateRows())
 	expectOpenAIEvalScheduleUpsert(mock, 31, service.OpenAIEvalTypeCandy, config.Accounts[0].CandySchedule, nonNilTimeArgument{})
-	for _, testType := range []string{service.OpenAIEvalTypeFingerprint, service.OpenAIEvalTypeModelTrace, service.OpenAIEvalTypeStateProbe} {
+	for _, testType := range []string{service.OpenAIEvalTypeFingerprint, service.OpenAIEvalTypeStateProbe} {
 		expectOpenAIEvalScheduleUpsert(mock, 31, testType, service.OpenAIEvalSchedule{}, nil)
 	}
 	expectOpenAIEvalConfigSaveAuditAndCommit(mock, 17)
@@ -253,4 +261,30 @@ func TestOpenAIEvalSaveConfigRejectsStaleRevision(t *testing.T) {
 
 	require.ErrorIs(t, repo.SaveConfig(t.Context(), &config, 17), service.ErrOpenAIEvalConfigRevisionConflict)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestOpenAIEvalPelicanArtifactCompletionIsAtomic(t *testing.T) {
+	for _, failArtifact := range []bool{false, true} {
+		t.Run(fmt.Sprint(failArtifact), func(t *testing.T) {
+			repo, mock := openAIEvalSaveConfigDB(t)
+			run := &service.OpenAIEvalRun{ID: 13, TestType: service.OpenAIEvalTypePelican, Status: "completed", PelicanHTML: "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"}
+			mock.ExpectBegin()
+			mock.ExpectExec(`UPDATE\s+openai_eval_runs\s+SET\s+status=\$2`).WillReturnResult(sqlmock.NewResult(0, 1))
+			insert := mock.ExpectExec(`INSERT INTO openai_eval_artifacts`).WithArgs(run.ID, run.PelicanHTML, fmt.Sprintf("%x", sha256.Sum256([]byte(run.PelicanHTML))))
+			if failArtifact {
+				insert.WillReturnError(errors.New("artifact storage unavailable"))
+				mock.ExpectRollback()
+			} else {
+				insert.WillReturnResult(sqlmock.NewResult(0, 1))
+				mock.ExpectCommit()
+			}
+			err := repo.FinishRun(t.Context(), run.ID, run)
+			if failArtifact {
+				require.ErrorContains(t, err, "save Pelican artifact")
+			} else {
+				require.NoError(t, err)
+			}
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
 }

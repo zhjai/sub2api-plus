@@ -28,30 +28,38 @@ func rankingQualityFraction(q OpenAIEvalRankingQuality) *big.Rat {
 	return big.NewRat(int64(q.Pass+q.SuspectedPass), int64(q.Selected))
 }
 
-// This is called first for efforts, then for models. Counts are diagnostics.
+// Quality is averaged per model; operational metrics are weighted by their
+// actual sample counts. Probe evidence never contributes real request counts.
 func macroRankingFactors(cells []OpenAIEvalRankingFactors) OpenAIEvalRankingFactors {
 	out := emptyOpenAIEvalRankingFactors()
 	if len(cells) == 0 {
 		return out
 	}
-	errorScore, ttftScore, errorValue := 0., 0., 0.
-	errorKnown, qualityKnown := 0, 0
+	errorScore, ttftScore, errorValue, ttftValue := 0., 0., 0., 0.
+	qualityKnown := 0
+	var requestCount, probeCount, ttftCount int64
+	probeValue := 0.
 	quality := new(big.Rat)
 	for _, f := range cells {
 		if recovery := f.RuntimeRecovery; recovery != nil && (out.RuntimeRecovery == nil || recovery.NextTrialAt.Before(out.RuntimeRecovery.NextTrialAt)) {
 			copy := *recovery
 			out.RuntimeRecovery = &copy
 		}
-		errorScore += f.ErrorRate.Score
-		ttftScore += f.TTFT.Score
-		out.ErrorRate.SampleCount += f.ErrorRate.SampleCount
-		out.TTFT.SampleCount += f.TTFT.SampleCount
-		if f.ErrorRate.Known && f.ErrorRate.Value != nil {
-			errorKnown++
-			errorValue += *f.ErrorRate.Value
+		if f.ErrorRate.Known && f.ErrorRate.Value != nil && f.ErrorRate.SampleCount > 0 {
+			if f.ErrorRate.Source != nil && *f.ErrorRate.Source == "v1_matched_probe" {
+				probeCount += f.ErrorRate.SampleCount
+				probeValue += *f.ErrorRate.Value * float64(f.ErrorRate.SampleCount)
+			} else {
+				requestCount += f.ErrorRate.SampleCount
+				errorValue += *f.ErrorRate.Value * float64(f.ErrorRate.SampleCount)
+			}
 		}
-		out.ErrorRate.Known = out.ErrorRate.Known || f.ErrorRate.Known
-		out.TTFT.Known = out.TTFT.Known || f.TTFT.Known
+		errorScore += f.ErrorRate.Score
+		if f.TTFT.Known && f.TTFT.MS != nil && f.TTFT.SampleCount > 0 {
+			ttftCount += f.TTFT.SampleCount
+			ttftValue += *f.TTFT.MS * float64(f.TTFT.SampleCount)
+			ttftScore += f.TTFT.Score * float64(f.TTFT.SampleCount)
+		}
 		out.Quality.Pass += f.Quality.Pass
 		out.Quality.SuspectedPass += f.Quality.SuspectedPass
 		out.Quality.Selected += f.Quality.Selected
@@ -72,22 +80,28 @@ func macroRankingFactors(cells []OpenAIEvalRankingFactors) OpenAIEvalRankingFact
 			}
 		}
 	}
-	out.ErrorRate.Score = errorScore / float64(len(cells))
-	out.TTFT.Score = ttftScore / float64(len(cells))
-	out.ErrorRate.DefaultApplied, out.TTFT.DefaultApplied = false, false
-	for _, f := range cells {
-		out.ErrorRate.DefaultApplied = out.ErrorRate.DefaultApplied || f.ErrorRate.DefaultApplied
-		out.TTFT.DefaultApplied = out.TTFT.DefaultApplied || f.TTFT.DefaultApplied
+	// Prefer real request evidence whenever any is available. Probe-only
+	// aggregates remain explicitly labelled probes; unknown cells add no data.
+	if requestCount > 0 {
+		out.ErrorRate.Value = rankingPtr(errorValue / float64(requestCount))
+		out.ErrorRate.SampleCount = requestCount
+		out.ErrorRate.Source = rankingPtr("request_samples_account_models")
+	} else if probeCount > 0 {
+		out.ErrorRate.Value = rankingPtr(probeValue / float64(probeCount))
+		out.ErrorRate.SampleCount = probeCount
+		out.ErrorRate.Source = rankingPtr("v1_matched_probe")
 	}
-	if errorKnown > 0 {
-		out.ErrorRate.Value = rankingPtr(errorValue / float64(errorKnown))
-		out.ErrorRate.Source = rankingPtr("macro_evidence")
-		out.ErrorRate.UnknownReason = nil
+	if out.ErrorRate.Value != nil {
+		out.ErrorRate.Known, out.ErrorRate.DefaultApplied, out.ErrorRate.UnknownReason = true, false, nil
+		out.ErrorRate.Score = 1 - *out.ErrorRate.Value
+	} else {
+		out.ErrorRate.Score = errorScore / float64(len(cells))
 	}
-	if out.TTFT.Known {
-		out.TTFT.UnknownReason = nil
+	if ttftCount > 0 {
+		out.TTFT.Known, out.TTFT.UnknownReason = true, nil
+		out.TTFT.MS, out.TTFT.SampleCount = rankingPtr(ttftValue/float64(ttftCount)), ttftCount
+		out.TTFT.Score = ttftScore / float64(ttftCount)
 	}
-	// Raw TTFT is intentionally absent across different models; scores are normalized per cell.
 	if qualityKnown > 0 {
 		quality.Quo(quality, big.NewRat(int64(qualityKnown), 1))
 		value, _ := quality.Float64()
@@ -103,10 +117,12 @@ func overviewSources(f OpenAIEvalRankingFactors) []string {
 		sources = append(sources, *f.ErrorRate.Source)
 	}
 	if f.TTFT.Known {
-		sources = append(sources, "request_ttft_account_model_effort")
+		sources = append(sources, "request_ttft_account_model")
 	}
 	if f.Quality.Evaluated > 0 {
 		sources = append(sources, "quality_evidence")
+	} else if f.Quality.Selected > 0 {
+		sources = append(sources, "quality_configuration")
 	}
 	return sources
 }
@@ -160,7 +176,15 @@ func buildAccountOverview(gen *openAIRankingGeneration, cfg *OpenAIEvalConfig, s
 	for k := range latest {
 		q := qualityFromLatestRuns(cfg, k.AccountID, k.RequestedModel, k.ReasoningEffort, latest, now)
 		if q.Evaluated > 0 {
-			keys[openAIAccountRuntimeRouteKey{k.AccountID, k.RequestedModel, k.ReasoningEffort}] = true
+			keys[openAIAccountRuntimeRouteKey{k.AccountID, k.RequestedModel, ""}] = true
+		}
+	}
+	// Configured models with missing evidence remain visible as unknown.
+	if cfg != nil {
+		for _, route := range cfg.Accounts {
+			if q := qualityFromLatestRuns(cfg, route.AccountID, route.RequestedModel, "", latest, now); q.Selected > 0 {
+				keys[openAIAccountRuntimeRouteKey{route.AccountID, openAIEvalQualityDimension(route.RequestedModel), ""}] = true
+			}
 		}
 	}
 	for k := range keys {
@@ -181,13 +205,13 @@ func buildAccountOverview(gen *openAIRankingGeneration, cfg *OpenAIEvalConfig, s
 		}
 		matched := false
 		for k := range keys {
-			if k.AccountID == a.ID && k.Effort == m.effort && len(upstreams[k]) == 1 && upstreams[k][0] == m.model {
+			if k.AccountID == a.ID && len(upstreams[k]) == 1 && upstreams[k][0] == m.model {
 				matched = true
 				break
 			}
 		}
 		if !matched {
-			key := openAIAccountRuntimeRouteKey{a.ID, m.model, m.effort}
+			key := openAIAccountRuntimeRouteKey{a.ID, m.model, ""}
 			if !keys[key] {
 				keys[key], upstreams[key] = true, []string{m.model}
 			}
@@ -200,7 +224,10 @@ func buildAccountOverview(gen *openAIRankingGeneration, cfg *OpenAIEvalConfig, s
 		if a == nil || !a.IsOpenAICompatible() {
 			continue
 		}
-		f := stats.rankingFactors(a.ID, k.Model, k.Effort, now)
+		f := emptyOpenAIEvalRankingFactors()
+		if stats != nil {
+			f = stats.rankingFactors(a.ID, k.Model, k.Effort, now)
+		}
 		f.Quality = qualityFromLatestRuns(cfg, a.ID, k.Model, k.Effort, latest, now)
 		upstream := upstreams[k]
 		if len(upstream) == 1 {
@@ -214,7 +241,7 @@ func buildAccountOverview(gen *openAIRankingGeneration, cfg *OpenAIEvalConfig, s
 	}
 	models := make(map[int64][]OpenAIEvalAccountModel)
 	for key, pool := range pools {
-		// The pool is the whole fleet for this exact model/effort, never a group.
+		// The pool is the whole fleet for this requested model, never a group.
 		for _, row := range scoreOpenAIEvalRanking("", OpenAIEvalRankingWeights{}, pool, now, oauthRate) {
 			policy, weights := openAIEvalRankingWeights(cfg, key.model, key.effort)
 			row.Factors.RuntimeRecovery = rankingRuntimeRecovery(policy, openAIEvalSchedulingThresholds(cfg), row.Factors, now)
@@ -223,7 +250,7 @@ func buildAccountOverview(gen *openAIRankingGeneration, cfg *OpenAIEvalConfig, s
 				gen.deadline = *expiry
 				gen.summary.NextEvaluationReason = "evidence_expiry"
 			}
-			// A partial quality cell still exists only while its valid tests are fresh.
+			// Recompute when a partial quality cell loses its remaining fresh evidence.
 			q := row.Factors.Quality
 			if q.Evaluated > 0 && q.ExpiresAt != nil && q.ExpiresAt.Before(gen.deadline) {
 				gen.deadline = *q.ExpiresAt

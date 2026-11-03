@@ -54,14 +54,16 @@ func (s *openAIAccountRuntimeStats) rankingFactors(accountID int64, model, effor
 	f.recoveryLastAttemptAt = time.Unix(0, stat.recoveryLastAttemptAt.Load())
 	f.recoveryInFlight = stat.recoveryInFlight.Load()
 	f.recoveryMetricVersion = stat.metricVersion.Load()
-	errorRate, ttft, hasTTFT := snapshotOpenAIAccountRuntimeStat(stat)
+	_, _, hasTTFT := snapshotOpenAIAccountRuntimeStat(stat)
 	at := time.Unix(0, stat.observedAt.Load())
 	if count := stat.sampleCount.Load(); count > 0 && !at.After(now) && now.Sub(at) < openAIRankingMetricTTL {
+		errorRate := float64(stat.failureCount.Load()) / float64(count)
 		f.ErrorRate = OpenAIEvalRankingErrorRate{OpenAIEvalFactorMeta: rankingKnown(1-errorRate, at), Value: rankingPtr(errorRate), SampleCount: count,
-			Source: rankingPtr("request_ewma_account_model_effort"), WindowSeconds: int(openAIRankingMetricTTL.Seconds()), MonitorIDs: []int64{}}
+			Source: rankingPtr("request_samples_account_model"), WindowSeconds: int(openAIRankingMetricTTL.Seconds()), MonitorIDs: []int64{}}
 	}
 	at = time.Unix(0, stat.ttftObservedAt.Load())
 	if count := stat.ttftSampleCount.Load(); hasTTFT && count > 0 && !at.After(now) && now.Sub(at) < openAIRankingMetricTTL {
+		ttft := float64(stat.ttftTotalMS.Load()) / float64(count)
 		f.TTFT = OpenAIEvalRankingTTFT{OpenAIEvalFactorMeta: rankingKnown(.5, at), MS: rankingPtr(ttft), SampleCount: count}
 	}
 	return f

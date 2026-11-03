@@ -75,7 +75,7 @@ func TestOpenAIAccountOverviewProbePrecedenceAliasesAndColdGuards(t *testing.T) 
 	require.Len(t, one.Models, 1)
 	require.Equal(t, "alias-one", one.Models[0].RequestedModel)
 	require.InDelta(t, .02, *one.Factors.ErrorRate.Value, 1e-12)
-	require.Equal(t, "request_ewma_account_model_effort", *one.Models[0].Factors.ErrorRate.Source)
+	require.Equal(t, "request_samples_account_model", *one.Models[0].Factors.ErrorRate.Source)
 	require.Len(t, two.Models, 1, "probe does not manufacture votes for configured aliases")
 	require.Equal(t, "upstream", two.Models[0].RequestedModel)
 	require.Equal(t, 1., *two.Factors.ErrorRate.Value)
@@ -104,7 +104,7 @@ func TestOpenAIAccountOverviewProbePrecedenceAliasesAndColdGuards(t *testing.T) 
 	require.Equal(t, "monitoring_unavailable", *trace.RankingFallbackReason)
 }
 
-func TestOpenAIAccountOverviewQualityReadFailureAndNewestErrorInvalidateSnapshot(t *testing.T) {
+func TestOpenAIAccountOverviewQualityReadFailureAndLatestUsableSnapshot(t *testing.T) {
 	s, repo, accounts, gateway := rankingHarness(t)
 	repo.config.Revision++
 	repo.config.SchedulingPolicy = OpenAIEvalSchedulingPolicyAvoidDegradation
@@ -123,11 +123,9 @@ func TestOpenAIAccountOverviewQualityReadFailureAndNewestErrorInvalidateSnapshot
 	repo.runs = append(repo.runs, newest)
 	rows, trace, err = scheduler.explicitRanking(context.Background(), req, accounts.items, nil)
 	require.NoError(t, err)
-	require.Equal(t, "live_fallback", trace.RankingBasis)
-	require.Equal(t, "quality_evidence_updated", *trace.RankingFallbackReason)
-	for _, row := range rows {
-		require.Nil(t, row.Factors.Quality.Ratio)
-	}
+	require.Equal(t, "snapshot", trace.RankingBasis)
+	require.Equal(t, int64(2), rows[0].AccountID)
+	require.Equal(t, 1., *rows[0].Factors.Quality.Ratio)
 	s.repo = overviewFailingQualityRepo{repo}
 	rows, trace, err = scheduler.explicitRanking(context.Background(), req, accounts.items, nil)
 	require.NoError(t, err)

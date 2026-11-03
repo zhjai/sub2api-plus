@@ -97,17 +97,15 @@ func latestVerdictHarness(t *testing.T) (*OpenAIEvalService, *rankingTestRepo, t
 	schedule := OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 3600}
 	repo.config.SchedulingPolicy = OpenAIEvalSchedulingPolicyAvoidDegradation
 	repo.config.QualityRefreshIntervalSeconds = 300
-	repo.config.Accounts = []OpenAIEvalAccountConfig{{AccountID: 1, RequestedModel: "gpt-6.1-sol", ReasoningEffort: "medium", CandySchedule: schedule, ModelTraceSchedule: schedule}}
+	repo.config.Accounts = []OpenAIEvalAccountConfig{{AccountID: 1, RequestedModel: "gpt-6.1-sol", ReasoningEffort: "medium", CandySchedule: schedule, FingerprintSchedule: schedule}}
 	repo.config.Revision++
 	repo.runs = []OpenAIEvalRun{
 		{ID: 636, AccountID: 1, TestType: OpenAIEvalTypeCandy, RequestedModel: "gpt-6.1-sol", ReasoningEffort: "medium",
 			DataVersion: OpenAIEvalQualityDataVersion, TriggerSource: "scheduled", Status: "pass", FinishedAt: now.Add(-time.Minute),
 			Samples: []OpenAIEvalSampleRecord{{Valid: true, Answer: "21"}}},
-		{ID: 635, AccountID: 1, TestType: OpenAIEvalTypeModelTrace, RequestedModel: "gpt-6.1-sol", ReasoningEffort: "medium",
-			DataVersion: OpenAIEvalQualityDataVersion, TriggerSource: "scheduled", Status: "attributed", Error: "upstream_error", FinishedAt: now.Add(-50 * time.Second),
-			Outcome: OpenAIEvalOutcome{ModelTrace: &OpenAIEvalModelTraceResult{Prediction: "gpt-6.1-sol", UsedOutputs: 1, BankRevision: OpenAIEvalQualityModelTraceBankRevision,
-				Samples: []OpenAIEvalModelTraceSample{{Error: "upstream_error"}, {Valid: true}, {Error: "upstream_error"}}}}},
+		modelDimensionFingerprint(635, "gpt-6.1-sol", "medium", true, 1, now.Add(-50*time.Second)),
 	}
+	repo.runs[1].Error = "upstream_error"
 	return s, repo, now
 }
 
@@ -192,7 +190,7 @@ func TestOpenAIEvalLatestVerdictManualAndPeriodicRecompute(t *testing.T) {
 	assertLatestVerdict(t, s, 1)
 }
 
-func TestOpenAIEvalLatestVerdictDoesNotRestoreOlderPass(t *testing.T) {
+func TestOpenAIEvalLatestVerdictKeepsLatestUsableAfterFailedAttempt(t *testing.T) {
 	s, repo, now := latestVerdictHarness(t)
 	newer := repo.runs[1]
 	newer.ID, newer.TriggerSource, newer.Status = 800, "manual", "insufficient"
@@ -200,14 +198,8 @@ func TestOpenAIEvalLatestVerdictDoesNotRestoreOlderPass(t *testing.T) {
 	repo.runs = append(repo.runs, newer)
 	_, err := s.EvaluateScheduling(context.Background(), 1)
 	require.NoError(t, err)
-	dim := rankingDimension(t, s, 7, "gpt-6.1-sol", "medium")
-	for _, row := range dim.Accounts {
-		if row.AccountID == 1 {
-			require.False(t, row.Factors.Quality.Known)
-			require.Nil(t, row.Factors.Quality.Ratio)
-			require.Equal(t, 1, row.Factors.Quality.Evaluated)
-		}
-	}
+	assertLatestVerdict(t, s, 1)
+	require.Equal(t, "insufficient", repo.runs[len(repo.runs)-1].Status)
 }
 
 func TestOpenAIEvalLatestVerdictReordersAccountsAndDispatch(t *testing.T) {

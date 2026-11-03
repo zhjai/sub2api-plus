@@ -90,8 +90,10 @@ describe('ModelIntegrityTestsView background controls', () => {
     expect(wrapper.get('[data-testid="metric-reserved"]').text()).toBe('暂未统计')
     expect(wrapper.get('[data-testid="metric-active"]').text()).toBe('暂未统计')
     expect(wrapper.get('[data-testid="runtime-missing"]').text()).toContain('不代表 0 次')
-    // Candy hourly (1) + fingerprint quick daily (60/24 = 2.5) = 3.5 per hour.
-    expect(wrapper.get('[data-testid="metric-planned"]').text()).toContain('约 3.5 次/小时')
+    // Candy hourly (1) + one daily fingerprint run of 3 challenges (3/24 = 0.125) ≈ 1.1 per hour;
+    // with all three attempts used, 3 + 9/24 ≈ 3.4. The retired quick (60-sample) size no longer applies.
+    expect(wrapper.get('[data-testid="metric-planned"]').text()).toContain('约 1.1 次/小时')
+    expect(wrapper.get('[data-testid="metric-planned"]').text()).toContain('含重试最多约 3.4 次/小时')
     expect(wrapper.get('[data-testid="auto-state"]').text()).toContain('自动测试按计划运行')
     wrapper.unmount()
   })
@@ -207,29 +209,33 @@ describe('ModelIntegrityTestsView background controls', () => {
     wrapper.unmount()
   })
 
-  it('warns that a 60-sample fingerprint cannot fit 1 per minute in 15 minutes and blocks the manual run', async () => {
+  it('warns that a 3-challenge fingerprint cannot fit one send per 10 minutes in 15 minutes and blocks the manual run', async () => {
     api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({
       background_controls: [{
         account_id: 11, paused_until: null, pause_reason: '', budget_enabled: true,
-        max_requests_per_hour: 60, min_send_interval_seconds: 60, max_background_concurrency: 1, sampling_window_seconds: 900
+        max_requests_per_hour: 60, min_send_interval_seconds: 600, max_background_concurrency: 1, sampling_window_seconds: 900
       }]
     }))
     const wrapper = mountView()
     await flushPromises()
-    expect(wrapper.get('[data-testid="limits-summary"]').text()).toContain('每小时最多 60 次，发送间隔 60 秒，后台并发 1，采样窗 15 分钟')
+    expect(wrapper.get('[data-testid="limits-summary"]').text()).toContain('每小时最多 60 次，发送间隔 600 秒，后台并发 1，采样窗 15 分钟')
+    // 15 minutes / 600 s leaves room for 2 sends; one fingerprint run needs all 3 challenges.
     const warnings = wrapper.get('[data-testid="budget-warnings"]').text()
     expect(warnings).toContain('行为指纹')
-    expect(warnings).toContain('一轮需要 60 次请求，采样窗内最多 15 次')
+    expect(warnings).toContain('一轮需要 3 次请求，采样窗内最多 2 次')
     expect(warnings).not.toContain('糖果题')
     expect(wrapper.get('[data-testid="test-fingerprint"] [data-testid="auto-note"]').text()).toContain('不会自动启动')
 
-    await wrapper.get('[data-testid="run-fingerprint"]').trigger('click')
+    // Limits count manual runs too, so the run is refused here, with the reason, before the server would.
+    const run = wrapper.get('[data-testid="run-fingerprint"]')
+    expect(run.attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-testid="test-fingerprint"] [data-testid="manual-budget-note"]').text()).toContain('本测试一轮需要 3 次，服务端会拒绝手动运行')
+    await run.trigger('click')
     await flushPromises()
-    for (const mode of ['quick', 'standard', 'strict']) {
-      expect($<HTMLInputElement>(`input[name="manual-sample"][value="${mode}"]`)!.disabled).toBe(true)
-    }
-    expect($<HTMLButtonElement>('[data-testid="confirm-fingerprint"]')!.disabled).toBe(true)
-    expect($('[data-testid="manual-budget-note"]')).not.toBeNull()
+    expect(api.runOpenAIEval).not.toHaveBeenCalled()
+    // A one-request Candy run still fits and stays runnable.
+    expect(wrapper.get('[data-testid="run-candy"]').attributes('disabled')).toBeUndefined()
+    expect(wrapper.find('[data-testid="test-candy"] [data-testid="manual-budget-note"]').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -248,7 +254,16 @@ describe('ModelIntegrityTestsView background controls', () => {
 
     $<HTMLButtonElement>('[data-testid="limits-enabled"]')!.click()
     await flushPromises()
-    expect($('[data-testid="fingerprint-infeasible"]')!.textContent).toContain('60 / 200 / 400')
+    // The default 15 sends per window fit a 3-challenge fingerprint run.
+    expect($('[data-testid="fingerprint-infeasible"]')).toBeNull()
+    // A one-minute window allows a single send, which no fingerprint run can fit.
+    field('sampling_window_seconds').value = '1'
+    field('sampling_window_seconds').dispatchEvent(new Event('input'))
+    await flushPromises()
+    expect($('[data-testid="fingerprint-infeasible"]')!.textContent).toContain('行为指纹每轮 3 次请求，超过当前限额允许的 1 次')
+    field('sampling_window_seconds').value = '15'
+    field('sampling_window_seconds').dispatchEvent(new Event('input'))
+    await flushPromises()
 
     // An out-of-range entry is reported, not silently clamped.
     field('max_background_concurrency').value = '0'

@@ -30,25 +30,8 @@ func openAIEvalRankingWeights(config *OpenAIEvalConfig, model, effort string) (s
 		return policy, OpenAIEvalRankingWeights{Price: 1}
 	case OpenAIEvalSchedulingPolicyCustomBalance:
 		weights := config.CustomBalance
-		for _, rule := range config.Policies {
-			if rule.Enabled != nil && !*rule.Enabled {
-				continue
-			}
-			if openAIEvalQualityDimension(rule.RequestedModel) != openAIEvalQualityDimension(model) || rule.CustomBalance == nil {
-				continue
-			}
-			if rule.ReasoningEffort == "" {
-				weights = *rule.CustomBalance
-			}
-		}
-		for _, rule := range config.Policies {
-			if rule.Enabled != nil && !*rule.Enabled {
-				continue
-			}
-			if rule.ReasoningEffort != "" && openAIEvalQualityDimension(rule.RequestedModel) == openAIEvalQualityDimension(model) && openAIEvalQualityDimension(rule.ReasoningEffort) == effort && rule.CustomBalance != nil {
-				weights = *rule.CustomBalance
-				break
-			}
+		if rule := openAIEvalModelPolicyRule(config, model); rule != nil && rule.CustomBalance != nil {
+			weights = *rule.CustomBalance
 		}
 		weights, err := normalizeOpenAIEvalPolicyWeights(weights)
 		if err != nil {
@@ -366,7 +349,7 @@ func qualityFromLatestRuns(config *OpenAIEvalConfig, accountID int64, model, eff
 			continue
 		}
 		q.Selected++
-		run, found := latest[OpenAIEvalEvidenceKey{accountID, openAIEvalQualityDimension(model), openAIEvalQualityDimension(effort), testType}]
+		run, found := latestUsableModelQualityRun(latest, accountID, model, testType, now)
 		if !found || run.DiagnosticOnly {
 			if found {
 				recordEvidenceError(run)
@@ -383,8 +366,7 @@ func qualityFromLatestRuns(config *OpenAIEvalConfig, accountID int64, model, eff
 			recordEvidenceError(run)
 			continue
 		}
-		normalizeOpenAIEvalAttributionRun(&run)
-		counts := openAIEvalQualityCountsFromRun(&run)
+		counts := openAIEvalCurrentQualityCountsFromRun(&run)
 		if !counts.valid() || counts.EvaluatedCount > openAIEvalQualityMaxSamples(testType) {
 			recordEvidenceError(run)
 			continue
@@ -393,17 +375,7 @@ func qualityFromLatestRuns(config *OpenAIEvalConfig, accountID int64, model, eff
 			recordEvidenceError(run)
 			continue
 		}
-		if testType == OpenAIEvalTypeModelTrace && (run.Outcome.ModelTrace == nil || run.Outcome.ModelTrace.BankRevision != OpenAIEvalQualityModelTraceBankRevision) {
-			recordEvidenceError(run)
-			continue
-		}
 		status := run.Status
-		if testType == OpenAIEvalTypeFingerprint {
-			status = OpenAIEvalIdentityQualityStatus(run.Outcome.Fingerprint.NearestModel)
-		}
-		if testType == OpenAIEvalTypeModelTrace {
-			status, _ = openAIEvalModelTraceVerdict(run.RequestedModel, run.Outcome.ModelTrace.Prediction)
-		}
 		aggregate := OpenAIEvalQualityAggregate{OpenAIEvalQualityCounts: counts, TestType: testType, OutcomeStatus: status, AttributionRuleVersion: openAIEvalQualityAttributionRuleVersion(testType)}
 		if _, ok := aggregate.diagnosticStatus(); !ok {
 			recordEvidenceError(run)

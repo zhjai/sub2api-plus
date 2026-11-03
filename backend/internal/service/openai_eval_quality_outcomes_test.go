@@ -24,69 +24,39 @@ func qualityOutcomeEvidence(now time.Time, accountID int64, testType string, sam
 	evidence.TestType = testType
 	evidence.AttributionRuleVersion = openAIEvalQualityAttributionRuleVersion(testType)
 	if passed {
-		if testType == OpenAIEvalTypeCandy {
-			evidence.PassCount = samples
-		} else {
-			evidence.SuspectedPassCount = samples
-		}
+		evidence.PassCount = samples
 	}
 	evidence.OutcomeStatus, _ = evidence.diagnosticStatus()
 	return evidence
 }
 
 func TestOpenAIEvalQualityEqualDiagnosticOutcomesAndCompletionOrder(t *testing.T) {
-	for _, scenario := range []struct {
-		name         string
-		candySamples int
-		candyPass    bool
-		fingerprint  bool
-		tracePass    bool
-		wantCount    int
-		wantPass     int
-		wantSuspect  int
-		wantRatio    float64
-	}{
-		{"one_candy_and_trace_warning", 1, true, false, false, 2, 1, 0, .5},
-		{"ten_candy_and_trace_warning", 10, true, false, false, 2, 1, 0, .5},
-		{"ten_candy_warning_fingerprint_normal_trace_luna", 10, false, true, false, 3, 0, 1, 1.0 / 3},
-		{"candy_and_trace_normal", 10, true, false, true, 2, 1, 1, 1},
-	} {
-		for _, order := range [][]int{{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}} {
-			t.Run(fmt.Sprintf("%s/%v", scenario.name, order), func(t *testing.T) {
+	for _, samples := range []int{1, 10} {
+		for _, order := range [][]int{{0, 1}, {1, 0}} {
+			t.Run(fmt.Sprintf("samples_%d_order_%v", samples, order), func(t *testing.T) {
 				s, repo, accounts := setupQualityRefreshTest(t)
-				schedule := repo.config.Accounts[0].CandySchedule
-				repo.config.Accounts[0].ModelTraceSchedule = schedule
-				if scenario.fingerprint {
-					repo.config.Accounts[0].FingerprintSchedule = schedule
-				}
-				repo.config.Accounts[0].StateProbeSchedule = schedule
+				repo.config.Accounts[0].FingerprintSchedule = repo.config.Accounts[0].CandySchedule
 				accounts.accounts[17].Extra = make(map[string]any)
 				now := time.Now().Add(-time.Minute)
 				evidence := []OpenAIEvalQualityAggregate{
-					qualityOutcomeEvidence(now, 17, OpenAIEvalTypeCandy, scenario.candySamples, scenario.candyPass),
-					qualityOutcomeEvidence(now, 17, OpenAIEvalTypeFingerprint, 400, true),
-					qualityOutcomeEvidence(now, 17, OpenAIEvalTypeModelTrace, 3, scenario.tracePass),
+					qualityOutcomeEvidence(now, 17, OpenAIEvalTypeCandy, samples, true),
+					qualityOutcomeEvidence(now, 17, OpenAIEvalTypeFingerprint, 2, false),
 				}
-				completed := 0
-				for _, i := range order {
+				for step, i := range order {
 					addQualityEvidence(t, accounts.accounts[17], evidence[i])
-					if i != 1 || scenario.fingerprint {
-						completed++
-					}
 					result, err := s.RefreshOpenAIEvalQuality(context.Background(), 42)
 					require.NoError(t, err)
 					got, known := openAIEvalQualitySnapshots.lookup(17, "gpt-6.1-sol", "high", time.Now())
-					if completed != scenario.wantCount {
-						require.False(t, known, "incomplete selected set must be unknown")
+					if step == 0 {
+						require.False(t, known)
 						require.Zero(t, result.RouteCount)
-						continue
+					} else {
+						require.True(t, known)
+						require.Equal(t, 2, got.EvaluatedCount)
+						require.Equal(t, 1, got.PassCount)
+						require.Zero(t, got.SuspectedPassCount)
+						require.Equal(t, .5, got.Ratio())
 					}
-					require.True(t, known)
-					require.Equal(t, scenario.wantCount, got.EvaluatedCount)
-					require.Equal(t, scenario.wantPass, got.PassCount)
-					require.Equal(t, scenario.wantSuspect, got.SuspectedPassCount)
-					require.Equal(t, scenario.wantRatio, got.Ratio())
-					require.Equal(t, 1, result.RouteCount)
 				}
 			})
 		}
@@ -94,14 +64,14 @@ func TestOpenAIEvalQualityEqualDiagnosticOutcomesAndCompletionOrder(t *testing.T
 }
 
 func TestOpenAIEvalQualitySelectedTypesRequireFreshValidEvidence(t *testing.T) {
-	for _, invalid := range []string{"missing", "expired", "old_contract", "unknown_source", "insufficient", "error", "contradictory_status", "partial_identity", "wrong_model", "wrong_effort"} {
+	for _, invalid := range []string{"missing", "expired", "old_contract", "unknown_source", "insufficient", "error", "contradictory_status", "partial_identity", "wrong_model"} {
 		t.Run(invalid, func(t *testing.T) {
 			s, repo, accounts := setupQualityRefreshTest(t)
-			repo.config.Accounts[0].ModelTraceSchedule = repo.config.Accounts[0].CandySchedule
+			repo.config.Accounts[0].FingerprintSchedule = repo.config.Accounts[0].CandySchedule
 			accounts.accounts[17].Extra = make(map[string]any)
 			now := time.Now().Add(-time.Minute)
 			addQualityEvidence(t, accounts.accounts[17], qualityOutcomeEvidence(now, 17, OpenAIEvalTypeCandy, 10, true))
-			trace := qualityOutcomeEvidence(now, 17, OpenAIEvalTypeModelTrace, 3, true)
+			trace := qualityOutcomeEvidence(now, 17, OpenAIEvalTypeFingerprint, 3, true)
 			switch invalid {
 			case "expired":
 				trace.ExpiresAt = time.Now().Add(-time.Second)
@@ -117,8 +87,6 @@ func TestOpenAIEvalQualitySelectedTypesRequireFreshValidEvidence(t *testing.T) {
 				trace.SuspectedPassCount = 2
 			case "wrong_model":
 				trace.RequestedModel = "gpt-6-sol"
-			case "wrong_effort":
-				trace.ReasoningEffort = "low"
 			}
 			if invalid != "missing" {
 				addQualityEvidence(t, accounts.accounts[17], trace)
@@ -129,7 +97,7 @@ func TestOpenAIEvalQualitySelectedTypesRequireFreshValidEvidence(t *testing.T) {
 			_, known := openAIEvalQualitySnapshots.lookup(17, "gpt-6.1-sol", "high", time.Now())
 			require.False(t, known)
 			// Disabling the unavailable diagnostic changes the selected set.
-			repo.config.Accounts[0].ModelTraceSchedule.Enabled = false
+			repo.config.Accounts[0].FingerprintSchedule.Enabled = false
 			repo.config.Revision++
 			_, err = s.RefreshOpenAIEvalQuality(context.Background(), 42)
 			require.NoError(t, err)
@@ -143,10 +111,10 @@ func TestOpenAIEvalQualitySelectedTypesRequireFreshValidEvidence(t *testing.T) {
 
 func TestOpenAIEvalQualityExpiryCannotShrinkSelectedDenominator(t *testing.T) {
 	s, repo, accounts := setupQualityRefreshTest(t)
-	repo.config.Accounts[0].ModelTraceSchedule = repo.config.Accounts[0].CandySchedule
+	repo.config.Accounts[0].FingerprintSchedule = repo.config.Accounts[0].CandySchedule
 	now := time.Now().Add(-time.Minute)
 	addQualityEvidence(t, accounts.accounts[17], qualityOutcomeEvidence(now, 17, OpenAIEvalTypeCandy, 10, true))
-	trace := qualityOutcomeEvidence(now, 17, OpenAIEvalTypeModelTrace, 3, false)
+	trace := qualityOutcomeEvidence(now, 17, OpenAIEvalTypeFingerprint, 3, false)
 	trace.ExpiresAt = time.Now().Add(time.Minute)
 	addQualityEvidence(t, accounts.accounts[17], trace)
 	_, err := s.RefreshOpenAIEvalQuality(context.Background(), 42)

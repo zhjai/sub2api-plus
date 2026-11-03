@@ -12,6 +12,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/Wei-Shaw/sub2api/internal/service/cpaeval"
 	"github.com/gin-gonic/gin"
 )
 
@@ -331,26 +332,19 @@ func (h *AccountHandler) ListOpenAIEvalAudit(c *gin.Context) {
 }
 
 func (h *AccountHandler) ListOpenAIEvalModels(c *gin.Context) {
-	bankRevision, candidateCount := service.OpenAIEvalModelTraceBankInfo()
+	models := cpaeval.Models()
+	names := make([]string, 0, len(models))
+	for _, m := range models {
+		names = append(names, m.ID)
+	}
 	c.JSON(http.StatusOK, gin.H{
-		"items":            service.OpenAIEvalSupportedModels(),
-		"data_version":     service.OpenAIEvalDataVersion,
-		"baseline_version": service.OpenAIEvalBaselineVersion,
-		"baseline_models": func() []string {
-			out := make([]string, 0, len(service.OpenAIEvalFingerprintBaselines))
-			for _, item := range service.OpenAIEvalFingerprintBaselines {
-				out = append(out, item.Model)
-			}
-			return out
-		}(),
-		"candy":             gin.H{"expected_answer": service.OpenAIEvalCandyExpectedAnswer, "confidence": "low", "scheduling": "automatic_quality"},
-		"modeltrace":        gin.H{"requests": service.OpenAIEvalModelTraceRequests, "bank_revision": bankRevision, "candidate_count": candidateCount, "models": service.OpenAIEvalModelTraceModels(), "scheduling": "automatic_quality"},
-		"evaluation_notice": "Valid automatic results contribute observed quality fractions when evaluation effects are enabled. Manual diagnostics and operational failures do not become routing evidence. Behavioral attribution does not prove model identity.",
-		"reasoning_efforts": []string{"", "minimal", "low", "medium", "high", "xhigh", "max"},
-		"fingerprint_modes": []gin.H{
-			{"id": "quick", "samples": service.OpenAIEvalFingerprintQuickSamples},
-			{"id": "standard", "samples": service.OpenAIEvalFingerprintStandardSamples},
-			{"id": "strict", "samples": service.OpenAIEvalFingerprintStrictSamples},
-		},
+		"items": service.OpenAIEvalSupportedModels(), "data_version": service.OpenAIEvalDataVersion,
+		"baseline_version": service.OpenAIEvalBaselineVersion, "baseline_models": names,
+		"candy":             gin.H{"expected_answer": 21, "prompt": cpaeval.CandyPrompt, "confidence": "low", "scheduling": "automatic_quality"},
+		"fingerprint":       gin.H{"requests": 3, "detector_revision": cpaeval.DetectorRevision(), "models": models, "aliases": cpaeval.FingerprintAliases()},
+		"pelican":           gin.H{"requests": 1, "variants": cpaeval.PelicanVariants(), "scheduling": "manual_visual_review"},
+		"evaluation_notice": "Candy and enrolled-model fingerprint results contribute to quality ranking. Behavioral attribution does not prove model identity. Pelican is a manual visual review and does not affect ranking.",
+		"reasoning_efforts": []string{"", "none", "minimal", "low", "medium", "high", "xhigh", "max"},
+		"fingerprint_modes": []gin.H{{"id": "detector", "samples": 3}},
 	})
 }

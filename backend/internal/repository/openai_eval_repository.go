@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -95,6 +96,7 @@ func (r *openAIEvalRepository) GetConfig(ctx context.Context) (*service.OpenAIEv
 	if err := schedules.Err(); err != nil {
 		return nil, fmt.Errorf("iterate OpenAI evaluation schedule state: %w", err)
 	}
+	service.NormalizeOpenAIEvalDetectorConfig(&cfg)
 	return &cfg, nil
 }
 
@@ -119,6 +121,7 @@ func (r *openAIEvalRepository) SaveConfig(ctx context.Context, cfg *service.Open
 		return service.ErrOpenAIEvalConfigRevisionConflict
 	}
 	service.RetireOpenAIEvalBPS(cfg)
+	service.NormalizeOpenAIEvalDetectorConfig(cfg)
 	if cfg.MaxRequestAttempts == 0 {
 		cfg.MaxRequestAttempts = previous.MaxRequestAttempts
 		if cfg.MaxRequestAttempts == 0 {
@@ -153,7 +156,7 @@ func (r *openAIEvalRepository) SaveConfig(ctx context.Context, cfg *service.Open
 	}
 	keep := make(map[string]struct{}, len(cfg.Accounts)*4)
 	for _, route := range cfg.Accounts {
-		for _, testType := range []string{service.OpenAIEvalTypeCandy, service.OpenAIEvalTypeFingerprint, service.OpenAIEvalTypeModelTrace, service.OpenAIEvalTypeStateProbe} {
+		for _, testType := range []string{service.OpenAIEvalTypeCandy, service.OpenAIEvalTypeFingerprint, service.OpenAIEvalTypeStateProbe} {
 			keep[openAIEvalScheduleKey(route.AccountID, testType, route.RequestedModel, route.ReasoningEffort)] = struct{}{}
 		}
 	}
@@ -196,7 +199,7 @@ func (r *openAIEvalRepository) SaveConfig(ctx context.Context, cfg *service.Open
 		for _, item := range []struct {
 			testType string
 			schedule service.OpenAIEvalSchedule
-		}{{service.OpenAIEvalTypeCandy, route.CandySchedule}, {service.OpenAIEvalTypeFingerprint, route.FingerprintSchedule}, {service.OpenAIEvalTypeModelTrace, route.ModelTraceSchedule}, {service.OpenAIEvalTypeStateProbe, route.StateProbeSchedule}} {
+		}{{service.OpenAIEvalTypeCandy, route.CandySchedule}, {service.OpenAIEvalTypeFingerprint, route.FingerprintSchedule}, {service.OpenAIEvalTypeStateProbe, route.StateProbeSchedule}} {
 			nextRun := any(nil)
 			if item.schedule.Enabled {
 				initial, err := openAIEvalInitialNextRun(time.Now().UTC(), item.schedule.IntervalSeconds, item.schedule.JitterSeconds)
@@ -302,7 +305,12 @@ func (r *openAIEvalRepository) FinishRun(ctx context.Context, id int64, run *ser
 	if err != nil {
 		return fmt.Errorf("encode OpenAI evaluation samples: %w", err)
 	}
-	result, err := r.db.ExecContext(ctx, `
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin evaluation completion: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `
 		UPDATE openai_eval_runs SET status=$2, outcome=$3::jsonb, samples=$4::jsonb,
 			request_count=$5, input_tokens=$6, output_tokens=$7, cost_estimate_usd=$8,
 			duration_ms=$9, finished_at=$10, error_code=$11, upstream_model=$12, baseline_version=$13
@@ -315,7 +323,16 @@ func (r *openAIEvalRepository) FinishRun(ctx context.Context, id int64, run *ser
 	if count, _ := result.RowsAffected(); count == 0 {
 		return fmt.Errorf("OpenAI evaluation run %d not found", id)
 	}
-	return nil
+	if run.TestType == service.OpenAIEvalTypePelican && run.PelicanHTML != "" {
+		if len(run.PelicanHTML) > 300000 {
+			return fmt.Errorf("Pelican artifact exceeds storage limit")
+		}
+		digest := fmt.Sprintf("%x", sha256.Sum256([]byte(run.PelicanHTML)))
+		if _, err := tx.ExecContext(ctx, `INSERT INTO openai_eval_artifacts(run_id,kind,content,sha256) VALUES($1,'pelican_html',$2,$3) ON CONFLICT(run_id) DO UPDATE SET content=EXCLUDED.content,sha256=EXCLUDED.sha256`, id, run.PelicanHTML, digest); err != nil {
+			return fmt.Errorf("save Pelican artifact: %w", err)
+		}
+	}
+	return tx.Commit()
 }
 
 func (r *openAIEvalRepository) UpdateRunProgress(ctx context.Context, id int64, run *service.OpenAIEvalRun) error {
@@ -583,4 +600,13 @@ func nullableEvalCost(value *float64) any {
 		return nil
 	}
 	return *value
+}
+
+func (r *openAIEvalRepository) GetPelicanArtifact(ctx context.Context, id int64) (string, error) {
+	var content string
+	err := r.db.QueryRowContext(ctx, `SELECT a.content FROM openai_eval_artifacts a JOIN openai_eval_runs r ON r.id=a.run_id WHERE a.run_id=$1 AND r.test_type='pelican' AND a.kind='pelican_html'`, id).Scan(&content)
+	if err != nil {
+		return "", fmt.Errorf("load Pelican artifact: %w", err)
+	}
+	return content, nil
 }

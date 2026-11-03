@@ -210,7 +210,9 @@ describe('ModelIntegritySchedulingView', () => {
     await flushPromises()
 
     await wrapper.get('[data-testid="policy-avoid_degradation"]').setValue(true)
-    expect(wrapper.text()).toContain('勾选两项、通过一项为 50%，勾选三项、通过一项为 33.3%')
+    // ModelTrace is retired into fingerprint, so a route selects at most Candy and fingerprint.
+    expect(wrapper.text()).toContain('勾选两项、通过一项为 50%，两项都通过为 100%')
+    expect(wrapper.text()).not.toContain('勾选三项')
     expect(wrapper.text()).toContain('从通过率最高的一档中选择')
     expect(wrapper.text()).toContain('只有该档没有账号能处理请求时，才尝试下一档')
     // Runtime thresholds move an account back one position inside its tier, never to the end or across tiers.
@@ -408,8 +410,11 @@ describe('ModelIntegritySchedulingView', () => {
     await wrapper.get('[data-testid="add-rule"]').trigger('click')
     await wrapper.get('[data-testid="add-rule"]').trigger('click')
     const rules = wrapper.findAll('[data-testid="policy-rule"]')
-    for (const rule of rules) await rule.find('select').setValue('gpt-5')
-    expect(wrapper.text()).toContain('该模型与推理强度的规则已存在')
+    // Scheduling is per account and model: a rule picks a model and a policy, never an effort.
+    for (const rule of rules) expect(rule.findAll('select').map(select => select.attributes('data-testid'))).toEqual(['rule-model', 'rule-policy'])
+    expect(wrapper.find('[data-testid="policy-rule"]').text()).not.toContain('推理强度')
+    for (const rule of rules) await rule.get('[data-testid="rule-model"]').setValue('gpt-5')
+    expect(wrapper.get('[data-testid="rule-duplicate"]').text()).toContain('gpt-5 已有规则')
     await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
     expect(api.saveOpenAIEvalConfig).not.toHaveBeenCalled()
   })
@@ -441,9 +446,8 @@ describe('ModelIntegritySchedulingView', () => {
     expect(wrapper.get('[data-testid="custom-balance"]').find('input').element.value).toBe('20')
     await wrapper.get('[data-testid="add-rule"]').trigger('click')
     const rule = wrapper.get('[data-testid="policy-rule"]')
-    const selects = rule.findAll('select')
-    await selects[0].setValue('gpt-5')
-    await selects[2].setValue('custom_balance')
+    await rule.get('[data-testid="rule-model"]').setValue('gpt-5')
+    await rule.get('[data-testid="rule-policy"]').setValue('custom_balance')
     await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
     await flushPromises()
 
@@ -493,7 +497,8 @@ describe('ModelIntegritySchedulingView', () => {
     expect(payload.scheduling_policy).toBe('cost_first')
     expect(payload.custom_balance).toEqual({ ...folded(global), absolute_priorities: [] })
     expect(payload.policies?.[0]).toMatchObject({ requested_model: 'gpt-5-mini', policy: 'custom_balance', custom_balance: { ...folded(other), error_rate: 0.3 } })
-    expect(payload.policies?.[1]).toMatchObject({ requested_model: 'gpt-5', reasoning_effort: 'high', policy: 'custom_balance', custom_balance: { ...folded(global), ttft: 0.4 } })
+    // The legacy high-effort rule now covers the whole model and is saved without an effort.
+    expect(payload.policies?.[1]).toMatchObject({ requested_model: 'gpt-5', reasoning_effort: '', policy: 'custom_balance', custom_balance: { ...folded(global), ttft: 0.4 } })
   })
 
   it('keeps each rule weight object separate from the site default after a rule is seeded', async () => {
@@ -928,7 +933,7 @@ describe('ModelIntegritySchedulingView integrity pass rate controls', () => {
     const first = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
     const folded = { cost: 0.2, error_rate: 0.43, ttft: 0.27, load: 0.1, quality: 0, stability: 0, absolute_priorities: [] }
     expect(first.custom_balance).toEqual({ ...folded, load: 0.2 })
-    expect(first.policies?.[0]).toMatchObject({ requested_model: 'gpt-5', reasoning_effort: 'high', custom_balance: { ...folded, quality: 0.5 } })
+    expect(first.policies?.[0]).toMatchObject({ requested_model: 'gpt-5', reasoning_effort: '', custom_balance: { ...folded, quality: 0.5 } })
     expect(wrapper.find('[data-testid="legacy-stability-folded"]').exists()).toBe(false)
 
     // A second save from the echoed config must send the same folded values, not fold again.
@@ -1540,6 +1545,43 @@ describe('ModelIntegritySchedulingView request records by group', () => {
 })
 
 describe('ModelIntegritySchedulingView rule switches', () => {
+  it('folds legacy effort rules to the last rule per model, disabled included, says so and saves them without effort', async () => {
+    api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ policies: [
+      { requested_model: 'gpt-5', reasoning_effort: 'high', policy: 'cost_first' },
+      { requested_model: 'gpt-6.1-sol', reasoning_effort: 'low', policy: 'stability_first' },
+      { requested_model: 'GPT-5', reasoning_effort: 'low', policy: 'avoid_degradation', enabled: false },
+      { requested_model: 'gpt-6-astra', reasoning_effort: '', policy: 'cost_first' }
+    ] }))
+    const wrapper = mountView()
+    await flushPromises()
+
+    // One row per model; sol and astra are different gateway models and stay apart.
+    const rows = wrapper.findAll('[data-testid="policy-rule"]')
+    expect(rows.map(row => (row.get('[data-testid="rule-model"]').element as HTMLSelectElement).value)).toEqual(['gpt-6.1-sol', 'GPT-5', 'gpt-6-astra'])
+    // The last gpt-5 rule wins although it is disabled.
+    expect(rows[1].get('[data-testid="rule-enabled"]').attributes('aria-checked')).toBe('false')
+    expect((rows[1].get('[data-testid="rule-policy"]').element as HTMLSelectElement).value).toBe('avoid_degradation')
+    const merges = wrapper.findAll('[data-testid="rule-merge"]').map(item => item.text())
+    expect(merges).toHaveLength(2)
+    expect(merges[0]).toContain('gpt-6.1-sol')
+    expect(merges[0]).toContain('原推理强度 low')
+    expect(merges[1]).toContain('GPT-5：以最后一条「避免降智」（原推理强度 low，已停用）为准')
+    expect(merges[1]).toContain('该模型使用默认策略')
+    expect(merges[1]).toContain('不再生效：「优先低价」（原推理强度 high）')
+    // Merging on read is how requests already resolve, not an unsaved edit.
+    expect(wrapper.get('[data-testid="model-integrity-save"]').attributes('disabled')).toBeDefined()
+
+    await rows[2].get('[data-testid="rule-policy"]').setValue('stability_first')
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
+    expect(payload.policies).toEqual([
+      { requested_model: 'gpt-6.1-sol', reasoning_effort: '', policy: 'stability_first', enabled: true },
+      { requested_model: 'GPT-5', reasoning_effort: '', policy: 'avoid_degradation', enabled: false },
+      { requested_model: 'gpt-6-astra', reasoning_effort: '', policy: 'stability_first', enabled: true }
+    ])
+  })
+
   it('reads a legacy model rule without the field as enabled and saves it as enabled', async () => {
     api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ policies: [{ requested_model: 'gpt-5', policy: 'cost_first' }] }))
     const wrapper = mountView()
@@ -1559,7 +1601,7 @@ describe('ModelIntegritySchedulingView rule switches', () => {
     expect(payload.policies).toEqual([{ requested_model: 'gpt-5', reasoning_effort: '', policy: 'stability_first', enabled: true }])
   })
 
-  it('keeps a disabled model rule configured, saves enabled false, and lets an enabled copy of it coexist', async () => {
+  it('keeps a disabled model rule configured, saves enabled false, and flags a second rule for the same model', async () => {
     api.getOpenAIEvalConfig.mockResolvedValue(serverConfig({ policies: [{ requested_model: 'gpt-5', policy: 'avoid_degradation' }] }))
     const wrapper = mountView()
     await flushPromises()
@@ -1570,18 +1612,23 @@ describe('ModelIntegritySchedulingView rule switches', () => {
     // A disabled avoid-degradation rule no longer marks its threshold row as used.
     expect(wrapper.text()).not.toContain(zhT('admin.modelIntegrity.scheduling.policy.avoidNote'))
 
-    // An enabled rule for the same model is not a duplicate of a disabled one.
+    // The server applies the last rule for a model, a disabled one included, so
+    // a second rule for the same model is a duplicate even beside a disabled one.
     await wrapper.get('[data-testid="add-rule"]').trigger('click')
     const second = wrapper.findAll('[data-testid="policy-rule"]')[1]
-    await second.find('select').setValue('gpt-5')
-    expect(wrapper.text()).not.toContain('该模型与推理强度的规则已存在')
+    await second.get('[data-testid="rule-model"]').setValue('gpt-5')
+    expect(second.get('[data-testid="rule-duplicate"]').text()).toContain('停用的规则也算在内')
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    expect(api.saveOpenAIEvalConfig).not.toHaveBeenCalled()
 
+    // Removing the copy saves the one disabled rule as it stands.
+    await second.get('.rule-remove').trigger('click')
     await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
     await flushPromises()
     const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
     expect(payload.policies).toEqual([
-      { requested_model: 'gpt-5', reasoning_effort: '', policy: 'avoid_degradation', enabled: false },
-      { requested_model: 'gpt-5', reasoning_effort: '', policy: 'stability_first', enabled: true }
+      { requested_model: 'gpt-5', reasoning_effort: '', policy: 'avoid_degradation', enabled: false }
     ])
   })
 })

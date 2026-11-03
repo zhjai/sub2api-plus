@@ -1,5 +1,5 @@
 import type { OpenAIEvalModelCatalog, OpenAIEvalRun, OpenAIEvalSampleRecord } from '@/api/admin/accounts'
-import { attributionReinterpretation, candyExpectedAnswer, failedSampleCount, firstSampleFailure, redactSecrets, runSamples, runStatusKey, sampleFailed } from './modelIntegrity'
+import { attributionReinterpretation, candyExpectedAnswer, failedSampleCount, fingerprintComparison, firstSampleFailure, pelicanVariantName, redactSecrets, runSamples, runStatusKey, sampleFailed } from './modelIntegrity'
 
 type Translate = (key: string, params?: Record<string, unknown>) => string
 
@@ -33,6 +33,11 @@ export function runExplanation(t: Translate, run: OpenAIEvalRun, catalog?: OpenA
     const text = t(key)
     return text === key ? statusLabel(t, verdict) : text
   }
+  if (run.test_type === 'fingerprint' && run.outcome.lm_fingerprint) {
+    const text = lmFingerprintExplanation(t, run, catalog)
+    if (text) return text
+  }
+  if (run.test_type === 'pelican' && run.status !== 'running') return pelicanExplanation(t, run, catalog)
   if (run.test_type === 'modeltrace' && run.outcome.modeltrace?.prediction) {
     const trace = run.outcome.modeltrace
     // Older runs (status "attributed") carry no attribution verdict reason.
@@ -50,6 +55,55 @@ export function runExplanation(t: Translate, run: OpenAIEvalRun, catalog?: OpenA
   // Insufficient evidence and errors keep the upstream cause next to the verdict.
   const failure = run.status === 'insufficient' || run.status === 'uncertain' || run.status === 'error' ? runFailureDetail(t, run) : ''
   return failure ? joinSentences(base, failure) : base
+}
+
+/** "0.82" → "82%"; scores without a probability are never shown as percentages. */
+export function formatProbability(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return '—'
+  const percent = value * 100
+  return `${percent >= 10 || percent === 0 ? percent.toFixed(0) : percent.toFixed(1)}%`
+}
+
+/**
+ * Current fingerprint: the closest candidate (with its calibrated probability
+ * when all three answers were valid) and how it compares with the tested
+ * model. Empty when there is no attribution, so the caller falls back to the
+ * stored reason and the request failure.
+ */
+function lmFingerprintExplanation(t: Translate, run: OpenAIEvalRun, catalog?: OpenAIEvalModelCatalog | null): string {
+  const lm = run.outcome.lm_fingerprint!
+  const attribution = lm.attribution
+  if (!attribution) return ''
+  const comparison = fingerprintComparison(run, catalog)
+  if (comparison === 'not_model') return t('admin.modelIntegrity.tests.lm.notModelShort')
+  if (!attribution.prediction) return ''
+  const name = attribution.prediction_name || attribution.prediction
+  const head = attribution.probability != null
+    ? t('admin.modelIntegrity.tests.lm.closestWithProbability', { model: name, probability: formatProbability(attribution.probability) })
+    : t('admin.modelIntegrity.tests.lm.closest', { model: name })
+  const parts = [head]
+  if (comparison !== 'none') parts.push(t(`admin.modelIntegrity.tests.lm.comparisonSentence.${comparison}`, { target: lm.compared_as || run.requested_model }))
+  if (attribution.decision === 'partial') parts.push(t('admin.modelIntegrity.tests.lm.partialShort', { used: attribution.used_outputs, total: run.outcome.expected_count || 3 }))
+  return parts.reduce((text, part) => joinSentences(text, part))
+}
+
+/** Pelican never has a verdict: it says whether a page was made and leaves judging it to a person. */
+function pelicanExplanation(t: Translate, run: OpenAIEvalRun, catalog?: OpenAIEvalModelCatalog | null): string {
+  const result = run.outcome.pelican
+  const variant = pelicanVariantName(result?.variant, catalog)
+  if (run.status === 'completed' && result) {
+    return joinSentences(t('admin.modelIntegrity.tests.pelican.made', { variant, size: formatBytes(result.html_bytes) }), t('admin.modelIntegrity.tests.pelican.notScoredShort'))
+  }
+  const base = run.outcome.reason ? reasonText(t, run.outcome.reason, run, catalog) : t('admin.modelIntegrity.tests.pelican.notMade')
+  const failure = runFailureDetail(t, run) || (run.error ? t('admin.modelIntegrity.tests.samples.runError', { error: redactSecrets(run.error) }) : '')
+  return failure ? joinSentences(base, failure) : base
+}
+
+export function formatBytes(bytes: number | null | undefined): string {
+  const value = Number(bytes)
+  if (!Number.isFinite(value) || value <= 0) return '—'
+  if (value < 1024) return `${value} B`
+  return `${(value / 1024).toFixed(value < 10 * 1024 ? 1 : 0)} KB`
 }
 
 /**

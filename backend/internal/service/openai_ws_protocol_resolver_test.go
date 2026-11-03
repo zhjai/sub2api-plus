@@ -264,3 +264,18 @@ func TestOpenAIWSProtocolResolver_Resolve_ModeRouterV2(t *testing.T) {
 		require.Equal(t, "account_concurrency_invalid", decision.Reason)
 	})
 }
+
+func TestOpenAIWSProtocolResolverLiveModeRouterV2(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIWS.Enabled = true
+	cfg.Gateway.OpenAIWS.OAuthEnabled = true
+	cfg.Gateway.OpenAIWS.ResponsesWebsocketsV2 = true
+	account := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
+		Extra: map[string]any{"openai_oauth_responses_websockets_v2_mode": OpenAIWSIngressModeHTTPBridge}}
+	resolver := NewOpenAIWSProtocolResolver(cfg)
+	require.Equal(t, "account_disabled", resolver.Resolve(account).Reason)
+	cfg.SetOpenAIWSModeRouterV2Enabled(true)
+	require.Equal(t, "ws_v2_mode_http_bridge", resolver.Resolve(account).Reason)
+	cfg.SetOpenAIWSModeRouterV2Enabled(false)
+	require.Equal(t, "account_disabled", resolver.Resolve(account).Reason)
+}

@@ -1336,6 +1336,8 @@ function generateRoutedCodexFiles(
     opencode_go: 'OpenCode',
     typesafe: 'TypeSafe / Jev',
     prism: 'Prism',
+    command_code: 'Command Code',
+    cline: 'Cline',
     composite: 'Composite'
   }
   const label = labels[platform]
@@ -1475,6 +1477,12 @@ function generateOpenCodeConfig(platform: string, baseUrl: string, apiKey: strin
         xhigh: {},
         max: {}
       }
+    },
+    'gpt-6.1-terra': {
+      name: 'GPT-6.1 Terra',
+      limit: { context: 1050000, output: 128000 },
+      options: { store: false },
+      variants: { none: {}, low: {}, medium: {}, high: {}, xhigh: {}, max: {} }
     },
     'gpt-6.1-sol': {
       name: 'GPT-6.1 Sol',

@@ -26,7 +26,7 @@ func TestOpenAIAccountScheduleTraceStoreIsBoundedAndNewestFirst(t *testing.T) {
 	require.Equal(t, int64(3), all[len(all)-1].SelectedAccountID)
 }
 
-func TestOpenAIAccountRuntimeStatsAreIsolatedByModelAndReasoningEffort(t *testing.T) {
+func TestOpenAIAccountRuntimeStatsShareEffortAndIsolateModels(t *testing.T) {
 	stats := newOpenAIAccountRuntimeStats()
 	stats.reportForRequest(7, "gpt-6-astra", "high", false, nil)
 	stats.reportForRequest(7, "gpt-6-astra", "low", true, nil)
@@ -38,9 +38,9 @@ func TestOpenAIAccountRuntimeStatsAreIsolatedByModelAndReasoningEffort(t *testin
 	coldError, _, _ := stats.snapshotForRequest(7, "gpt-6-astra", "xhigh")
 
 	require.Greater(t, highError, 0.0)
-	require.Equal(t, 0.0, lowError)
+	require.Equal(t, highError, lowError)
 	require.Equal(t, 0.0, otherModelError)
-	require.Equal(t, 0.0, coldError)
+	require.Equal(t, highError, coldError)
 }
 
 func TestOpenAIRequestResultReporterPreservesPublicModelAndReasoningEffort(t *testing.T) {
@@ -64,9 +64,9 @@ func TestOpenAIRequestResultReporterPreservesPublicModelAndReasoningEffort(t *te
 	require.Greater(t, highError, 0.0)
 	require.Equal(t, float64(ttft), highTTFT)
 	require.True(t, hasHighTTFT)
-	require.Zero(t, lowError)
+	require.Equal(t, highError, lowError)
 	require.True(t, hasLowTTFT)
-	for _, route := range [][2]string{{"mapped-model", ""}, {"mapped-model", high}, {"public-model", ""}} {
+	for _, route := range [][2]string{{"mapped-model", ""}, {"mapped-model", high}} {
 		_, found := stats.loadRoute(account.ID, route[0], route[1])
 		require.False(t, found, "unrelated route %v must remain unsampled", route)
 	}

@@ -27,6 +27,11 @@ import {
   runStatusKey,
   dailyRequests,
   exclusionKey,
+  fingerprintAliasNote,
+  fingerprintComparison,
+  fingerprintEnrollment,
+  fingerprintModelID,
+  isLegacyRun,
   MAX_INTERVAL_SECONDS,
   maxScheduleJitterSeconds,
   newRoute,
@@ -72,8 +77,26 @@ const catalog = {
   candy: { expected_answer: 29, confidence: 'low', scheduling: 'alert_only' },
   evaluation_notice: '',
   reasoning_efforts: ['', 'high'],
+  // Retired fields an older server may still send; the page ignores them.
   fingerprint_modes: [{ id: 'quick', samples: 60 }, { id: 'standard', samples: 200 }, { id: 'strict', samples: 400 }],
-  modeltrace: { requests: 3, bank_revision: 'x', candidate_count: 16, scheduling: 'alert_only' }
+  modeltrace: { requests: 3, bank_revision: 'x', candidate_count: 16, scheduling: 'alert_only' },
+  fingerprint: {
+    requests: 3,
+    detector_revision: 'sha256:abc',
+    models: [
+      { id: 'gpt-6-astra', display_name: 'GPT-6 Astra', family: 'openai', family_name: 'OpenAI' },
+      { id: 'gpt-5.5', display_name: 'GPT-5.5', family: 'openai', family_name: 'OpenAI' },
+      { id: 'gpt-6-luna', display_name: 'GPT-6 Luna', family: 'openai', family_name: 'OpenAI' }
+    ],
+    aliases: { 'gpt-6.1-sol': 'gpt-6-astra', 'deepseek-flash': 'deepseek-v4.1-flash-1017' }
+  },
+  pelican: {
+    requests: 1,
+    variants: [
+      { id: 'original', name: '原版', language: 'html', prompt: 'draw html' },
+      { id: 'all-in-one', name: '多合一版', language: 'svg', prompt: 'draw svg' }
+    ]
+  }
 } satisfies OpenAIEvalModelCatalog
 
 function oauthRoute(overrides: Partial<OpenAIEvalRouteConfig> = {}): OpenAIEvalRouteConfig {
@@ -94,9 +117,11 @@ describe('request budget', () => {
     route.candy_schedule.sample_count = 5
     expect(requestsPerRun(route, 'candy', catalog)).toBe(5)
     expect(requestsPerRun(route, 'state_probe', catalog)).toBe(2)
-    expect(requestsPerRun(route, 'modeltrace', catalog)).toBe(3)
-    expect(requestsPerRun(route, 'fingerprint', catalog)).toBe(60)
-    expect(requestsPerRun(route, 'fingerprint', catalog, 'strict')).toBe(400)
+    // Fingerprint is always three challenges; the retired 60/200/400 sizes are ignored.
+    route.fingerprint_schedule.sample_mode = 'strict'
+    expect(requestsPerRun(route, 'fingerprint', catalog)).toBe(3)
+    expect(requestsPerRun(route, 'fingerprint', null)).toBe(3)
+    expect(requestsPerRun(route, 'pelican', catalog)).toBe(1)
   })
 
   it('estimates daily requests only for enabled schedules', () => {
@@ -106,10 +131,11 @@ describe('request budget', () => {
     route.candy_schedule.interval_seconds = 900
     expect(dailyRequests(route, 'candy', catalog)).toBe(96)
     route.fingerprint_schedule.enabled = true
-    route.fingerprint_schedule.sample_mode = 'standard'
     route.fingerprint_schedule.interval_seconds = 86400
-    expect(totalDailyRequests([route], catalog)).toBe(296)
+    expect(totalDailyRequests([route], catalog)).toBe(99)
     expect(activeScheduleCount([route])).toBe(2)
+    // Pelican has no schedule, so it never adds automatic requests.
+    expect(dailyRequests(route, 'pelican', catalog)).toBe(0)
   })
 
   it('does not count State Probe schedules the server will never run', () => {
@@ -129,7 +155,20 @@ describe('schedule normalisation', () => {
     const fingerprint = { enabled: true, interval_seconds: 3 * 86400, jitter_seconds: 10 * 86400 }
     normalizeSchedule(fingerprint, 'fingerprint')
     expect(fingerprint.jitter_seconds).toBe(3600)
-    expect((fingerprint as { sample_mode?: string }).sample_mode).toBe('quick')
+    expect((fingerprint as { concurrency?: number }).concurrency).toBe(3)
+  })
+
+  it('drops the retired fingerprint sample size and keeps concurrency within 1–3', () => {
+    const fingerprint: { enabled: boolean; interval_seconds: number; jitter_seconds: number; sample_mode?: string; concurrency?: number } = { enabled: true, interval_seconds: 3600, jitter_seconds: 0, sample_mode: 'strict', concurrency: 7 }
+    normalizeSchedule(fingerprint, 'fingerprint')
+    expect(fingerprint.sample_mode).toBeUndefined()
+    expect(fingerprint.concurrency).toBe(3)
+    fingerprint.concurrency = 0
+    normalizeSchedule(fingerprint, 'fingerprint')
+    expect(fingerprint.concurrency).toBe(1)
+    fingerprint.concurrency = 2
+    normalizeSchedule(fingerprint, 'fingerprint')
+    expect(fingerprint.concurrency).toBe(2)
   })
 
   it('caps custom intervals only at the database integer storage boundary', () => {
@@ -243,9 +282,105 @@ describe('retired BPS compatibility', () => {
   it('fills missing schedules on routes saved by older versions', () => {
     const legacy = { account_id: 3, requested_model: 'gpt-5', reasoning_effort: '', candy_schedule: { enabled: true, interval_seconds: 3600, jitter_seconds: 0 }, fingerprint_schedule: { enabled: false, interval_seconds: 86400, jitter_seconds: 0 }, bps_auto: true } as unknown as OpenAIEvalRouteConfig
     const route = normalizeRoute(legacy)
-    expect(route.modeltrace_schedule.interval_seconds).toBe(300)
+    expect(route.modeltrace_schedule).toBeUndefined()
     expect(route.state_probe_schedule.interval_seconds).toBe(300)
+    expect(route.fingerprint_schedule.concurrency).toBe(3)
     expect(route.bps_mode).toBe('force_off')
+  })
+})
+
+describe('retired ModelTrace schedule', () => {
+  const base = (fingerprint: Record<string, unknown>, modeltrace: Record<string, unknown>) => ({
+    account_id: 3, requested_model: 'gpt-6-astra', reasoning_effort: 'high',
+    candy_schedule: { enabled: false, interval_seconds: 3600, jitter_seconds: 0 },
+    fingerprint_schedule: { jitter_seconds: 0, ...fingerprint },
+    modeltrace_schedule: { jitter_seconds: 0, ...modeltrace },
+    state_probe_schedule: { enabled: false, interval_seconds: 300, jitter_seconds: 0 },
+    bps_auto: false
+  }) as unknown as OpenAIEvalRouteConfig
+
+  it('turns fingerprint on at the ModelTrace interval when only ModelTrace ran automatically', () => {
+    const route = normalizeRoute(base({ enabled: false, interval_seconds: 86400, sample_mode: 'standard' }, { enabled: true, interval_seconds: 1800, jitter_seconds: 120 }))
+    expect(route.fingerprint_schedule).toMatchObject({ enabled: true, interval_seconds: 1800, jitter_seconds: 120, concurrency: 3 })
+    expect(route.fingerprint_schedule.sample_mode).toBeUndefined()
+    expect(route.modeltrace_schedule).toBeUndefined()
+  })
+
+  it('keeps the fingerprint schedule as it is when both ran automatically, as the server does', () => {
+    // openAIEvalDetectorSchedule only adopts ModelTrace when fingerprint was off; the page must not show another interval.
+    expect(normalizeRoute(base({ enabled: true, interval_seconds: 7200 }, { enabled: true, interval_seconds: 600 })).fingerprint_schedule).toMatchObject({ enabled: true, interval_seconds: 7200 })
+    expect(normalizeRoute(base({ enabled: true, interval_seconds: 600 }, { enabled: true, interval_seconds: 7200 })).fingerprint_schedule).toMatchObject({ enabled: true, interval_seconds: 600 })
+  })
+
+  it('leaves fingerprint alone when ModelTrace was off', () => {
+    expect(normalizeRoute(base({ enabled: false, interval_seconds: 86400 }, { enabled: false, interval_seconds: 300 })).fingerprint_schedule).toMatchObject({ enabled: false, interval_seconds: 86400 })
+  })
+
+  it('never sends the ModelTrace schedule or the retired sample size back', () => {
+    const route = base({ enabled: true, interval_seconds: 3600, sample_mode: 'quick', concurrency: 2 }, { enabled: true, interval_seconds: 300 })
+    const payload = toSavePayload({ effects_enabled: false, bps_auto_enabled: false, accounts: [route] })
+    expect(payload.accounts[0]).not.toHaveProperty('modeltrace_schedule')
+    expect(payload.accounts[0].fingerprint_schedule).not.toHaveProperty('sample_mode')
+    expect(payload.accounts[0].fingerprint_schedule.concurrency).toBe(2)
+  })
+})
+
+describe('current fingerprint detector', () => {
+  const lmRun = (overrides: Partial<NonNullable<OpenAIEvalRun['outcome']['lm_fingerprint']>> = {}, model = 'gpt-6.1-sol', prediction = 'gpt-6-astra'): OpenAIEvalRun => ({
+    id: 9, account_id: 1, test_type: 'fingerprint', requested_model: model, reasoning_effort: 'high', status: 'pass',
+    baseline_version: 'sha256:abc',
+    outcome: {
+      status: 'pass', sample_count: 3, expected_count: 3, confidence: 'low', scheduling: 'alert_only',
+      lm_fingerprint: {
+        detector_revision: 'sha256:abc', collection_status: 'completed', concurrency: 3, compared_as: 'gpt-6-astra', enrolled: true, request_effort: '',
+        attribution: { prediction, prediction_name: 'GPT-6 Astra', probability: 0.82, used_outputs: 3, family_prediction_name: 'OpenAI' },
+        ...overrides
+      }
+    },
+    request_count: 3, input_tokens: 0, output_tokens: 0, duration_ms: 1, started_at: '2026-11-01T00:00:00Z', trigger_source: 'manual'
+  })
+
+  it('compares names as the plugin does: lower case, no provider prefix, alias table', () => {
+    const aliases = catalog.fingerprint.aliases
+    expect(fingerprintModelID(' OpenAI/GPT-6.1-sol ', aliases)).toBe('gpt-6-astra')
+    expect(fingerprintModelID('deepseek/deepseek-flash', aliases)).toBe('deepseek-v4.1-flash-1017')
+    expect(fingerprintModelID('gpt-6-sol', aliases)).toBe('gpt-6-sol')
+  })
+
+  it('knows which tested models the bank can score', () => {
+    expect(fingerprintEnrollment('gpt-6.1-sol', catalog)).toBe('enrolled')
+    expect(fingerprintEnrollment('gpt-5.4-mini', catalog)).toBe('not_enrolled')
+    expect(fingerprintEnrollment('gpt-5.4-mini', { ...catalog, fingerprint: undefined })).toBe('unknown')
+  })
+
+  it('reads match, mismatch, not-a-model and outside-the-bank from the stored attribution', () => {
+    expect(fingerprintComparison(lmRun(), catalog)).toBe('match')
+    expect(fingerprintComparison(lmRun({}, 'gpt-6.1-sol', 'gpt-6-luna'), catalog)).toBe('mismatch')
+    expect(fingerprintComparison(lmRun({ attribution: { decision: 'not_model', prediction: '', probability: null, used_outputs: 3, family_prediction_name: '' } }), catalog)).toBe('not_model')
+    expect(fingerprintComparison(lmRun({ enrolled: false, compared_as: 'gpt-5.4-mini' }, 'gpt-5.4-mini', 'gpt-5.5'), catalog)).toBe('not_enrolled')
+    expect(fingerprintComparison(lmRun({ collection_status: 'failed', attribution: null }), catalog)).toBe('none')
+    expect(fingerprintAliasNote(lmRun())).toBe('gpt-6-astra')
+    expect(fingerprintAliasNote(lmRun({ compared_as: 'gpt-5.5' }, 'gpt-5.5', 'gpt-5.5'))).toBeNull()
+  })
+
+  it('explains the closest model, its probability and the comparison without inventing a score', () => {
+    expect(runExplanation(zhT, lmRun(), catalog)).toBe('最接近 GPT-6 Astra（82%）。与被测模型 gpt-6-astra 一致。')
+    const partial = lmRun({ collection_status: 'partial', attribution: { decision: 'partial', prediction: 'gpt-6-luna', prediction_name: 'GPT-6 Luna', probability: null, used_outputs: 2, family_prediction_name: 'OpenAI' } })
+    expect(runExplanation(zhT, partial, catalog)).toBe('最接近 GPT-6 Luna。与被测模型 gpt-6-astra 不一致，建议复测确认。仅 2/3 条有效回答，未计算概率。')
+  })
+
+  it('tells current fingerprint runs from retired JSD and ModelTrace history', () => {
+    expect(isLegacyRun(lmRun())).toBe(false)
+    expect(isLegacyRun({ test_type: 'fingerprint', baseline_version: 'cpa-codex-candy-eval-97623969-v2', outcome: { status: 'suspected_normal', sample_count: 60, expected_count: 60, confidence: 'low', scheduling: 'alert_only', fingerprint: { status: 'suspected_normal', valid_samples: 60, required_samples: 60, cell_count: 4, evaluated_at: '' } } })).toBe(true)
+    expect(isLegacyRun({ test_type: 'modeltrace', outcome: { status: 'pass', sample_count: 3, expected_count: 3, confidence: 'low', scheduling: 'alert_only' } })).toBe(true)
+    expect(isLegacyRun({ test_type: 'fingerprint', outcome: { status: 'running', sample_count: 0, expected_count: 3, confidence: 'none', scheduling: 'disabled' } })).toBe(false)
+  })
+})
+
+describe('pelican', () => {
+  it('never reads a generated page as a pass', () => {
+    expect(resultTone('completed')).toBe('neutral')
+    expect(resultTone('failed')).toBe('error')
   })
 })
 
@@ -793,7 +928,8 @@ describe('retries and per-sample helpers', () => {
 
   it('counts the request ceiling per run with attempts, capping State Probe at three chains', () => {
     const route = oauthRoute()
-    expect(maxRequestsPerRun(route, 'modeltrace', 3, catalog)).toBe(9)
+    expect(maxRequestsPerRun(route, 'fingerprint', 3, catalog)).toBe(9)
+    expect(maxRequestsPerRun(route, 'pelican', 3, catalog)).toBe(3)
     // One chain is a mint plus a continue, and the server allows three chains
     // even when the shared attempts setting is higher — six sends at most.
     expect(maxRequestsPerRun(route, 'state_probe', 3, catalog)).toBe(6)

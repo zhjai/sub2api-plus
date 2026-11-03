@@ -3,12 +3,12 @@
     <header class="tt-head">
       <div class="min-w-0">
         <h3 class="tt-name">{{ t(`admin.modelIntegrity.tests.types.${type}.name`) }}</h3>
-        <p class="tt-what">{{ t(`admin.modelIntegrity.tests.types.${type}.what`, { count: perRun, candidates: catalog?.modeltrace?.candidate_count ?? '—' }) }}</p>
+        <p class="tt-what">{{ whatText }}</p>
       </div>
       <button
         type="button"
         class="btn btn-secondary btn-sm shrink-0"
-        :disabled="!available || running"
+        :disabled="!available || running || Boolean(runBlocked)"
         :data-testid="`run-${type}`"
         @click="emit('run')"
       >
@@ -17,13 +17,27 @@
       </button>
     </header>
 
-    <p v-if="!available" class="tt-unavailable-note" data-testid="unavailable-note">{{ unavailableReason || t('admin.modelIntegrity.tests.onlyDirectOAuth') }}</p>
+    <div v-if="!available" class="tt-unavailable-row">
+      <p class="tt-unavailable-note" data-testid="unavailable-note">{{ unavailableReason || t('admin.modelIntegrity.tests.onlyDirectOAuth') }}</p>
+      <!-- A schedule switched on earlier stays visible so it can still be switched off. -->
+      <button v-if="schedule.enabled" type="button" class="tt-auto-off" data-testid="auto-off" @click="schedule.enabled = false">{{ t('admin.modelIntegrity.tests.autoOff') }}</button>
+    </div>
 
     <template v-else>
       <p v-if="notice" class="tt-notice" data-testid="test-notice">{{ notice }}</p>
+      <p v-if="runBlocked" class="tt-auto-note" data-testid="manual-budget-note">{{ runBlocked }}</p>
+      <p v-if="enrollment === 'not_enrolled'" class="tt-auto-note" data-testid="fingerprint-not-enrolled">
+        {{ schedule.enabled ? t('admin.modelIntegrity.tests.fingerprint.notEnrolledEnabled', { model: route.requested_model }) : t('admin.modelIntegrity.tests.fingerprint.notEnrolled', { model: route.requested_model }) }}
+      </p>
       <div class="tt-controls">
-        <label class="tt-switch">
-          <Toggle v-model="schedule.enabled" :aria-label="`${t(`admin.modelIntegrity.tests.types.${type}.name`)} ${t('admin.modelIntegrity.tests.auto')}`" />
+        <label class="tt-switch" :class="{ 'tt-switch-locked': autoLocked }">
+          <Toggle
+            v-model="schedule.enabled"
+            class="disabled:cursor-not-allowed disabled:opacity-50"
+            :disabled="autoLocked"
+            :aria-label="`${t(`admin.modelIntegrity.tests.types.${type}.name`)} ${t('admin.modelIntegrity.tests.auto')}`"
+            data-testid="auto-toggle"
+          />
           <span>{{ t('admin.modelIntegrity.tests.auto') }}</span>
         </label>
         <label class="tt-field">
@@ -62,10 +76,9 @@
           />
         </label>
         <label v-if="type === 'fingerprint'" class="tt-field">
-          <span class="tt-label">{{ t('admin.modelIntegrity.tests.sampleMode') }}</span>
-          <select v-model="schedule.sample_mode" class="input tt-input" data-testid="fingerprint-sample-mode">
-            <option v-if="schedule.sample_mode && !modes.some(mode => mode.id === schedule.sample_mode)" :value="schedule.sample_mode">{{ t('admin.modelIntegrity.tests.sampleModes.custom', { mode: schedule.sample_mode }) }}</option>
-            <option v-for="mode in modes" :key="mode.id" :value="mode.id">{{ t('admin.modelIntegrity.tests.manualSampleOption', { mode: modeLabel(mode.id), count: mode.samples }) }}</option>
+          <span class="tt-label">{{ t('admin.modelIntegrity.tests.fingerprint.concurrency') }}</span>
+          <select v-model.number="fingerprintConcurrency" class="input tt-input tt-concurrency" data-testid="fingerprint-concurrency" :title="t('admin.modelIntegrity.tests.fingerprint.concurrencyHint')">
+            <option v-for="n in concurrencyChoices" :key="n" :value="n">{{ t('admin.modelIntegrity.tests.fingerprint.concurrencyOption', { n }) }}</option>
           </select>
         </label>
         <label class="tt-field">
@@ -100,6 +113,11 @@
         <span v-if="schedule.enabled && schedule.next_run_at && !autoNote">{{ t('admin.modelIntegrity.tests.nextRun', { time: formatTime(schedule.next_run_at) }) }}</span>
       </p>
       <p v-if="autoNote" class="tt-auto-note" data-testid="auto-note">{{ autoNote }}</p>
+      <p v-if="type === 'fingerprint'" class="tt-link-note text-gray-500 dark:text-gray-400" data-testid="fingerprint-effort">{{ t('admin.modelIntegrity.tests.fingerprint.effortNote', { effort: route.reasoning_effort || t('admin.modelIntegrity.common.defaultEffort') }) }}</p>
+      <details v-if="type === 'candy' && catalog?.candy?.prompt" class="tt-prompt">
+        <summary class="tt-prompt-summary">{{ t('admin.modelIntegrity.tests.candyPrompt') }}</summary>
+        <p class="tt-prompt-text" data-testid="candy-prompt">{{ catalog.candy.prompt }}</p>
+      </details>
       <p v-if="type === 'state_probe' && route.reasoning_effort" class="tt-link-note text-gray-500 dark:text-gray-400" data-testid="state-probe-effort">{{ t('admin.modelIntegrity.tests.stateProbeDefaultEffort') }}</p>
       <p v-if="type === 'state_probe'" class="tt-link-note">
         <router-link to="/admin/model-integrity/scheduling" class="tt-link">{{ t('admin.modelIntegrity.tests.goScheduling') }}</router-link>
@@ -109,7 +127,7 @@
     <footer class="tt-result" :class="latest ? `tt-result-${resultTone(latest.status)}` : ''">
       <template v-if="latest">
         <button type="button" class="tt-result-btn" @click="emit('open', latest)">
-          <span class="tt-result-status" data-testid="latest-status">{{ statusText }}</span>
+          <span class="tt-result-status" data-testid="latest-status">{{ statusText }}<span v-if="legacy" class="tt-legacy" data-testid="latest-legacy">{{ t('admin.modelIntegrity.tests.legacy.tag') }}</span></span>
           <span class="tt-result-text" data-testid="latest-explanation">{{ explanation }}</span>
           <time class="tt-result-time" :datetime="latest.finished_at || latest.started_at">{{ formatTime(latest.finished_at || latest.started_at) }}</time>
         </button>
@@ -145,12 +163,12 @@ import { useI18n } from 'vue-i18n'
 import Icon from '@/components/icons/Icon.vue'
 import Toggle from '@/components/common/Toggle.vue'
 import type { OpenAIEvalModelCatalog, OpenAIEvalRouteConfig, OpenAIEvalRun } from '@/api/admin/accounts'
-import { CANDY_MAX_SAMPLES, CANDY_MIN_SAMPLES, CUSTOM_INTERVAL, DAY, DEFAULT_MAX_REQUEST_ATTEMPTS, HOUR, MAX_INTERVAL_MINUTES, TEST_TYPE_META, candyExpectedAnswer, candyExtractedAnswer, candyFullReply, dailyRequests, maxRequestsPerRun, maxScheduleJitterSeconds, normalizeSchedule, redactSecrets, requestsPerRun, resultTone, runSamples, sampleFailed, sampleLacksDetail, scheduleOf, stateProbeChains, type EvalTestType } from '@/views/admin/modelIntegrity/modelIntegrity'
+import { CANDY_MAX_SAMPLES, CANDY_MIN_SAMPLES, CUSTOM_INTERVAL, DAY, DEFAULT_MAX_REQUEST_ATTEMPTS, FINGERPRINT_MAX_CONCURRENCY, FINGERPRINT_MIN_CONCURRENCY, HOUR, MAX_INTERVAL_MINUTES, TEST_TYPE_META, candyExpectedAnswer, candyExtractedAnswer, candyFullReply, dailyRequests, fingerprintEnrollment, isLegacyRun, maxRequestsPerRun, maxScheduleJitterSeconds, normalizeFingerprintConcurrency, normalizeSchedule, redactSecrets, requestsPerRun, resultTone, runSamples, sampleFailed, sampleLacksDetail, scheduleOf, stateProbeChains, type ScheduledTestType } from '@/views/admin/modelIntegrity/modelIntegrity'
 import { runExplanation, runStatusLabel } from '@/views/admin/modelIntegrity/runText'
 
 const props = defineProps<{
   route: OpenAIEvalRouteConfig
-  type: EvalTestType
+  type: ScheduledTestType
   catalog: OpenAIEvalModelCatalog | null
   latest?: OpenAIEvalRun
   progress?: OpenAIEvalRun
@@ -160,6 +178,8 @@ const props = defineProps<{
   unavailableReason?: string
   /** A caveat shown on an available test. */
   notice?: string
+  /** Why a manual run would be refused right now (experimental limits); the run button is disabled. */
+  runBlocked?: string
   /**
    * Shared attempts-per-sample setting. State Probe reads it too, but one
    * attempt there is a whole mint/continue chain, so the server caps it at
@@ -175,7 +195,25 @@ const { t } = useI18n()
 
 const schedule = computed(() => scheduleOf(props.route, props.type))
 const intervals = computed(() => TEST_TYPE_META[props.type].intervals)
-const modes = computed(() => props.catalog?.fingerprint_modes?.length ? props.catalog.fingerprint_modes : [{ id: 'quick', samples: 60 }, { id: 'standard', samples: 200 }, { id: 'strict', samples: 400 }])
+/**
+ * A model outside the detector bank cannot be scored, so automatic fingerprint
+ * cannot be switched on for it. An existing schedule can still be switched
+ * off (the server turns it off on save anyway). Manual runs stay available.
+ */
+const enrollment = computed(() => (props.type === 'fingerprint' ? fingerprintEnrollment(props.route.requested_model, props.catalog) : 'enrolled'))
+const autoLocked = computed(() => enrollment.value === 'not_enrolled' && !schedule.value.enabled)
+const concurrencyChoices = Array.from({ length: FINGERPRINT_MAX_CONCURRENCY - FINGERPRINT_MIN_CONCURRENCY + 1 }, (_, index) => FINGERPRINT_MIN_CONCURRENCY + index)
+const fingerprintConcurrency = computed({
+  get: () => normalizeFingerprintConcurrency(schedule.value.concurrency),
+  set: (value: number) => { schedule.value.concurrency = normalizeFingerprintConcurrency(value) }
+})
+const legacy = computed(() => Boolean(props.latest) && isLegacyRun(props.latest!))
+/** An older server does not publish the bank, so its size is left out rather than shown as a dash. */
+const whatText = computed(() => {
+  const bank = props.catalog?.fingerprint?.models?.length ?? 0
+  const key = props.type === 'fingerprint' && !bank ? 'whatUnknownBank' : 'what'
+  return t(`admin.modelIntegrity.tests.types.${props.type}.${key}`, { count: perRun.value, candidates: bank })
+})
 const perRun = computed(() => requestsPerRun(props.route, props.type, props.catalog))
 const perRunMax = computed(() => maxRequestsPerRun(props.route, props.type, props.maxAttempts ?? DEFAULT_MAX_REQUEST_ATTEMPTS, props.catalog))
 const perRunText = computed(() => {
@@ -266,12 +304,6 @@ function normalize() {
   normalizeSchedule(schedule.value, props.type)
 }
 
-function modeLabel(id: string) {
-  const key = `admin.modelIntegrity.tests.sampleModes.${id}`
-  const text = t(key)
-  return text === key ? id : text
-}
-
 function intervalLabel(seconds: number) {
   const map: Record<number, string> = { 300: 'm5', 600: 'm10', 1800: 'm30', [HOUR]: 'h1', [6 * HOUR]: 'h6', [12 * HOUR]: 'h12', [DAY]: 'h24', [3 * DAY]: 'd3', [7 * DAY]: 'd7' }
   return map[seconds] ? t(`admin.modelIntegrity.tests.interval.${map[seconds]}`) : humanInterval(seconds)
@@ -297,6 +329,8 @@ const formatTime = (value: string) => {
 .tt-what { @apply mt-1 max-w-[62ch] text-[0.8125rem] leading-relaxed text-gray-600 dark:text-gray-400; }
 .tt-unavailable .tt-name { @apply text-gray-500 dark:text-gray-400; }
 .tt-unavailable-note { @apply text-xs text-gray-500 dark:text-gray-400; }
+.tt-unavailable-row { @apply flex flex-wrap items-baseline gap-x-3 gap-y-1; }
+.tt-auto-off { @apply text-xs font-medium text-primary-700 underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 dark:text-primary-300; }
 .tt-notice { @apply mt-2 text-xs leading-relaxed text-gray-600 dark:text-gray-300; }
 .tt-controls { @apply flex flex-wrap items-end gap-3; }
 .tt-switch { @apply flex h-9 cursor-pointer items-center gap-2 pr-2 text-sm text-gray-700 dark:text-gray-300; }
@@ -309,6 +343,12 @@ const formatTime = (value: string) => {
 .tt-cost { @apply flex flex-wrap gap-x-4 gap-y-1 text-xs tabular-nums text-gray-500 dark:text-gray-400; }
 .tt-cost-strong { @apply font-medium text-gray-800 dark:text-gray-200; }
 .tt-link-note { @apply text-xs; }
+.tt-switch-locked { @apply cursor-not-allowed text-gray-400 dark:text-gray-500; }
+.tt-concurrency { @apply min-w-[7.5rem]; }
+.tt-legacy { @apply ml-2 rounded border border-gray-300 px-1 py-px align-middle text-[0.6875rem] font-normal text-gray-600 dark:border-dark-500 dark:text-gray-400; }
+.tt-prompt { @apply text-xs; }
+.tt-prompt-summary { @apply inline-flex cursor-pointer text-gray-500 underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 dark:text-gray-400; }
+.tt-prompt-text { @apply mt-1 max-h-56 overflow-y-auto whitespace-pre-wrap break-words rounded border border-gray-200 bg-gray-50 px-2.5 py-2 text-gray-800 [overflow-wrap:anywhere] dark:border-dark-600 dark:bg-dark-900/50 dark:text-gray-200; }
 .tt-auto-note { @apply text-xs leading-relaxed text-amber-800 dark:text-amber-300; }
 .tt-link { @apply font-medium text-primary-700 underline-offset-2 hover:underline dark:text-primary-300; }
 .tt-progress { @apply rounded-md bg-gray-50 px-3 py-2.5 dark:bg-dark-800/70; }

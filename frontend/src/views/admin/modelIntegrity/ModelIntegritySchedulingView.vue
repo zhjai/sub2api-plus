@@ -134,6 +134,13 @@
                   <Icon name="plus" size="sm" />{{ t('admin.modelIntegrity.scheduling.rules.add') }}
                 </button>
               </div>
+              <div v-if="legacyRuleMerges.length" class="rules-merged" role="status" data-testid="rule-merges">
+                <p class="rules-merged-title">{{ t('admin.modelIntegrity.scheduling.rules.merged.title') }}</p>
+                <ul class="rules-merged-list">
+                  <li v-for="merge in legacyRuleMerges" :key="merge.model" data-testid="rule-merge">{{ legacyMergeText(merge) }}</li>
+                </ul>
+                <p class="rules-merged-hint">{{ t('admin.modelIntegrity.scheduling.rules.merged.hint') }}</p>
+              </div>
               <p v-if="!rules.length" class="rules-empty">{{ t('admin.modelIntegrity.scheduling.rules.empty') }}</p>
               <ul v-else class="rules-list">
                 <li v-for="(rule, index) in rules" :key="index" class="rule-row" :class="{ 'rule-row-off': !isRuleEnabled(rule) }" data-testid="policy-rule">
@@ -148,15 +155,11 @@
                   </div>
                   <label class="rule-field rule-dim">
                     <span class="rule-label">{{ t('admin.modelIntegrity.scheduling.rules.model') }}</span>
-                    <select v-model="rule.requested_model" class="input rule-input">
+                    <select v-model="rule.requested_model" class="input rule-input" data-testid="rule-model">
                       <option value="" disabled>{{ t('admin.modelIntegrity.scheduling.rules.pickModel') }}</option>
                       <option v-for="model in catalog?.items || []" :key="model.id" :value="model.id">{{ model.display_name || model.id }}</option>
-                    </select>
-                  </label>
-                  <label class="rule-field rule-dim">
-                    <span class="rule-label">{{ t('admin.modelIntegrity.scheduling.rules.effort') }}</span>
-                    <select v-model="rule.reasoning_effort" class="input rule-input">
-                      <option v-for="effort in efforts" :key="effort" :value="effort">{{ effort || t('admin.modelIntegrity.common.allEfforts') }}</option>
+                      <!-- Keeps a saved model selectable when the catalog no longer lists it. -->
+                      <option v-if="rule.requested_model && !(catalog?.items || []).some(model => model.id === rule.requested_model)" :value="rule.requested_model">{{ rule.requested_model }}</option>
                     </select>
                   </label>
                   <label class="rule-field rule-dim">
@@ -188,13 +191,13 @@
                     <div v-if="isEditingWeights(rule)" :id="`rule-weights-editor-${index}`" class="space-y-2">
                       <PolicyWeightsEditor
                         v-model="rule.custom_balance"
-                        :legend="t('admin.modelIntegrity.scheduling.rules.weightsFor', { model: rule.requested_model || t('admin.modelIntegrity.scheduling.rules.pickModel'), effort: rule.reasoning_effort || t('admin.modelIntegrity.common.allEfforts') })"
+                        :legend="t('admin.modelIntegrity.scheduling.rules.weightsFor', { model: rule.requested_model || t('admin.modelIntegrity.scheduling.rules.pickModel') })"
                       />
                       <p class="sched-note">{{ t('admin.modelIntegrity.scheduling.rules.weightsHint') }}</p>
                     </div>
                   </div>
                   <p v-if="!isRuleEnabled(rule)" class="rule-off" data-testid="rule-off">{{ t('admin.modelIntegrity.scheduling.rules.off') }}</p>
-                  <p v-if="duplicateRuleIndexes.has(index)" class="rule-error" role="alert">{{ t('admin.modelIntegrity.scheduling.rules.duplicate') }}</p>
+                  <p v-if="duplicateRuleIndexes.has(index)" class="rule-error" role="alert" data-testid="rule-duplicate">{{ t('admin.modelIntegrity.scheduling.rules.duplicate', { model: rule.requested_model }) }}</p>
                 </li>
               </ul>
             </div>
@@ -440,7 +443,7 @@ import groupsAPI from '@/api/admin/groups'
 import type { AdminGroup } from '@/types'
 import { useAppStore } from '@/stores/app'
 import { extractApiErrorMessage } from '@/utils/apiError'
-import { CONDITION_METRICS, CONDITION_OPERATORS, CONDITION_UNITS, CUSTOM_FACTORS, CUSTOM_INTERVAL, DAY, EFFECTIVE_KEYS, HOUR, MAX_INTERVAL_MINUTES, QUALITY_REFRESH_INTERVALS, THRESHOLD_POLICIES, absolutePriorities, accountPriorityRuleIssues, conditionDisplayText, conditionStoredValue, isValidAccountRuleCondition, parseThresholdInput, CONDITION_DEFAULTS, type AccountPriorityRuleIssue, customBalanceIssue, customBalanceIssueKey, invalidThresholdFields,customBalanceShares, effectiveTone as effectiveToneOf, hasNoPositiveWeight, isInactiveStatus, isRuleEnabled, isValidCustomBalance, normalizeCustomBalance, normalizeQualityRefreshInterval, rankingErrorText, rankingTriggerKey, type RankingReadOutcome } from './modelIntegrity'
+import { CONDITION_METRICS, CONDITION_OPERATORS, CONDITION_UNITS, CUSTOM_FACTORS, CUSTOM_INTERVAL, DAY, EFFECTIVE_KEYS, HOUR, MAX_INTERVAL_MINUTES, QUALITY_REFRESH_INTERVALS, THRESHOLD_POLICIES, absolutePriorities, accountPriorityRuleIssues, conditionDisplayText, conditionStoredValue, isValidAccountRuleCondition, parseThresholdInput, CONDITION_DEFAULTS, type AccountPriorityRuleIssue, customBalanceIssue, customBalanceIssueKey, invalidThresholdFields,customBalanceShares, effectiveTone as effectiveToneOf, hasNoPositiveWeight, isInactiveStatus, isRuleEnabled, isValidCustomBalance, normalizeCustomBalance, normalizeQualityRefreshInterval, policyModelKey, rankingErrorText, rankingTriggerKey, type LegacyRuleMerge, type RankingReadOutcome } from './modelIntegrity'
 import { useModelIntegrityConfig } from './useModelIntegrityConfig'
 import { accountRuleModelID } from './modelIntegrity'
 
@@ -465,7 +468,7 @@ function formatDateTime(value: string) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
 }
 const appStore = useAppStore()
-const { config, catalog, accounts, loading, loaded, saving, conflict, dirty, ranking, load, reloadConfig, save, accountName, accountLabel, savedQualityRefreshInterval, savedRules, applyRankingSnapshot, applyRankingSummary, foldedLegacyStability } = useModelIntegrityConfig()
+const { config, catalog, accounts, loading, loaded, saving, conflict, dirty, ranking, load, reloadConfig, save, accountName, accountLabel, savedQualityRefreshInterval, savedRules, legacyRuleMerges, applyRankingSnapshot, applyRankingSummary, foldedLegacyStability } = useModelIntegrityConfig()
 
 const traces = ref<SchedulerDecisionTrace[]>([])
 const tracesLoading = ref(false)
@@ -635,7 +638,6 @@ async function reloadRanking(options: { invalidate?: boolean } = { invalidate: t
 const rules = computed(() => config.policies as OpenAIEvalSchedulingPolicyRule[])
 /** Disabled rules keep their settings but do not apply, so nothing below reads them. */
 const activeRules = computed(() => rules.value.filter(isRuleEnabled))
-const efforts = computed(() => catalog.value?.reasoning_efforts?.length ? catalog.value.reasoning_efforts : [''])
 const usesAvoidDegradation = computed(() => defaultPolicy.value === 'avoid_degradation' || activeRules.value.some(rule => rule.policy === 'avoid_degradation'))
 /** Any saved policy that reads the integrity pass rate. */
 const usesQuality = computed(() => usesAvoidDegradation.value ||
@@ -716,18 +718,39 @@ function weightSummary(rule: OpenAIEvalSchedulingPolicyRule) {
   return t('admin.modelIntegrity.scheduling.policy.custom.priorities.summary', { list, weights })
 }
 
+/**
+ * One rule per model. A disabled rule counts too: the server applies the last
+ * rule for a model, so a disabled copy below an enabled one would switch the
+ * model's rule off. Effort is not part of the key; scheduling has no effort.
+ */
 const duplicateRuleIndexes = computed(() => {
-  const seen = new Map<string, number>()
+  const seen = new Set<string>()
   const duplicates = new Set<number>()
   rules.value.forEach((rule, index) => {
-    // A disabled copy may be kept aside; only enabled rules compete for a model.
-    if (!rule.requested_model || !isRuleEnabled(rule)) return
-    const key = `${rule.requested_model.toLowerCase()}\u0000${(rule.reasoning_effort || '').toLowerCase()}`
+    const key = policyModelKey(rule.requested_model)
+    if (!key) return
     if (seen.has(key)) duplicates.add(index)
-    else seen.set(key, index)
+    else seen.add(key)
   })
   return duplicates
 })
+
+/** States which legacy effort rule now applies to the whole model, and which ones were dropped. */
+function legacyMergeText(merge: LegacyRuleMerge) {
+  const describe = (item: LegacyRuleMerge['kept']) => t('admin.modelIntegrity.scheduling.rules.merged.rule', {
+    effort: item.effort || t('admin.modelIntegrity.common.allEfforts'),
+    policy: t(`admin.modelIntegrity.scheduling.policy.options.${item.policy}.name`),
+    state: item.enabled ? '' : t('admin.modelIntegrity.scheduling.rules.merged.disabled')
+  })
+  const effect = t(`admin.modelIntegrity.scheduling.rules.merged.${merge.kept.enabled ? 'effectOn' : 'effectOff'}`)
+  if (!merge.dropped.length) return t('admin.modelIntegrity.scheduling.rules.merged.cleared', { model: merge.model, rule: describe(merge.kept), effect })
+  return t('admin.modelIntegrity.scheduling.rules.merged.kept', {
+    model: merge.model,
+    rule: describe(merge.kept),
+    effect,
+    dropped: merge.dropped.map(describe).join(t('admin.modelIntegrity.scheduling.rules.merged.join'))
+  })
+}
 
 // -- Account priority rules -------------------------------------------------
 type AccountRuleScope = 'all' | 'some'
@@ -828,7 +851,7 @@ function accountRuleIssueText(rule: OpenAIEvalAccountPriorityRule | undefined, i
 }
 
 function addRule() {
-  rules.value.push({ requested_model: '', reasoning_effort: '', policy: 'stability_first', enabled: true })
+  rules.value.push({ requested_model: '', policy: 'stability_first', enabled: true })
 }
 
 async function loadTraces() {
@@ -874,7 +897,8 @@ const tracesScope = computed(() => {
 
 async function handleSave() {
   if (duplicateRuleIndexes.value.size || rules.value.some(rule => !rule.requested_model)) {
-    appStore.showError(rules.value.some(rule => !rule.requested_model) ? t('admin.modelIntegrity.scheduling.rules.pickModel') : t('admin.modelIntegrity.scheduling.rules.duplicate'))
+    const duplicate = rules.value[[...duplicateRuleIndexes.value][0] ?? -1]
+    appStore.showError(rules.value.some(rule => !rule.requested_model) ? t('admin.modelIntegrity.scheduling.rules.pickModel') : t('admin.modelIntegrity.scheduling.rules.duplicate', { model: duplicate?.requested_model ?? '' }))
     return
   }
   // The server rejects the whole save on any of these, so stop and point at the row.
@@ -993,15 +1017,19 @@ onMounted(initialLoad)
 .rules { @apply space-y-3 border-t border-gray-100 pt-5 dark:border-dark-700; }
 .rules-head { @apply flex flex-wrap items-start justify-between gap-3; }
 .rules-empty { @apply text-sm text-gray-500 dark:text-gray-400; }
+.rules-merged { @apply max-w-[80ch] space-y-1.5 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-800/70 dark:bg-amber-950/30 dark:text-amber-200; }
+.rules-merged-title { @apply font-medium; }
+.rules-merged-list { @apply list-disc space-y-0.5 pl-5 text-[0.8125rem] leading-relaxed; }
+.rules-merged-hint { @apply text-xs leading-relaxed text-amber-800 dark:text-amber-300; }
 .rules-list { @apply space-y-2; }
-.rule-row { @apply grid items-end gap-2 rounded-lg border border-transparent bg-gray-50 p-3 dark:bg-dark-900/50 sm:grid-cols-[auto_minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)_2.25rem]; }
+.rule-row { @apply grid items-end gap-2 rounded-lg border border-transparent bg-gray-50 p-3 dark:bg-dark-900/50 sm:grid-cols-[auto_minmax(0,1.4fr)_minmax(0,1fr)_2.25rem]; }
 .account-rule-row { @apply sm:grid-cols-[auto_minmax(0,1.6fr)_minmax(0,0.7fr)_minmax(0,1fr)_2.25rem]; }
 /* A switched-off rule keeps its values readable but visibly out of force. */
 .rule-row-off { @apply border border-dashed border-gray-300 bg-transparent dark:border-dark-600; }
 .rule-row-off .rule-dim { @apply opacity-60; }
 .rule-switch { @apply flex-row items-center gap-2 sm:h-full sm:flex-col sm:items-start sm:justify-end sm:gap-1; }
 .rule-switch :deep(button) { @apply my-1.5; }
-.rule-off { @apply text-xs text-gray-500 dark:text-gray-400 sm:col-span-5; }
+.rule-off { @apply text-xs text-gray-500 dark:text-gray-400 sm:col-span-full; }
 .rule-models { @apply flex min-w-0 flex-wrap gap-2 border-t border-gray-200 pt-3 dark:border-dark-700 sm:col-span-5; }
 .rule-models legend { @apply float-left mb-1 w-full; }
 .model-chip { @apply inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-gray-200 bg-white px-2 py-1 text-xs text-gray-700 has-[:checked]:border-primary-400 has-[:checked]:bg-primary-50 has-[:checked]:text-primary-900 has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-primary-500 dark:border-dark-600 dark:bg-dark-800 dark:text-gray-300 dark:has-[:checked]:border-primary-500 dark:has-[:checked]:bg-primary-950/40 dark:has-[:checked]:text-primary-100; }
@@ -1021,8 +1049,8 @@ onMounted(initialLoad)
 .rule-label { @apply text-xs text-gray-500 dark:text-gray-400; }
 .rule-input { @apply h-9 py-1 text-sm; }
 .rule-remove { @apply inline-flex h-9 w-9 items-center justify-center rounded-md text-gray-400 hover:bg-rose-50 hover:text-rose-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 dark:hover:bg-rose-950/40; }
-.rule-error { @apply text-xs text-rose-700 dark:text-rose-300 sm:col-span-5; }
-.rule-weights { @apply min-w-0 space-y-3 border-t border-gray-200 pt-3 dark:border-dark-700 sm:col-span-5; }
+.rule-error { @apply text-xs text-rose-700 dark:text-rose-300 sm:col-span-full; }
+.rule-weights { @apply min-w-0 space-y-3 border-t border-gray-200 pt-3 dark:border-dark-700 sm:col-span-full; }
 .rule-weights-head { @apply flex flex-wrap items-center justify-between gap-2; }
 .rule-weights-summary { @apply flex min-w-0 flex-wrap items-baseline gap-x-2 text-xs tabular-nums text-gray-600 dark:text-gray-300; }
 .rule-weights-invalid { @apply text-rose-700 dark:text-rose-300; }

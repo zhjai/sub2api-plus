@@ -399,7 +399,7 @@ func (r *OpenAIEvalRankingService) build(ctx context.Context, cfg *OpenAIEvalCon
 			continue
 		}
 		for _, model := range sortedRankingKeys(scope.models) {
-			for _, effort := range []string{"", "minimal", "low", "medium", "high", "xhigh", "max"} {
+			for _, effort := range []string{""} {
 				if err := ctx.Err(); err != nil {
 					return nil, err
 				}

@@ -92,7 +92,7 @@ func (s *OpenAIGatewayService) BeginOpenAIWSIngressSessionPreemptionWithClient(
 			_ = clientConn.Close(coderws.StatusTryAgainLater, openAIWSSessionPreemptedCloseReason)
 		}
 	}
-	if s != nil && s.cfg != nil && s.cfg.Gateway.OpenAIWS.ModeRouterV2Enabled && account != nil {
+	if s != nil && s.cfg != nil && s.cfg.OpenAIWSModeRouterV2Enabled() && account != nil {
 		switch account.ResolveOpenAIResponsesWebSocketV2Mode(s.cfg.Gateway.OpenAIWS.IngressModeDefault) {
 		case OpenAIWSIngressModePassthrough, OpenAIWSIngressModeHTTPBridge:
 			// These modes own their upstream transport and replay state per

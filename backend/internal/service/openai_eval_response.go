@@ -23,6 +23,48 @@ const openAIEvalResponseLimit = 2 << 20
 const openAIEvalAnswerLimit = 16000
 const openAIEvalErrorLimit = 1000
 
+// Context hooks are consumed by the single-send transport and Codex builder.
+type openAIEvalInstructionsKey struct{}
+type openAIEvalKindKey struct{}
+type openAIEvalAcceptKey struct{}
+
+func withOpenAIEvalInstructions(ctx context.Context, instructions string) context.Context {
+	return context.WithValue(ctx, openAIEvalInstructionsKey{}, instructions)
+}
+func openAIEvalInstructionsFor(ctx context.Context) string {
+	instructions, _ := ctx.Value(openAIEvalInstructionsKey{}).(string)
+	return instructions
+}
+func withOpenAIEvalKind(ctx context.Context, kind string) context.Context {
+	return context.WithValue(ctx, openAIEvalKindKey{}, kind)
+}
+func openAIEvalAttemptTimeoutFor(ctx context.Context) time.Duration {
+	switch ctx.Value(openAIEvalKindKey{}) {
+	case OpenAIEvalTypeCandy, OpenAIEvalTypePelican:
+		return 10 * time.Minute
+	default:
+		return 3 * time.Minute
+	}
+}
+func openAIEvalResponseLimitFor(ctx context.Context) int {
+	if ctx.Value(openAIEvalKindKey{}) == OpenAIEvalTypePelican {
+		return 8 << 20
+	}
+	return openAIEvalResponseLimit
+}
+
+// Executable page markup must reach cpaeval.Page unchanged. It is never
+// included in the public run DTO; the isolated artifact endpoint serves it.
+func openAIEvalSampleTextFor(ctx context.Context, text string, secrets ...string) string {
+	if ctx.Value(openAIEvalKindKey{}) == OpenAIEvalTypePelican || ctx.Value(openAIEvalKindKey{}) == OpenAIEvalTypeFingerprint {
+		return text
+	}
+	return sanitizeOpenAIEvalText(text, openAIEvalAnswerLimitFor(ctx), secrets...)
+}
+func withOpenAIEvalAccept(ctx context.Context, accept func(string) error) context.Context {
+	return context.WithValue(ctx, openAIEvalAcceptKey{}, accept)
+}
+
 type openAIEvalFullCandyAnswerKey struct{}
 
 func withOpenAIEvalFullCandyAnswer(ctx context.Context) context.Context {
@@ -30,6 +72,12 @@ func withOpenAIEvalFullCandyAnswer(ctx context.Context) context.Context {
 }
 
 func openAIEvalAnswerLimitFor(ctx context.Context) int {
+	if ctx != nil && ctx.Value(openAIEvalKindKey{}) == OpenAIEvalTypeFingerprint {
+		return 64000
+	}
+	if ctx != nil && ctx.Value(openAIEvalKindKey{}) == OpenAIEvalTypePelican {
+		return 8 << 20
+	}
 	if ctx != nil && ctx.Value(openAIEvalFullCandyAnswerKey{}) == true {
 		// Keep the whole accepted Candy reply for the collapsed annotation.
 		// The wire parser still rejects responses exceeding its existing bound.
@@ -276,8 +324,9 @@ func readOpenAIEvalResponse(ctx context.Context, resp *http.Response, requireSSE
 			failure.RetryAfter = openAIEvalRetryAfter(resp.Header, time.Now())
 		}
 	}()
+	responseLimit := openAIEvalResponseLimitFor(ctx)
 	result := &OpenAIEvalSampleResponse{HTTPStatus: resp.StatusCode}
-	limited := &io.LimitedReader{R: resp.Body, N: openAIEvalResponseLimit + 1}
+	limited := &io.LimitedReader{R: resp.Body, N: int64(responseLimit) + 1}
 	reader := bufio.NewReader(limited)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, err := io.ReadAll(reader)
@@ -357,7 +406,7 @@ func readOpenAIEvalResponse(ctx context.Context, resp *http.Response, requireSSE
 			return result, openAIEvalIOError(ctx, err, resp.StatusCode)
 		}
 		if limited.N == 0 {
-			return result, newOpenAIEvalRequestError("response_too_large", "response exceeded 2 MiB", resp.StatusCode)
+			return result, newOpenAIEvalRequestError("response_too_large", fmt.Sprintf("response exceeded %d bytes", responseLimit), resp.StatusCode)
 		}
 		var wire openAIEvalWireResponse
 		if json.Unmarshal(body, &wire) != nil {
@@ -366,7 +415,7 @@ func readOpenAIEvalResponse(ctx context.Context, resp *http.Response, requireSSE
 		return complete(&wire, wire.Status, "", "")
 	}
 	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 4096), openAIEvalResponseLimit+1)
+	scanner.Buffer(make([]byte, 4096), responseLimit+1)
 	var data, delta, refusal strings.Builder
 	eventName := ""
 	dispatch := func() (bool, error) {
@@ -430,7 +479,7 @@ func readOpenAIEvalResponse(ctx context.Context, resp *http.Response, requireSSE
 			return result, openAIEvalIOError(ctx, ctx.Err(), resp.StatusCode)
 		}
 		if limited.N == 0 {
-			return result, newOpenAIEvalRequestError("response_too_large", "stream exceeded 2 MiB", resp.StatusCode)
+			return result, newOpenAIEvalRequestError("response_too_large", fmt.Sprintf("stream exceeded %d bytes", responseLimit), resp.StatusCode)
 		}
 		line := scanner.Text()
 		if line == "" {
@@ -452,7 +501,7 @@ func readOpenAIEvalResponse(ctx context.Context, resp *http.Response, requireSSE
 		return result, openAIEvalIOError(ctx, ctx.Err(), resp.StatusCode)
 	}
 	if limited.N == 0 {
-		return result, newOpenAIEvalRequestError("response_too_large", "stream exceeded 2 MiB", resp.StatusCode)
+		return result, newOpenAIEvalRequestError("response_too_large", fmt.Sprintf("stream exceeded %d bytes", responseLimit), resp.StatusCode)
 	}
 	if err := scanner.Err(); err != nil {
 		return result, openAIEvalIOError(ctx, err, resp.StatusCode)
@@ -481,14 +530,37 @@ func (s *AccountTestService) RunOpenAIEvalSampleAttempts(ctx context.Context, ta
 			break
 		}
 		result, err = s.RunOpenAIEvalSample(ctx, target, prompt, effort)
+		if err == nil {
+			if accept, ok := ctx.Value(openAIEvalAcceptKey{}).(func(string) error); ok && result != nil {
+				if acceptErr := accept(result.Text); acceptErr != nil {
+					code := "invalid_fingerprint_answer"
+					if ctx.Value(openAIEvalKindKey{}) == OpenAIEvalTypePelican {
+						code = "invalid_pelican_page"
+					}
+					err = &OpenAIEvalRequestError{Code: code, Message: acceptErr.Error(), Attempted: true, Retryable: true, HTTPStatus: result.HTTPStatus}
+				}
+			}
+		}
 		var failure *OpenAIEvalRequestError
+		if errors.As(err, &failure) && failure.Attempted && failure.HTTPStatus >= 200 && failure.HTTPStatus < 300 && failure.Code != "cancelled" {
+			switch ctx.Value(openAIEvalKindKey{}) {
+			case OpenAIEvalTypeCandy, OpenAIEvalTypeFingerprint, OpenAIEvalTypePelican:
+				// CPA retries failures after a successful HTTP admission, including
+				// broken streams, incomplete responses and missing direct text.
+				copy := *failure
+				copy.Retryable = true
+				failure, err = &copy, &copy
+			}
+		}
 		if err == nil || (errors.As(err, &failure) && failure.Attempted) {
 			record.Attempts++
 		}
 		if result != nil {
 			inputTokens += result.InputTokens
 			outputTokens += result.OutputTokens
-			record.Answer = sanitizeOpenAIEvalText(result.Text, openAIEvalAnswerLimitFor(ctx))
+			if ctx.Value(openAIEvalKindKey{}) != OpenAIEvalTypePelican {
+				record.Answer = sanitizeOpenAIEvalText(result.Text, openAIEvalAnswerLimitFor(ctx))
+			}
 			record.HTTPStatus = result.HTTPStatus
 		}
 		if err == nil {

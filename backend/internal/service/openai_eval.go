@@ -20,11 +20,13 @@ import (
 	"unicode"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
+	"github.com/Wei-Shaw/sub2api/internal/service/cpaeval"
 )
 
 var ErrOpenAIEvalConfigRevisionConflict = errors.New("OpenAI evaluation config revision conflict")
 
 const (
+	OpenAIEvalTypePelican     = "pelican"
 	OpenAIEvalTypeCandy       = "candy"
 	OpenAIEvalTypeFingerprint = "fingerprint"
 	OpenAIEvalTypeModelTrace  = "modeltrace"
@@ -98,18 +100,20 @@ func mustDecodeOpenAIEvalJSON[T any](data []byte) T {
 // OpenAIEvalOutcome is a route-scoped diagnostic. Fingerprint identity
 // evidence is intentionally separate from capability outcomes.
 type OpenAIEvalOutcome struct {
-	RequestProfile string                       `json:"request_profile,omitempty"`
-	Status         string                       `json:"status"`
-	Reason         string                       `json:"reason,omitempty"`
-	Score          float64                      `json:"score,omitempty"`
-	SampleCount    int                          `json:"sample_count"`
-	ExpectedCount  int                          `json:"expected_count"`
-	Confidence     string                       `json:"confidence"`
-	Scheduling     string                       `json:"scheduling"`
-	Attribution    *OpenAIEvalAttributionPolicy `json:"attribution,omitempty"`
-	Fingerprint    *OpenAIEvalFingerprintResult `json:"fingerprint,omitempty"`
-	ModelTrace     *OpenAIEvalModelTraceResult  `json:"modeltrace,omitempty"`
-	StateProbe     *OpenAIStateProbeResult      `json:"state_probe,omitempty"`
+	LMFingerprint  *OpenAIEvalLMFingerprintResult `json:"lm_fingerprint,omitempty"`
+	Pelican        *OpenAIEvalPelicanResult       `json:"pelican,omitempty"`
+	RequestProfile string                         `json:"request_profile,omitempty"`
+	Status         string                         `json:"status"`
+	Reason         string                         `json:"reason,omitempty"`
+	Score          float64                        `json:"score,omitempty"`
+	SampleCount    int                            `json:"sample_count"`
+	ExpectedCount  int                            `json:"expected_count"`
+	Confidence     string                         `json:"confidence"`
+	Scheduling     string                         `json:"scheduling"`
+	Attribution    *OpenAIEvalAttributionPolicy   `json:"attribution,omitempty"`
+	Fingerprint    *OpenAIEvalFingerprintResult   `json:"fingerprint,omitempty"`
+	ModelTrace     *OpenAIEvalModelTraceResult    `json:"modeltrace,omitempty"`
+	StateProbe     *OpenAIStateProbeResult        `json:"state_probe,omitempty"`
 }
 
 // Raw verdict metadata survives reinterpretation of historical evidence.
@@ -120,8 +124,8 @@ type OpenAIEvalAttributionPolicy struct {
 	OriginalReason      string `json:"original_reason,omitempty"`
 }
 
-// OpenAIEvalRouteHealth is scoped to account + public requested model +
-// reasoning effort. It is not an account-wide model-quality verdict.
+// OpenAIEvalRouteHealth is scoped to account + public requested model.
+// ReasoningEffort is retained only when reading legacy persisted state.
 type OpenAIEvalRouteHealth struct {
 	AccountID         int64     `json:"account_id"`
 	RequestedModel    string    `json:"requested_model"`
@@ -213,8 +217,7 @@ func OpenAIEvalSchedulingPolicyForRequest(model, effort string) string {
 }
 
 // OpenAIEvalCustomBalanceForRequest returns the normalized custom weights for
-// a model/effort route. It is intentionally read-only and follows the same
-// most-specific rule resolution as OpenAIEvalSchedulingPolicyFor.
+// a model. It follows the same last-rule resolution as OpenAIEvalSchedulingPolicyFor.
 func OpenAIEvalCustomBalanceForRequest(model, effort string) (OpenAIEvalPolicyWeights, bool) {
 	value := openAIEvalSchedulingPolicy.Load()
 	snapshot, _ := value.(*openAIEvalSchedulingPolicySnapshot)
@@ -226,22 +229,7 @@ func OpenAIEvalCustomBalanceForRequest(model, effort string) (OpenAIEvalPolicyWe
 		return OpenAIEvalPolicyWeights{}, false
 	}
 	weights := snapshot.CustomBalance
-	model = strings.ToLower(strings.TrimSpace(model))
-	effort = strings.ToLower(strings.TrimSpace(effort))
-	for _, rule := range snapshot.Rules {
-		if rule.Enabled != nil && !*rule.Enabled {
-			continue
-		}
-		if rule.CustomBalance == nil || !strings.EqualFold(strings.TrimSpace(rule.RequestedModel), model) {
-			continue
-		}
-		if strings.TrimSpace(rule.ReasoningEffort) != "" && !strings.EqualFold(strings.TrimSpace(rule.ReasoningEffort), effort) {
-			continue
-		}
-		if strings.TrimSpace(rule.ReasoningEffort) != "" {
-			weights = *rule.CustomBalance
-			break
-		}
+	if rule := openAIEvalModelPolicyRule(&OpenAIEvalConfig{Policies: snapshot.Rules}, model); rule != nil && rule.CustomBalance != nil {
 		weights = *rule.CustomBalance
 	}
 	normalized, err := normalizeOpenAIEvalPolicyWeights(weights)
@@ -252,7 +240,7 @@ func OpenAIEvalCustomBalanceForRequest(model, effort string) (OpenAIEvalPolicyWe
 }
 
 func OpenAIEvalRouteHealthKey(model, effort string) string {
-	return strings.ToLower(strings.TrimSpace(model)) + "\x00" + strings.ToLower(strings.TrimSpace(effort))
+	return openAIEvalQualityDimension(model)
 }
 
 func normalizeOpenAIEvalSchedulingPolicy(policy string) (string, error) {
@@ -302,46 +290,26 @@ func normalizeOpenAIEvalPolicyWeights(weights OpenAIEvalPolicyWeights) (OpenAIEv
 	}, nil
 }
 
-// OpenAIEvalSchedulingPolicyFor resolves the most specific configured rule.
-// It is intentionally a pure helper so the scheduler and admin preview can
-// share exactly the same model/effort matching semantics.
+// OpenAIEvalSchedulingPolicyFor shares model-only matching between dispatch and preview.
 func OpenAIEvalSchedulingPolicyFor(config *OpenAIEvalConfig, model, effort string) string {
 	if config == nil {
 		return OpenAIEvalSchedulingPolicyLegacy
 	}
-	model = strings.ToLower(strings.TrimSpace(model))
-	effort = strings.ToLower(strings.TrimSpace(effort))
-	policy := strings.ToLower(strings.TrimSpace(config.SchedulingPolicy))
-	if normalized, err := normalizeOpenAIEvalSchedulingPolicy(policy); err == nil {
-		policy = normalized
-	} else {
+	policy, err := normalizeOpenAIEvalSchedulingPolicy(config.SchedulingPolicy)
+	if err != nil {
 		policy = OpenAIEvalSchedulingPolicyLegacy
 	}
-	for _, rule := range config.Policies {
-		if rule.Enabled != nil && !*rule.Enabled {
-			continue
+	if rule := openAIEvalModelPolicyRule(config, model); rule != nil {
+		if normalized, err := normalizeOpenAIEvalSchedulingPolicy(rule.Policy); err == nil && normalized != "" {
+			policy = normalized
 		}
-		if !strings.EqualFold(strings.TrimSpace(rule.RequestedModel), model) {
-			continue
-		}
-		if strings.TrimSpace(rule.ReasoningEffort) != "" && !strings.EqualFold(strings.TrimSpace(rule.ReasoningEffort), effort) {
-			continue
-		}
-		normalized, err := normalizeOpenAIEvalSchedulingPolicy(rule.Policy)
-		if err != nil || normalized == "" {
-			continue
-		}
-		if strings.TrimSpace(rule.ReasoningEffort) != "" {
-			return normalized
-		}
-		policy = normalized
 	}
 	return policy
 }
 
 func OpenAIEvalRouteHealthExtraKeyFor(model, effort string) string {
 	digest := sha256.Sum256([]byte(OpenAIEvalRouteHealthKey(model, effort)))
-	return "openai_eval_route_health_" + hex.EncodeToString(digest[:8])
+	return "openai_eval_route_health_model_" + hex.EncodeToString(digest[:8])
 }
 
 // readOpenAIEvalRouteHealthStateFromAccount returns the persisted state even
@@ -352,19 +320,31 @@ func readOpenAIEvalRouteHealthStateFromAccount(account *Account, model, effort s
 	if account == nil || account.Extra == nil {
 		return OpenAIEvalRouteHealth{}, false
 	}
-	value, ok := account.Extra[OpenAIEvalRouteHealthExtraKeyFor(model, effort)]
-	if !ok {
-		return OpenAIEvalRouteHealth{}, false
+	decode := func(value any) (OpenAIEvalRouteHealth, bool) {
+		encoded, err := json.Marshal(value)
+		var health OpenAIEvalRouteHealth
+		if err != nil || json.Unmarshal(encoded, &health) != nil || health.UpdatedAt.IsZero() || health.AccountID != account.ID || openAIEvalQualityDimension(health.RequestedModel) != openAIEvalQualityDimension(model) {
+			return health, false
+		}
+		return health, true
 	}
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return OpenAIEvalRouteHealth{}, false
+	// A canonical recovery must not be overwritten by a legacy effort penalty.
+	if value, exists := account.Extra[OpenAIEvalRouteHealthExtraKeyFor(model, "")]; exists {
+		return decode(value)
 	}
-	var health OpenAIEvalRouteHealth
-	if json.Unmarshal(encoded, &health) != nil || health.UpdatedAt.IsZero() {
-		return OpenAIEvalRouteHealth{}, false
+	var selected OpenAIEvalRouteHealth
+	found := false
+	selectedKey := ""
+	for key, value := range account.Extra {
+		if !strings.HasPrefix(key, "openai_eval_route_health_") || strings.HasPrefix(key, "openai_eval_route_health_model_") {
+			continue
+		}
+		health, ok := decode(value)
+		if ok && (!found || health.UpdatedAt.After(selected.UpdatedAt) || (health.UpdatedAt.Equal(selected.UpdatedAt) && key > selectedKey)) {
+			selected, selectedKey, found = health, key, true
+		}
 	}
-	return health, true
+	return selected, found
 }
 
 func ReadOpenAIEvalRouteHealthFromAccount(account *Account, model, effort string, now time.Time) (OpenAIEvalRouteHealth, bool) {
@@ -379,6 +359,7 @@ func ReadOpenAIEvalRouteHealthFromAccount(account *Account, model, effort string
 }
 
 type OpenAIEvalRun struct {
+	PelicanHTML      string                   `json:"-"`
 	DiagnosticOnly   bool                     `json:"diagnostic_only,omitempty"`
 	Protocol         string                   `json:"protocol,omitempty"`
 	ID               int64                    `json:"id"`
@@ -436,6 +417,7 @@ type OpenAIEvalRunFilter struct {
 }
 
 type OpenAIEvalScheduledRun struct {
+	Concurrency     int
 	ClaimOwner      string
 	ClaimedAt       time.Time
 	AccountID       int64
@@ -482,6 +464,7 @@ type OpenAIEvalCompletionRepository interface {
 }
 
 type OpenAIEvalSchedule struct {
+	Concurrency     int        `json:"concurrency,omitempty"`
 	Enabled         bool       `json:"enabled"`
 	IntervalSeconds int        `json:"interval_seconds"`
 	JitterSeconds   int        `json:"jitter_seconds"`
@@ -580,6 +563,7 @@ func openAIEvalRankingUsesQuality(policy string, weights OpenAIEvalRankingWeight
 }
 
 type OpenAIEvalConfig struct {
+	Warnings                      []string                        `json:"warnings,omitempty"`
 	BackgroundControls            []OpenAIEvalBackgroundControl   `json:"background_controls"`
 	AccountPriorityRules          []OpenAIEvalAccountPriorityRule `json:"account_priority_rules,omitempty"`
 	QualityRefreshIntervalSeconds int                             `json:"quality_refresh_interval_seconds"`
@@ -598,8 +582,7 @@ type OpenAIEvalConfig struct {
 }
 
 // OpenAIEvalSchedulingPolicyRule scopes a policy to the requested public
-// model and, optionally, reasoning effort.  An empty effort is the model
-// default.  More specific effort rules win at read time.
+// model. ReasoningEffort is accepted only for legacy configuration migration.
 type OpenAIEvalSchedulingPolicyRule struct {
 	RequestedModel  string `json:"requested_model"`
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
@@ -713,14 +696,8 @@ type OpenAIEvalSampleResponse struct {
 	Model        string
 }
 
-// Exact candyPrompt from cpa-plugin-codex-candy-eval commit
-// 976239690451849223c2174ffdd08681019753d1. Never add the expected answer.
-var OpenAIEvalCandyPrompt = `在一个黑色的袋子里放有三种口味的糖果，每种糖果有两种不同的形状（圆形和五角星形，不同的形状靠手感可以分辨）。现已知不同口味的糖和不同形状的数量统计如下表。参赛者需要在活动前决定摸出的糖果数目，那么，最少取出多少个糖果才能保证手中同时拥有不同形状的苹果味和桃子味的糖？（同时手中有圆形苹果味匹配五角星桃子味糖果，或者有圆形桃子味匹配五角星苹果味糖果都满足要求）
-
-        苹果味  桃子味  西瓜味
-圆形       7      9      8
-五角星形   7      6      4
-`
+// Exact prompt from the pinned CPA release.
+const OpenAIEvalCandyPrompt = cpaeval.CandyPrompt
 
 // Kept as a legacy API name for callers that identify the pinned Candy probe.
 // It must never diverge from OpenAIEvalCandyPrompt.
@@ -748,30 +725,12 @@ func isOpenAIEvalSupportedModel(modelID string) bool {
 	return false
 }
 
+// Legacy sample_mode is accepted and ignored by the new three-challenge detector.
 func OpenAIEvalFingerprintSampleCount(mode string) (int, error) {
-	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "quick":
-		return OpenAIEvalFingerprintQuickSamples, nil
-	case "standard":
-		return OpenAIEvalFingerprintStandardSamples, nil
-	case "strict":
-		return OpenAIEvalFingerprintStrictSamples, nil
-	default:
-		return 0, fmt.Errorf("unsupported fingerprint mode %q", mode)
-	}
+	return cpaeval.FingerprintTarget, nil
 }
-
 func OpenAIEvalFingerprintPlan(mode string) (cells, repeats int, err error) {
-	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "quick":
-		return openAIEvalFingerprintQuickCells, openAIEvalFingerprintQuickRepeats, nil
-	case "standard":
-		return openAIEvalFingerprintStandardCells, openAIEvalFingerprintStandardRepeats, nil
-	case "strict":
-		return openAIEvalFingerprintStrictCells, openAIEvalFingerprintStrictRepeats, nil
-	default:
-		return 0, 0, fmt.Errorf("unsupported fingerprint mode %q", mode)
-	}
+	return cpaeval.FingerprintTarget, 1, nil
 }
 
 func OpenAIEvalFingerprintCostEstimate(samples int, inputTokensPerRequest int, inputPricePerMillion float64) float64 {
@@ -782,7 +741,7 @@ func OpenAIEvalFingerprintCostEstimate(samples int, inputTokensPerRequest int, i
 }
 
 func ScoreOpenAIEvalCandy(answer string) OpenAIEvalOutcome {
-	if value, ok := leadingOpenAIEvalCandyAnswer(answer); ok && value == OpenAIEvalCandyExpectedAnswer {
+	if cpaeval.HasStandalone21(answer) {
 		return OpenAIEvalOutcome{Status: "pass", Reason: "correct_answer", Score: 1, SampleCount: 1, ExpectedCount: 1, Confidence: "low", Scheduling: "neutral"}
 	}
 	return OpenAIEvalOutcome{Status: "warning", Reason: "single_public_item_failed", Score: 0, SampleCount: 1, ExpectedCount: 1, Confidence: "low", Scheduling: "alert_only"}
@@ -1264,7 +1223,7 @@ func OpenAIEvalSchedulingDisposition(testType string, outcome OpenAIEvalOutcome,
 	if !globalEnabled {
 		return "disabled"
 	}
-	if strings.EqualFold(testType, OpenAIEvalTypeFingerprint) || strings.EqualFold(testType, OpenAIEvalTypeCandy) || strings.EqualFold(testType, OpenAIEvalTypeModelTrace) || strings.EqualFold(testType, OpenAIEvalTypeStateProbe) {
+	if strings.EqualFold(testType, OpenAIEvalTypeFingerprint) || strings.EqualFold(testType, OpenAIEvalTypeCandy) || strings.EqualFold(testType, OpenAIEvalTypeModelTrace) || strings.EqualFold(testType, OpenAIEvalTypeStateProbe) || strings.EqualFold(testType, OpenAIEvalTypePelican) {
 		return "alert_only"
 	}
 	if outcome.Status == "fail" && outcome.Confidence == "high" {
@@ -1278,11 +1237,37 @@ func OpenAIEvalSchedulingDisposition(testType string, outcome OpenAIEvalOutcome,
 // and Fingerprint outcomes are intentionally excluded because they are low
 // confidence and/or identity evidence, not a capability verdict.
 func OpenAIEvalRoutePenalty(testType string, outcome OpenAIEvalOutcome, globalEnabled bool) float64 {
-	if !globalEnabled || strings.EqualFold(testType, OpenAIEvalTypeCandy) || strings.EqualFold(testType, OpenAIEvalTypeFingerprint) || strings.EqualFold(testType, OpenAIEvalTypeModelTrace) || strings.EqualFold(testType, OpenAIEvalTypeStateProbe) {
+	if !globalEnabled || strings.EqualFold(testType, OpenAIEvalTypeCandy) || strings.EqualFold(testType, OpenAIEvalTypeFingerprint) || strings.EqualFold(testType, OpenAIEvalTypeModelTrace) || strings.EqualFold(testType, OpenAIEvalTypeStateProbe) || strings.EqualFold(testType, OpenAIEvalTypePelican) {
 		return 0
 	}
 	if outcome.Status == "fail" && strings.EqualFold(outcome.Confidence, "high") && outcome.SampleCount >= outcome.ExpectedCount && outcome.ExpectedCount > 0 {
 		return 1
 	}
 	return 0
+}
+
+// New detector evidence is separate from the read-only legacy DTOs above.
+type OpenAIEvalLMFingerprintResult struct {
+	DetectorRevision string                          `json:"detector_revision"`
+	CollectionStatus string                          `json:"collection_status"`
+	Concurrency      int                             `json:"concurrency"`
+	ComparedAs       string                          `json:"compared_as"`
+	Enrolled         bool                            `json:"enrolled"`
+	RequestEffort    string                          `json:"request_effort"`
+	Samples          []OpenAIEvalLMFingerprintSample `json:"samples"`
+	Attribution      cpaeval.FingerprintAttribution  `json:"attribution"`
+}
+type OpenAIEvalLMFingerprintSample struct {
+	cpaeval.FingerprintChallenge
+	Attempts      int    `json:"attempts"`
+	Text          string `json:"text,omitempty"`
+	Error         string `json:"error,omitempty"`
+	ParsedNumbers int    `json:"parsed_numbers"`
+	Accepted      bool   `json:"accepted"`
+}
+type OpenAIEvalPelicanResult struct {
+	Variant    string `json:"variant"`
+	Attempts   int    `json:"attempts"`
+	HTMLBytes  int    `json:"html_bytes"`
+	HTMLSHA256 string `json:"html_sha256"`
 }

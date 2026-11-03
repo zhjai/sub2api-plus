@@ -182,6 +182,21 @@ func r11RequireFrames(t *testing.T, ctx context.Context, conn *coderws.Conn, eve
 			require.GreaterOrEqual(t, number, int64(0))
 			delete(actualFields, "sequence_number")
 		}
+		// Official response normalization supplies a missing response timestamp.
+		// Validate that additive metadata while still comparing all stream data,
+		// IDs and output, so rejected-attempt frames cannot pass this check.
+		if response, exists := actualFields["response"]; exists && !gjson.Get(expected, "response.created_at").Exists() {
+			var fields map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(response, &fields))
+			if timestamp, exists := fields["created_at"]; exists {
+				var seconds int64
+				require.NoError(t, json.Unmarshal(timestamp, &seconds))
+				require.Positive(t, seconds)
+				delete(fields, "created_at")
+				actualFields["response"], err = json.Marshal(fields)
+				require.NoError(t, err)
+			}
+		}
 		actual, err := json.Marshal(actualFields)
 		require.NoError(t, err)
 		require.JSONEq(t, expected, string(actual), "client frame %d; no rejected-attempt frame may be delivered", i)

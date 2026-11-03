@@ -9,7 +9,7 @@ import (
 )
 
 func TestOpenAIEvalQualityCountsFromRunIgnorePhysicalRetries(t *testing.T) {
-	run := &OpenAIEvalRun{TestType: OpenAIEvalTypeCandy, Status: "warning", RequestCount: 9,
+	run := &OpenAIEvalRun{DataVersion: OpenAIEvalQualityDataVersion, TestType: OpenAIEvalTypeCandy, Status: "warning", RequestCount: 9,
 		Samples: []OpenAIEvalSampleRecord{
 			{Valid: true, Answer: "21", Attempts: 3, AttemptErrors: []OpenAIEvalAttemptError{{Code: "server_error"}}},
 			{Valid: true, Answer: "29", Attempts: 3},
@@ -29,13 +29,13 @@ func TestOpenAIEvalQualityCountsFromRunIgnorePhysicalRetries(t *testing.T) {
 func TestOpenAIEvalQualityCountsFromRunIdentityAndStateProbe(t *testing.T) {
 	run := &OpenAIEvalRun{TestType: OpenAIEvalTypeFingerprint, Status: "suspected_normal",
 		Outcome: OpenAIEvalOutcome{Fingerprint: &OpenAIEvalFingerprintResult{NearestModel: "gpt-6.1-sol", ValidSamples: 60}}}
-	require.Equal(t, OpenAIEvalQualityCounts{60, 0, 60}, openAIEvalQualityCountsFromRun(run))
+	require.Zero(t, openAIEvalQualityCountsFromRun(run), "legacy fingerprints remain history only")
 	run.Status, run.Outcome.Fingerprint.NearestModel = "warning", "gpt-6-luna"
-	require.Equal(t, OpenAIEvalQualityCounts{60, 0, 0}, openAIEvalQualityCountsFromRun(run))
+	require.Zero(t, openAIEvalQualityCountsFromRun(run))
 	run.TestType, run.Status = OpenAIEvalTypeModelTrace, "suspected_normal"
 	run.Outcome.ModelTrace = &OpenAIEvalModelTraceResult{Prediction: "gpt-6.1-sol", UsedOutputs: 3,
 		Samples: []OpenAIEvalModelTraceSample{{Valid: true}, {Valid: true}, {Valid: true}}}
-	require.Equal(t, OpenAIEvalQualityCounts{3, 0, 3}, openAIEvalQualityCountsFromRun(run))
+	require.Zero(t, openAIEvalQualityCountsFromRun(run), "retired ModelTrace cannot affect scheduling")
 	run.Outcome.ModelTrace.Samples[2].Error = "http_503"
 	require.Zero(t, openAIEvalQualityCountsFromRun(run))
 	run.TestType = OpenAIEvalTypeStateProbe
@@ -51,13 +51,7 @@ func TestOpenAIEvalQualityCountsPreservePartialAttributionVerdict(t *testing.T) 
 					Prediction: prediction, UsedOutputs: 1,
 					Samples: []OpenAIEvalModelTraceSample{{Error: "http_502"}, {Valid: true}, {Error: "http_502"}},
 				}}}
-			counts := openAIEvalQualityCountsFromRun(run)
-			require.Equal(t, 1, counts.EvaluatedCount)
-			if prediction == "gpt-6.1-sol" {
-				require.Equal(t, 1, counts.SuspectedPassCount)
-			} else {
-				require.Zero(t, counts.SuspectedPassCount)
-			}
+			require.Zero(t, openAIEvalQualityCountsFromRun(run))
 			require.Equal(t, "attributed", run.Status, "scoring must not rewrite persisted diagnostics")
 			require.Equal(t, "upstream_error", run.Error)
 			for _, status := range []string{"error", "insufficient", "running", "cancelled"} {
@@ -76,14 +70,11 @@ func TestOpenAIEvalQualityManualPartialVerdictPersistsWithoutHidingErrors(t *tes
 	accounts := &qualityAccountRepository{account: &Account{ID: 17, Extra: map[string]any{}}}
 	s := &OpenAIEvalService{accounts: accounts, repo: &qualityLeaseRepository{}}
 	now := time.Now().UTC().Add(-time.Second)
-	run := &OpenAIEvalRun{AccountID: 17, RequestedModel: "gpt-6.1-sol", ReasoningEffort: "high", TestType: OpenAIEvalTypeModelTrace,
-		DataVersion: OpenAIEvalQualityDataVersion, TriggerSource: "manual", Status: "suspected_normal", Error: "upstream_error", FinishedAt: now,
-		Outcome: OpenAIEvalOutcome{ModelTrace: &OpenAIEvalModelTraceResult{
-			BankRevision: OpenAIEvalQualityModelTraceBankRevision, Prediction: "gpt-6.1-sol", UsedOutputs: 1,
-			Samples: []OpenAIEvalModelTraceSample{{Error: "http_502"}, {Valid: true}, {Error: "http_502"}},
-		}}}
+	runValue := modelDimensionFingerprint(635, "gpt-6.1-sol", "high", true, 1, now)
+	runValue.AccountID, runValue.Error = 17, "upstream_error"
+	run := &runValue
 	require.NoError(t, s.recordOpenAIEvalQualityResult(context.Background(), 635, run))
-	quality, known := ReadOpenAIEvalQualityFromAccount(accounts.account, run.RequestedModel, run.ReasoningEffort, now, OpenAIEvalTypeModelTrace)
+	quality, known := ReadOpenAIEvalQualityFromAccount(accounts.account, run.RequestedModel, run.ReasoningEffort, now, OpenAIEvalTypeFingerprint)
 	require.True(t, known)
 	require.Equal(t, "manual", quality.TriggerSource)
 	require.Equal(t, "pass", quality.OutcomeStatus)
@@ -94,8 +85,8 @@ func TestOpenAIEvalQualityManualPartialVerdictPersistsWithoutHidingErrors(t *tes
 	// A newer no-output result invalidates the old verdict across both sources.
 	run.TriggerSource, run.Status = "scheduled", "insufficient"
 	run.FinishedAt = now.Add(time.Millisecond)
-	run.Outcome.ModelTrace.UsedOutputs = 0
+	run.Outcome.LMFingerprint.Attribution.Used = 0
 	require.NoError(t, s.recordOpenAIEvalQualityResult(context.Background(), 636, run))
-	_, known = ReadOpenAIEvalQualityFromAccount(accounts.account, run.RequestedModel, run.ReasoningEffort, now.Add(time.Second), OpenAIEvalTypeModelTrace)
+	_, known = ReadOpenAIEvalQualityFromAccount(accounts.account, run.RequestedModel, run.ReasoningEffort, now.Add(time.Second), OpenAIEvalTypeFingerprint)
 	require.False(t, known)
 }

@@ -149,7 +149,18 @@ func TestR9CompletedResponseExecContractMatrix(t *testing.T) {
 					}
 					require.NoError(t, err)
 					require.Equal(t, http.StatusOK, recorder.Code)
-					require.JSONEq(t, r9CompletedResponse(t, r9ExecDenial, tc.realExec), recorder.Body.String())
+					var actual map[string]any
+					require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &actual))
+					if !passthrough {
+						createdAt, ok := actual["created_at"].(float64)
+						require.True(t, ok, "native Responses normalizes a missing created_at")
+						require.Greater(t, createdAt, float64(0))
+						require.Equal(t, float64(int64(createdAt)), createdAt)
+						delete(actual, "created_at")
+					}
+					actualJSON, err := json.Marshal(actual)
+					require.NoError(t, err)
+					require.JSONEq(t, r9CompletedResponse(t, r9ExecDenial, tc.realExec), string(actualJSON))
 					require.Equal(t, tc.failure, openAIToolCapabilityFailure(c, true))
 					if tc.client && tc.outbound {
 						require.Equal(t, tc.realExec, openAIToolCapabilityStateFromContext(c).ExecCallObserved)

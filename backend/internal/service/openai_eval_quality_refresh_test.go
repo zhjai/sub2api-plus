@@ -99,8 +99,7 @@ func TestOpenAIEvalQualityRefreshCadenceManualAndMultiType(t *testing.T) {
 	repo.config.Accounts[0].FingerprintSchedule = repo.config.Accounts[0].CandySchedule
 	repo.config.Accounts[0].ModelTraceSchedule = repo.config.Accounts[0].CandySchedule
 	now := time.Now().Add(-time.Minute)
-	fingerprint := qualityTestAggregate(now, 17, 60, 0, 60)
-	fingerprint.TestType = OpenAIEvalTypeFingerprint
+	fingerprint := qualityOutcomeEvidence(now, 17, OpenAIEvalTypeFingerprint, 3, true)
 	trace := qualityTestAggregate(now, 17, 3, 0, 0)
 	trace.TestType = OpenAIEvalTypeModelTrace
 	trace.AttributionRuleVersion = OpenAIEvalModelTraceRuleVersion
@@ -115,17 +114,17 @@ func TestOpenAIEvalQualityRefreshCadenceManualAndMultiType(t *testing.T) {
 	require.InDelta(t, 3600, result.NextRefreshAt.Sub(result.RefreshedAt).Seconds(), 0.001)
 	quality, ok := openAIEvalQualitySnapshots.lookup(17, "gpt-6.1-sol", "high", time.Now())
 	require.True(t, ok)
-	require.Equal(t, 3, quality.EvaluatedCount)
-	require.Equal(t, 0, quality.PassCount)
-	require.Equal(t, 1, quality.SuspectedPassCount)
-	require.InDelta(t, 1.0/3, quality.Ratio(), 1e-12)
+	require.Equal(t, 2, quality.EvaluatedCount)
+	require.Equal(t, 1, quality.PassCount)
+	require.Zero(t, quality.SuspectedPassCount)
+	require.Equal(t, .5, quality.Ratio())
 	accounts.accounts[17] = qualityTestAccount(t, qualityTestAggregate(now, 17, 1, 0, 0))
 	unchanged, err := s.refreshOpenAIEvalQuality(context.Background(), false)
 	require.NoError(t, err)
 	require.Equal(t, result.RefreshedAt, unchanged.RefreshedAt)
 	require.Len(t, accounts.batches, 1)
 	quality, _ = openAIEvalQualitySnapshots.lookup(17, "gpt-6.1-sol", "high", time.Now())
-	require.Equal(t, 3, quality.EvaluatedCount)
+	require.Equal(t, 2, quality.EvaluatedCount)
 	refreshed, err := s.RefreshOpenAIEvalQuality(context.Background(), 42)
 	require.NoError(t, err)
 	require.False(t, refreshed.RefreshedAt.Before(result.RefreshedAt))
@@ -148,7 +147,7 @@ func TestOpenAIEvalQualityRefreshIsolationAutomaticOnlyAndExpiry(t *testing.T) {
 	}
 	result, err := s.refreshOpenAIEvalQuality(context.Background(), false)
 	require.NoError(t, err)
-	require.Equal(t, 3, result.RouteCount)
+	require.Equal(t, 2, result.RouteCount)
 	require.Len(t, accounts.batches[0], 1)
 	for _, dimension := range [][2]string{{"gpt-6.1-sol", "low"}, {"gpt-6-sol", "high"}} {
 		q, ok := openAIEvalQualitySnapshots.lookup(17, dimension[0], dimension[1], time.Now())
@@ -158,10 +157,11 @@ func TestOpenAIEvalQualityRefreshIsolationAutomaticOnlyAndExpiry(t *testing.T) {
 	_, ok := openAIEvalQualitySnapshots.lookup(18, "gpt-6.1-sol", "high", time.Now())
 	require.False(t, ok)
 	_, ok = openAIEvalQualitySnapshots.lookup(17, "gpt-6.1-sol", "", time.Now())
-	require.False(t, ok)
+	require.True(t, ok)
 	_, ok = openAIEvalQualitySnapshots.lookup(17, "gpt-6-sol", "high", time.Now().Add(2*time.Hour))
 	require.False(t, ok)
 	repo.config.Accounts[0].CandySchedule.Enabled = false
+	repo.config.Accounts[1].CandySchedule.Enabled = false
 	repo.config.Accounts[0].FingerprintSchedule.Enabled = false
 	repo.config.Accounts[0].ModelTraceSchedule.Enabled = false
 	repo.config.Revision++

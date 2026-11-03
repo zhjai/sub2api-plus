@@ -2219,7 +2219,7 @@ func (p *openAIWSConnPool) dynamicMaxConnsEnabled() bool {
 
 func (p *openAIWSConnPool) modeRouterV2Enabled() bool {
 	if p != nil && p.cfg != nil {
-		return p.cfg.Gateway.OpenAIWS.ModeRouterV2Enabled
+		return p.cfg.OpenAIWSModeRouterV2Enabled()
 	}
 	return false
 }

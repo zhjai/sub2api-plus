@@ -41,7 +41,7 @@ func TestEvalCodexTurnFinalWire(t *testing.T) {
 				require.Greater(t, len(input[1].Get("content.0.text").String()), 20000)
 				require.Contains(t, input[5].Get("content.0.text").String(), "/home/user/workspace")
 				require.Contains(t, input[6].Get("content.0.text").String(), "probe <tag> & answer")
-				require.Contains(t, input[6].Get("content.0.text").String(), "Do not use any external tools")
+				require.Equal(t, "probe <tag> & answer", input[6].Get("content.0.text").String())
 				require.NotContains(t, string(body), `\u003c`)
 				require.NotContains(t, string(body), "/home/zhj")
 				require.False(t, gjson.GetBytes(body, "previous_response_id").Exists())
@@ -148,7 +148,7 @@ func TestEvalCodexTurnMappedGPT55DoesNotUseLite(t *testing.T) {
 
 func TestEvalCodexContextConcurrentBuildersDoNotMutateFixture(t *testing.T) {
 	before := sha256.Sum256(openAIEvalCodexContextJSON)
-	require.Equal(t, "57d6a582da9a1e3893581296ccaebe205eb4a433a0802bbafea3f3edd7fb992e", fmt.Sprintf("%x", before), "pinned public context must not change silently")
+	require.Equal(t, "65f976b3a7cb410e50312e5b4096686e5b1fda3e4fa1942ee3974d7cb1e7cd42", fmt.Sprintf("%x", before), "pinned public context must not change silently")
 	var wg sync.WaitGroup
 	for range 8 {
 		wg.Go(func() {
@@ -156,7 +156,8 @@ func TestEvalCodexContextConcurrentBuildersDoNotMutateFixture(t *testing.T) {
 			if !assertEvalCodexBuilder(t, payload, err) {
 				return
 			}
-			payload["input"].([]any)[0].(map[string]any)["tools"].([]any)[0].(map[string]any)["name"] = "changed"
+			tools := payload["input"].([]any)[0].(map[string]any)["tools"].(json.RawMessage)
+			tools[0] = '!' // Every builder must own its mutable raw bytes.
 		})
 	}
 	wg.Wait()
@@ -216,4 +217,27 @@ func TestEvalCodexCompletedItemFallbackStillRequiresTerminal(t *testing.T) {
 	result, err := readOpenAIEvalResponse(t.Context(), resp(body+"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":7}}}\n\n"), true, true)
 	require.NoError(t, err)
 	require.Equal(t, "21", result.Text)
+}
+
+func TestEvalCodexBuilderDeveloperInstructions(t *testing.T) {
+	now := time.Date(2026, 11, 2, 3, 4, 5, 0, time.UTC)
+	plain, _, err := newOpenAIEvalCodexPayload(nil, "gpt-6.1-sol", "none", "question", now)
+	require.NoError(t, err)
+	payload, session, err := newOpenAIEvalCodexPayloadWithInstructions(nil, "gpt-6.1-sol", "none", "Answer directly.", "question", now)
+	require.NoError(t, err)
+	body, err := marshalOpenAIEvalPayload(payload)
+	require.NoError(t, err)
+	plainBody, err := marshalOpenAIEvalPayload(plain)
+	require.NoError(t, err)
+	input := gjson.GetBytes(body, "input").Array()
+	require.Equal(t, "gpt-6.1-sol", gjson.GetBytes(body, "model").String(), "comparison alias must never alter routing")
+	require.Equal(t, "Answer directly.", input[2].Get("content.0.text").String())
+	require.Equal(t, "generic.developer_instructions", input[2].Get("internal_chat_message_metadata_passthrough.content_item_kinds.0").String())
+	require.Equal(t, gjson.GetBytes(plainBody, "input.2.content.0.text").String(), input[2].Get("content.1.text").String())
+	require.Equal(t, "question", input[len(input)-1].Get("content.0.text").String())
+	metadata := gjson.Parse(gjson.GetBytes(body, "client_metadata").Get(openAIWSTurnMetadataHeader).String())
+	require.Equal(t, "new", metadata.Get("history_initialization").String())
+	require.Equal(t, now.UnixMilli(), metadata.Get("turn_started_at_unix_ms").Int())
+	require.Equal(t, session, gjson.GetBytes(body, "prompt_cache_key").String())
+	require.Equal(t, "none", metadata.Get("reasoning_effort").String())
 }

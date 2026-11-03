@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/service/cpaeval"
 	"strings"
 	"time"
 )
@@ -14,8 +15,8 @@ import (
 const (
 	// A new question or reference bank must get a new contract. Historical
 	// Candy-29 results must never be relabeled with this version.
-	OpenAIEvalQualityDataVersion            = "sub2api-candy-21-v4-number-presence-cpa-97623969-modeltrace-97623969"
-	OpenAIEvalQualityBaselineVersion        = "cpa-codex-candy-eval-97623969-v2"
+	OpenAIEvalQualityDataVersion            = "sub2api-cpa-179d6dae-lm-detector-v1"
+	OpenAIEvalQualityBaselineVersion        = "cpa-codex-candy-eval-179d6dae-v1"
 	OpenAIEvalQualityModelTraceBankRevision = "sha256:a4e256c00444179b76f3855578660e66f30659df8c0122f1768dd05a8d705630"
 	OpenAIEvalQualityVersion                = "logical-samples-per-type-v2"
 	OpenAIEvalQualityAssessmentBasis        = "latest_test_outcomes_v2"
@@ -145,23 +146,13 @@ func (q OpenAIEvalQualityAggregate) diagnosticStatus() (string, bool) {
 		if q.PassCount == q.EvaluatedCount {
 			status = "pass"
 		}
-	case OpenAIEvalTypeModelTrace:
-		if q.AttributionRuleVersion != OpenAIEvalModelTraceRuleVersion || (q.PassCount != 0 && q.PassCount != q.EvaluatedCount) || (q.SuspectedPassCount != 0 && q.SuspectedPassCount != q.EvaluatedCount) {
+	case OpenAIEvalTypeFingerprint:
+		if q.AttributionRuleVersion != cpaeval.DetectorRevision() || q.SuspectedPassCount != 0 || (q.PassCount != 0 && q.PassCount != q.EvaluatedCount) {
 			return "", false
 		}
 		status = "warning"
 		if q.PassCount == q.EvaluatedCount {
 			status = "pass"
-		} else if q.SuspectedPassCount == q.EvaluatedCount {
-			status = "suspected_normal"
-		}
-	case OpenAIEvalTypeFingerprint:
-		if q.PassCount != 0 || (q.SuspectedPassCount != 0 && q.SuspectedPassCount != q.EvaluatedCount) {
-			return "", false
-		}
-		status = "suspected_warning"
-		if q.SuspectedPassCount == q.EvaluatedCount {
-			status = "suspected_normal"
 		}
 	default:
 		return "", false
@@ -194,24 +185,27 @@ func openAIEvalQualityMaxSamples(testType string) int {
 	case OpenAIEvalTypeFingerprint:
 		return OpenAIEvalMaxFingerprintRequests
 	case OpenAIEvalTypeModelTrace:
-		return OpenAIEvalModelTraceRequests
+		return 0
 	default:
 		return 0
 	}
 }
 
 func (q OpenAIEvalQualityAggregate) validFor(accountID int64, model, effort string, now time.Time) bool {
+	// Effort remains historical evidence metadata; routing quality is scoped
+	// to account plus requested model and can be reused across efforts.
+	_ = effort
 	_, validOutcome := q.diagnosticStatus()
 	return validOutcome && q.Version == OpenAIEvalQualityVersion && q.DataVersion == OpenAIEvalQualityDataVersion &&
 		q.AccountID == accountID && accountID > 0 && q.RunID > 0 && openAIEvalQualityRunSourceSupported(q.TriggerSource) &&
 		q.RequestedModel != "" && q.RequestedModel == openAIEvalQualityDimension(model) &&
-		q.ReasoningEffort == openAIEvalQualityDimension(effort) && q.OpenAIEvalQualityCounts.valid() &&
+		q.OpenAIEvalQualityCounts.valid() &&
 		q.EvaluatedCount <= openAIEvalQualityMaxSamples(q.TestType) &&
 		!q.EvaluatedAt.IsZero() && !q.EvaluatedAt.After(now) &&
 		q.ExpiresAt.After(q.EvaluatedAt) && q.ExpiresAt.Sub(q.EvaluatedAt) <= OpenAIEvalQualityMaxTTL && now.Before(q.ExpiresAt)
 }
 
-var openAIEvalQualityTestTypes = []string{OpenAIEvalTypeCandy, OpenAIEvalTypeFingerprint, OpenAIEvalTypeModelTrace}
+var openAIEvalQualityTestTypes = []string{OpenAIEvalTypeCandy, OpenAIEvalTypeFingerprint}
 
 // ReadOpenAIEvalQualityFromAccount exposes one diagnostic's raw logical sample
 // evidence. Cross-type routing ratios are derived only from selected outcomes.
@@ -227,19 +221,25 @@ func readOpenAIEvalQualityEvidence(account *Account, model, effort, testType str
 	if account == nil || account.Extra == nil {
 		return OpenAIEvalQualityAggregate{}, false
 	}
-	raw, exists := account.Extra[OpenAIEvalQualityExtraKeyFor(model, effort, testType)]
-	if !exists {
-		return OpenAIEvalQualityAggregate{}, false
+	var selected OpenAIEvalQualityAggregate
+	found := false
+	for key, raw := range account.Extra {
+		if !strings.HasPrefix(key, "openai_eval_quality_v2_") {
+			continue
+		}
+		payload, err := json.Marshal(raw)
+		if err != nil || len(payload) > 8192 {
+			continue
+		}
+		var quality OpenAIEvalQualityAggregate
+		if json.Unmarshal(payload, &quality) != nil || quality.TestType != testType || !quality.validFor(account.ID, model, quality.ReasoningEffort, now) {
+			continue
+		}
+		if !found || quality.EvaluatedAt.After(selected.EvaluatedAt) || (quality.EvaluatedAt.Equal(selected.EvaluatedAt) && quality.RunID > selected.RunID) {
+			selected, found = quality, true
+		}
 	}
-	payload, err := json.Marshal(raw)
-	if err != nil || len(payload) > 4096 {
-		return OpenAIEvalQualityAggregate{}, false
-	}
-	var quality OpenAIEvalQualityAggregate
-	if json.Unmarshal(payload, &quality) != nil || quality.TestType != testType || !quality.validFor(account.ID, model, effort, now) {
-		return OpenAIEvalQualityAggregate{}, false
-	}
-	return quality, true
+	return selected, found
 }
 
 // Call only AFTER FinishRun succeeds, using its persisted run ID. The caller
@@ -266,23 +266,8 @@ func (s *OpenAIEvalService) recordOpenAIEvalQuality(ctx context.Context, runID i
 			return errors.New("Candy quality requires scored passes")
 		}
 	case OpenAIEvalTypeFingerprint:
-		result := run.Outcome.Fingerprint
-		if run.BaselineVersion != OpenAIEvalQualityBaselineVersion || result == nil || result.NearestModel == "" || result.ValidSamples != counts.EvaluatedCount {
-			return errors.New("fingerprint quality evidence does not match the pinned baseline or counts")
-		}
-		if !openAIEvalIdentityQualityCountsMatch(result.NearestModel, counts) {
-			return errors.New("fingerprint quality attribution and counts disagree")
-		}
-	case OpenAIEvalTypeModelTrace:
-		result := run.Outcome.ModelTrace
-		if result == nil || result.BankRevision != OpenAIEvalQualityModelTraceBankRevision || result.Prediction == "" || result.UsedOutputs != counts.EvaluatedCount {
-			return errors.New("ModelTrace quality evidence does not match the pinned bank or counts")
-		}
-		if !openAIEvalModelTraceUsedOutputsValid(result) {
-			return nil
-		}
-		if counts != openAIEvalQualityCountsFromRun(run) {
-			return errors.New("ModelTrace quality attribution and counts disagree")
+		if !openAIEvalLMFingerprintEvidenceValid(run) || counts != openAIEvalCurrentQualityCountsFromRun(run) {
+			return errors.New("fingerprint quality evidence does not match the pinned detector or counts")
 		}
 	default:
 		return nil
@@ -304,12 +289,7 @@ func (s *OpenAIEvalService) recordOpenAIEvalQuality(ctx context.Context, runID i
 		TestType: run.TestType, TriggerSource: run.TriggerSource, OutcomeStatus: run.Status,
 		EvaluatedAt: run.FinishedAt, ExpiresAt: run.FinishedAt.Add(freshness),
 	}
-	if run.TestType == OpenAIEvalTypeFingerprint {
-		quality.OutcomeStatus = OpenAIEvalIdentityQualityStatus(run.Outcome.Fingerprint.NearestModel)
-	} else if run.TestType == OpenAIEvalTypeModelTrace {
-		quality.OutcomeStatus, _ = openAIEvalModelTraceVerdict(run.RequestedModel, run.Outcome.ModelTrace.Prediction)
-		quality.AttributionRuleVersion = OpenAIEvalModelTraceRuleVersion
-	}
+	quality.AttributionRuleVersion = openAIEvalQualityAttributionRuleVersion(run.TestType)
 	if !quality.validFor(run.AccountID, run.RequestedModel, run.ReasoningEffort, now) {
 		return errors.New("invalid or outdated evaluation quality evidence")
 	}
@@ -323,14 +303,14 @@ func (s *OpenAIEvalService) recordOpenAIEvalQualityResult(ctx context.Context, r
 	if s == nil || s.accounts == nil || s.repo == nil || run == nil || run.DiagnosticOnly || !openAIEvalQualityRunSourceSupported(run.TriggerSource) || run.TestType == OpenAIEvalTypeStateProbe {
 		return nil
 	}
-	counts := openAIEvalQualityCountsFromRun(run)
+	counts := openAIEvalCurrentQualityCountsFromRun(run)
 	if counts.valid() {
 		return s.recordOpenAIEvalQuality(ctx, runID, run, counts)
 	}
 	if run.Status == "running" || run.FinishedAt.IsZero() || runID <= 0 || run.DataVersion != OpenAIEvalQualityDataVersion {
 		return nil
 	}
-	if run.TestType != OpenAIEvalTypeCandy && run.TestType != OpenAIEvalTypeFingerprint && run.TestType != OpenAIEvalTypeModelTrace {
+	if run.TestType != OpenAIEvalTypeCandy && run.TestType != OpenAIEvalTypeFingerprint {
 		return nil
 	}
 	config, err := s.repo.GetConfig(ctx)
@@ -396,8 +376,8 @@ func (s *OpenAIEvalService) persistOpenAIEvalQuality(ctx context.Context, qualit
 }
 
 func openAIEvalQualityAttributionRuleVersion(testType string) string {
-	if testType == OpenAIEvalTypeModelTrace {
-		return OpenAIEvalModelTraceRuleVersion
+	if testType == OpenAIEvalTypeFingerprint {
+		return cpaeval.DetectorRevision()
 	}
 	return ""
 }
@@ -424,8 +404,9 @@ func openAIEvalQualityTestInterval(config *OpenAIEvalConfig, accountID int64, mo
 	if config == nil {
 		return 0, false
 	}
+	interval, enabled := 0, false
 	for _, route := range config.Accounts {
-		if route.AccountID != accountID || openAIEvalQualityDimension(route.RequestedModel) != openAIEvalQualityDimension(model) || openAIEvalQualityDimension(route.ReasoningEffort) != openAIEvalQualityDimension(effort) {
+		if route.AccountID != accountID || openAIEvalQualityDimension(route.RequestedModel) != openAIEvalQualityDimension(model) {
 			continue
 		}
 		var schedule OpenAIEvalSchedule
@@ -433,13 +414,14 @@ func openAIEvalQualityTestInterval(config *OpenAIEvalConfig, accountID int64, mo
 		case OpenAIEvalTypeCandy:
 			schedule = route.CandySchedule
 		case OpenAIEvalTypeFingerprint:
-			schedule = route.FingerprintSchedule
-		case OpenAIEvalTypeModelTrace:
-			schedule = route.ModelTraceSchedule
+			schedule = openAIEvalDetectorSchedule(route)
 		}
-		return schedule.IntervalSeconds, schedule.Enabled
+		if schedule.Enabled {
+			enabled = true
+			interval = max(interval, schedule.IntervalSeconds)
+		}
 	}
-	return 0, false
+	return interval, enabled
 }
 
 func openAIEvalQualityFreshness(testInterval, refreshInterval int) time.Duration {
@@ -469,4 +451,60 @@ func openAIEvalIdentityQualityCountsMatch(prediction string, counts OpenAIEvalQu
 		suspected = counts.EvaluatedCount
 	}
 	return counts.PassCount == 0 && counts.SuspectedPassCount == suspected
+}
+
+// Reject legacy, un-enrolled and mismatched metadata before consuming a new
+// fingerprint verdict. Partial collections are valid evidence.
+func openAIEvalLMFingerprintEvidenceValid(run *OpenAIEvalRun) bool {
+	if run == nil || run.DiagnosticOnly || run.TestType != OpenAIEvalTypeFingerprint || run.DataVersion != OpenAIEvalQualityDataVersion || run.BaselineVersion != OpenAIEvalQualityBaselineVersion {
+		return false
+	}
+	result := run.Outcome.LMFingerprint
+	if result == nil || result.DetectorRevision != cpaeval.DetectorRevision() || !result.Enrolled || !cpaeval.ModelEnrolled(run.RequestedModel) || result.ComparedAs != cpaeval.FingerprintModelID(run.RequestedModel) || result.RequestEffort != "" || result.Attribution.Used < 1 || result.Attribution.Used > cpaeval.FingerprintTarget {
+		return false
+	}
+	expected := openAIEvalLMFingerprintOutcome(run.RequestedModel, result)
+	return (expected.Status == "pass" || expected.Status == "warning") && run.Status == expected.Status && run.Outcome.Status == expected.Status
+}
+
+func openAIEvalCurrentQualityCountsFromRun(run *OpenAIEvalRun) OpenAIEvalQualityCounts {
+	counts := OpenAIEvalQualityCounts{}
+	if run == nil || run.DiagnosticOnly || run.DataVersion != OpenAIEvalQualityDataVersion || (run.Status != "pass" && run.Status != "warning") {
+		return counts
+	}
+	switch run.TestType {
+	case OpenAIEvalTypeCandy:
+		if run.Error != "" {
+			return counts
+		}
+		for _, sample := range run.Samples {
+			if !sample.Valid || sample.ErrorMessage != "" || strings.TrimSpace(sample.Answer) == "" {
+				continue
+			}
+			counts.EvaluatedCount++
+			if cpaeval.HasStandalone21(sample.Answer) {
+				counts.PassCount++
+			}
+		}
+	case OpenAIEvalTypeFingerprint:
+		if !openAIEvalLMFingerprintEvidenceValid(run) {
+			return counts
+		}
+		counts.EvaluatedCount = run.Outcome.LMFingerprint.Attribution.Used
+		if run.Status == "pass" {
+			counts.PassCount = counts.EvaluatedCount
+		}
+	}
+	return counts
+}
+
+func openAIEvalCurrentQualityAggregateFromRun(run OpenAIEvalRun, interval, refresh int, now time.Time) (OpenAIEvalQualityAggregate, bool) {
+	q := OpenAIEvalQualityAggregate{
+		OpenAIEvalQualityCounts: openAIEvalCurrentQualityCountsFromRun(&run), Version: OpenAIEvalQualityVersion, DataVersion: run.DataVersion,
+		AccountID: run.AccountID, RequestedModel: openAIEvalQualityDimension(run.RequestedModel), ReasoningEffort: openAIEvalQualityDimension(run.ReasoningEffort),
+		RunID: run.ID, TestType: run.TestType, TriggerSource: run.TriggerSource, OutcomeStatus: run.Status,
+		AttributionRuleVersion: openAIEvalQualityAttributionRuleVersion(run.TestType), EvaluatedAt: run.FinishedAt,
+		ExpiresAt: run.FinishedAt.Add(openAIEvalQualityFreshness(interval, refresh)),
+	}
+	return q, q.validFor(run.AccountID, run.RequestedModel, run.ReasoningEffort, now)
 }

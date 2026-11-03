@@ -130,7 +130,7 @@ func (r *OpenAIEvalRankingService) monitorEvidenceFor(ctx context.Context, accou
 		}
 		sort.Slice(matched, func(i, j int) bool { return matched[i].ID < matched[j].ID })
 		effort, ok := rankingMonitorEffort(m)
-		if !ok || (requestedEffort != nil && effort != *requestedEffort) {
+		if !ok {
 			continue
 		}
 		window := 2 * time.Duration(m.IntervalSeconds) * time.Second
@@ -187,7 +187,7 @@ func applyRankingMonitorModels(f *OpenAIEvalRankingFactors, evidence []openAIRan
 	window := 0
 	ids := []int64{}
 	for _, item := range evidence {
-		if item.accountID != accountID || !modelSet[item.model] || item.effort != effort {
+		if item.accountID != accountID || !modelSet[item.model] {
 			continue
 		}
 		used := false

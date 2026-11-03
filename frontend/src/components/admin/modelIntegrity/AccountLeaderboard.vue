@@ -146,8 +146,8 @@
               <span v-for="part in contributionParts(row)" :key="part.factor" class="lb-chip">{{ part.text }}</span>
             </p>
             <ul v-if="exceptions(row).length" class="lb-list" data-testid="board-exceptions">
-              <li v-for="item in exceptions(row)" :key="`${item.model}-${item.effort}`">
-                {{ t('admin.modelIntegrity.scheduling.board.ruleException', { model: item.model, effort: item.effort || (item.anyEffort ? t('admin.modelIntegrity.common.allEfforts') : t('admin.modelIntegrity.scheduling.rank.unspecifiedEffort')), policy: policyLabel(item.policy) }) }}
+              <li v-for="item in exceptions(row)" :key="item.model">
+                {{ t('admin.modelIntegrity.scheduling.board.ruleException', { model: item.model, policy: policyLabel(item.policy) }) }}
               </li>
             </ul>
             <ul v-if="exclusionList(row).length" class="lb-list" data-testid="board-exclusions">
@@ -162,28 +162,36 @@
               </li>
             </ul>
 
-            <p v-if="!row.models.length" class="lb-detail-line lb-muted" data-testid="board-no-models">{{ t('admin.modelIntegrity.scheduling.board.noModels') }}</p>
+            <p v-if="!row.models?.length" class="lb-detail-line lb-muted" data-testid="board-no-models">{{ t('admin.modelIntegrity.scheduling.board.noModels') }}</p>
             <div v-else class="lb-models-wrap">
               <table class="lb-models" data-testid="board-models">
                 <thead>
                   <tr>
                     <th scope="col">{{ t('admin.modelIntegrity.scheduling.board.models.model') }}</th>
-                    <th scope="col">{{ t('admin.modelIntegrity.scheduling.board.models.effort') }}</th>
                     <th scope="col">{{ t('admin.modelIntegrity.scheduling.board.models.upstream') }}</th>
                     <th v-for="factor in MODEL_FACTORS" :key="factor" scope="col" class="num">{{ factorLabel(factor) }}</th>
                     <th scope="col">{{ t('admin.modelIntegrity.scheduling.board.models.policy') }}</th>
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="model in row.models" :key="`${model.requested_model}\u0000${model.reasoning_effort}`" data-testid="board-model-row">
+                  <tr v-for="model in modelRows(row)" :key="model.key" data-testid="board-model-row" :data-basis="model.basis">
                     <td class="font-medium text-gray-900 dark:text-white">
                       {{ model.requested_model }}
                       <span v-if="recoveryOf(model.factors)" class="lb-model-recovery" data-testid="board-model-recovery" :data-state="recoveryOf(model.factors)!.code" :title="recoveryDetail(recoveryOf(model.factors)!)">
                         <span class="lb-recovery" :class="`lb-recovery-${recoveryOf(model.factors)!.state}`">{{ recoveryLabel(recoveryOf(model.factors)!) }}</span>
                         <span v-if="recoveryOf(model.factors)!.nextTrialAt" class="tabular-nums">{{ t('admin.modelIntegrity.scheduling.board.recovery.next', { time: formatDateTime(recoveryOf(model.factors)!.nextTrialAt!) }) }}</span>
                       </span>
+                      <details v-if="model.basis === 'projected'" class="lb-efforts" data-testid="board-model-efforts">
+                        <summary class="lb-efforts-summary">{{ t('admin.modelIntegrity.scheduling.board.models.projected', { count: model.efforts.length }) }}</summary>
+                        <p class="lb-efforts-note">{{ t('admin.modelIntegrity.scheduling.board.models.projectedHint') }}</p>
+                        <ul class="lb-efforts-list">
+                          <li v-for="item in model.efforts" :key="item.effort" data-testid="board-model-effort">
+                            <span class="lb-efforts-name">{{ item.effort || t('admin.modelIntegrity.scheduling.rank.unspecifiedEffort') }}</span>
+                            <span v-for="factor in MODEL_FACTORS" :key="factor">{{ factorLabel(factor) }} {{ effortCellText(item.factors, factor) }}</span>
+                          </li>
+                        </ul>
+                      </details>
                     </td>
-                    <td>{{ model.reasoning_effort || t('admin.modelIntegrity.scheduling.rank.unspecifiedEffort') }}</td>
                     <td class="lb-upstream">{{ model.upstream_models.length ? model.upstream_models.join(', ') : '—' }}</td>
                     <td v-for="factor in MODEL_FACTORS" :key="factor" class="num" :data-testid="`board-model-${factor}`">
                       <span class="block" :class="{ 'lb-muted': modelCell(model, factor).raw === null }">{{ modelCell(model, factor).rawText }}</span>
@@ -217,7 +225,6 @@ import {
   accountsAPI,
   type OpenAIEvalAccountOverview,
   type OpenAIEvalOverviewAccount,
-  type OpenAIEvalOverviewModel,
   type OpenAIEvalRankingFactorKey,
   type OpenAIEvalRankingFactors,
   type OpenAIEvalRankingSummary,
@@ -244,8 +251,11 @@ import {
   runtimeRecoveryView,
   sameOverviewBinding,
   thresholdReasonKey,
+  modelPolicyRule,
+  overviewModelRows,
   type FactorSourceKind,
   type OverviewBinding,
+  type OverviewModelRow,
   type RankingReadOutcome,
   type RuntimeRecoveryView
 } from '@/views/admin/modelIntegrity/modelIntegrity'
@@ -559,8 +569,20 @@ function cellOf(row: OpenAIEvalOverviewAccount, factor: OpenAIEvalRankingFactorK
   return cell
 }
 
-function modelCell(model: OpenAIEvalOverviewModel, factor: OpenAIEvalRankingFactorKey): Cell {
+function modelCell(model: Pick<OverviewModelRow, 'factors'>, factor: OpenAIEvalRankingFactorKey): Cell {
   return buildCell(factor, model.factors, factorSourceKind(factor, model.factors), false)
+}
+
+/** One row per requested model; the server's model rows are used as sent. */
+function modelRows(row: OpenAIEvalOverviewAccount): OverviewModelRow[] {
+  return overviewModelRows(row.models)
+}
+
+/** A single effort's reading inside a projected row's disclosure, with its sample count. */
+function effortCellText(factors: OpenAIEvalRankingFactors, factor: OpenAIEvalRankingFactorKey) {
+  const cell = buildCell(factor, factors, factorSourceKind(factor, factors), false)
+  const samples = factor === 'error_rate' ? factors.error_rate.sample_count : factor === 'ttft' ? factors.ttft.sample_count : null
+  return samples != null && cell.raw !== null ? t('admin.modelIntegrity.scheduling.board.models.withSamples', { value: cell.rawText, count: samples }) : cell.rawText
 }
 
 function sourceLabel(kind: FactorSourceKind) {
@@ -593,30 +615,25 @@ function contributionParts(row: OpenAIEvalOverviewAccount) {
  * server's per-model policy is authoritative; saved rules are the fallback
  * for payloads without it.
  */
-function exceptions(row: OpenAIEvalOverviewAccount): { model: string; effort: string; anyEffort: boolean; policy: OpenAIEvalSchedulingPolicy }[] {
+function exceptions(row: OpenAIEvalOverviewAccount): { model: string; policy: OpenAIEvalSchedulingPolicy }[] {
   const overviewPolicy = meta.value?.policy ?? ''
-  const models = row.models ?? []
+  const models = modelRows(row)
   if (models.some(model => model.policy != null)) {
     return models
       .filter(model => model.policy != null && model.policy !== overviewPolicy)
-      // A model cell's '' effort is the unspecified effort, not every effort.
-      .map(model => ({ model: model.requested_model, effort: model.reasoning_effort, anyEffort: false, policy: model.policy as OpenAIEvalSchedulingPolicy }))
+      .map(model => ({ model: model.requested_model, policy: model.policy as OpenAIEvalSchedulingPolicy }))
   }
   return ruleExceptionsFor(props.rules, models, overviewPolicy)
-    .map(rule => ({ model: rule.requested_model, effort: rule.reasoning_effort || '', anyEffort: true, policy: rule.policy }))
+    .map(rule => ({ model: rule.requested_model, policy: rule.policy }))
 }
 
 /**
  * The policy a request for this model actually uses: the server's answer if
- * it sent one, otherwise the saved rule for the exact effort, then the rule
- * for every effort, then the default.
+ * it sent one, otherwise the saved rule for the model, then the default.
  */
-function modelPolicyText(model: OpenAIEvalOverviewModel) {
+function modelPolicyText(model: Pick<OverviewModelRow, 'requested_model' | 'policy'>) {
   if (model.policy) return policyLabel(model.policy as OpenAIEvalSchedulingPolicy)
-  const name = model.requested_model.toLowerCase()
-  const effort = (model.reasoning_effort || '').toLowerCase()
-  const matches = props.rules.filter(rule => rule.requested_model.toLowerCase() === name)
-  const rule = matches.find(item => (item.reasoning_effort || '').toLowerCase() === effort && effort !== '') ?? matches.find(item => !item.reasoning_effort)
+  const rule = modelPolicyRule(props.rules, model.requested_model)
   return rule ? policyLabel(rule.policy) : t('admin.modelIntegrity.scheduling.board.models.defaultPolicy')
 }
 
@@ -739,6 +756,13 @@ const formatPercent = (value: number) => `${Number((value * 100).toFixed(1))}%`
 .lb-models tr:last-child td { @apply border-b-0; }
 .lb-models .num { @apply whitespace-nowrap text-right tabular-nums; }
 .lb-upstream { @apply max-w-[14rem] break-words; }
+/* Folded effort evidence stays one click away and never adds a second row for the model. */
+.lb-efforts { @apply mt-1 text-[11px] font-normal text-gray-500 dark:text-gray-400; }
+.lb-efforts-summary { @apply cursor-pointer underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500; }
+.lb-efforts-note { @apply mt-1 max-w-[40ch] leading-snug; }
+.lb-efforts-list { @apply mt-1 space-y-0.5; }
+.lb-efforts-list li { @apply flex flex-wrap gap-x-2 tabular-nums; }
+.lb-efforts-name { @apply font-medium text-gray-700 dark:text-gray-300; }
 .lb-more { @apply flex flex-wrap items-center justify-center gap-3 pt-1; }
 
 /* Below lg each row stacks: rank, account, score and toggle on top, factors in a grid beneath. */

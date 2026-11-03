@@ -116,13 +116,14 @@ func TestOpenAIQualitySchedulerEffectsOffDefaultStabilityUnchanged(t *testing.T)
 	}
 }
 
-func TestOpenAIQualitySchedulerUsesFractionIncludingSuspectedPasses(t *testing.T) {
+func TestOpenAIQualitySchedulerUsesCurrentDetectorPerTypeVerdicts(t *testing.T) {
 	enableQualityEffects(t)
 	now := time.Now().UTC().Add(-time.Second)
 	perfect := qualityTestAccount(t, qualityTestAggregate(now, 1, 1, 1, 0))
 	candy := qualityTestAccount(t, qualityTestAggregate(now, 2, 10, 8, 0))
-	fingerprint := qualityTestAggregate(now, 3, 400, 0, 400)
+	fingerprint := qualityTestAggregate(now, 3, 3, 3, 0)
 	fingerprint.TestType = OpenAIEvalTypeFingerprint
+	fingerprint.AttributionRuleVersion = openAIEvalQualityAttributionRuleVersion(OpenAIEvalTypeFingerprint)
 	accounts := []*Account{perfect, candy, qualityTestAccount(t, fingerprint)}
 	installQualityTestSnapshot(t, accounts)
 	s := openAIResetTestScheduler(0)
@@ -130,11 +131,11 @@ func TestOpenAIQualitySchedulerUsesFractionIncludingSuspectedPasses(t *testing.T
 		RequestedModel: "gpt-6.1-sol", RequestedReasoningEffort: "high", SchedulingPolicy: OpenAIEvalSchedulingPolicyAvoidDegradation,
 	}, accounts, nil)
 	scores := openAIPlanScores(plan)
-	require.Contains(t, []int64{1, 3}, plan.selectionOrder[0].account.ID, "a passed diagnostic and a suspected-normal diagnostic share the best tier")
+	require.Contains(t, []int64{1, 3}, plan.selectionOrder[0].account.ID, "passed Candy and fingerprint diagnostics share the best tier")
 	require.Equal(t, scores[2], scores[3], "quality tiers are separate from operational scores")
 	trace := buildOpenAIAccountScheduleCandidates(plan, nil, "gpt-6.1-sol", "high")
-	require.Equal(t, 1, trace[2].SuspectedPassCount)
-	require.Zero(t, trace[2].PassCount)
+	require.Zero(t, trace[2].SuspectedPassCount)
+	require.Equal(t, 1, trace[2].PassCount)
 	require.Equal(t, 1.0, *trace[2].QualityRatio)
 	require.Zero(t, *trace[1].QualityRatio, "Candy's warning verdict counts as one failed diagnostic even with eight passing samples")
 }

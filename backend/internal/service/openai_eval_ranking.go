@@ -249,7 +249,7 @@ func (s *OpenAIEvalService) EvaluateScheduling(ctx context.Context, actorID int6
 }
 
 func rankingDimensionKey(groupID int64, model, effort string) string {
-	payload, _ := json.Marshal([]any{groupID, model, normalizeOpenAIAccountRuntimeRoutePart(effort, 64)})
+	payload, _ := json.Marshal([]any{groupID, model})
 	digest := sha256.Sum256(payload)
 	return hex.EncodeToString(digest[:])
 }
@@ -287,7 +287,7 @@ func (r *OpenAIEvalRankingService) observe(groupID int64, model, effort string) 
 		delete(r.observed, oldestKey)
 		r.observedEvictions++
 	}
-	r.observed[key] = openAIRankingObservedRoute{groupID, model, normalizeOpenAIAccountRuntimeRoutePart(effort, 64), now}
+	r.observed[key] = openAIRankingObservedRoute{groupID, model, "", now}
 }
 
 func (r *OpenAIEvalRankingService) statusLocked(snapshot *openAIRankingGeneration) OpenAIEvalRankingSnapshot {
@@ -362,7 +362,7 @@ func (s *OpenAIEvalService) SchedulingRankings(filter OpenAIEvalRankingFilter) (
 	if filter.Limit > 500 {
 		return nil, errors.New("ranking limit must be between 1 and 500")
 	}
-	filterKey, _ := json.Marshal([]any{filter.GroupID, filter.RequestedModel, filter.ReasoningEffort})
+	filterKey, _ := json.Marshal([]any{filter.GroupID, filter.RequestedModel})
 	var cursor rankingCursor
 	if filter.Cursor != "" {
 		payload, err := base64.RawURLEncoding.DecodeString(filter.Cursor)
@@ -385,7 +385,7 @@ func (s *OpenAIEvalService) SchedulingRankings(filter OpenAIEvalRankingFilter) (
 	if snapshot == nil {
 		return &result, nil
 	}
-	complete := filter.GroupID != nil && filter.RequestedModel != nil && filter.ReasoningEffort != nil
+	complete := filter.GroupID != nil && filter.RequestedModel != nil
 	var dimensions []OpenAIEvalRankingDimension
 	for _, dim := range snapshot.dimensions {
 		groupID := int64(0)
@@ -396,9 +396,6 @@ func (s *OpenAIEvalService) SchedulingRankings(filter OpenAIEvalRankingFilter) (
 			continue
 		}
 		if filter.RequestedModel != nil && dim.RequestedModel != *filter.RequestedModel {
-			continue
-		}
-		if filter.ReasoningEffort != nil && dim.ReasoningEffort != *filter.ReasoningEffort {
 			continue
 		}
 		dimensions = append(dimensions, dim)
@@ -445,45 +442,7 @@ func (s *OpenAIEvalService) SchedulingRankings(filter OpenAIEvalRankingFilter) (
 }
 
 func (r *OpenAIEvalRankingService) readLatest(ctx context.Context, config *OpenAIEvalConfig) (map[OpenAIEvalEvidenceKey]OpenAIEvalRun, error) {
-	result := make(map[OpenAIEvalEvidenceKey]OpenAIEvalRun)
-	var keys []OpenAIEvalEvidenceKey
-	seen := make(map[OpenAIEvalEvidenceKey]bool)
-	for _, route := range config.Accounts {
-		for _, testType := range openAIEvalQualityTestTypes {
-			if _, selected := openAIEvalQualityTestInterval(config, route.AccountID, route.RequestedModel, route.ReasoningEffort, testType); !selected {
-				continue
-			}
-			key := OpenAIEvalEvidenceKey{route.AccountID, openAIEvalQualityDimension(route.RequestedModel), openAIEvalQualityDimension(route.ReasoningEffort), testType}
-			if !seen[key] {
-				seen[key] = true
-				keys = append(keys, key)
-			}
-		}
-	}
-	if len(keys) == 0 {
-		return result, nil
-	}
-	repo, ok := r.eval.repo.(OpenAIEvalLatestEvidenceRepository)
-	if !ok {
-		return nil, ErrOpenAIEvalRankingUnavailable
-	}
-	for start := 0; start < len(keys); start += 600 {
-		runs, err := repo.LatestCompletedRuns(ctx, keys[start:min(start+600, len(keys))])
-		if err != nil {
-			return nil, err
-		}
-		for _, run := range runs {
-			key := OpenAIEvalEvidenceKey{run.AccountID, openAIEvalQualityDimension(run.RequestedModel), openAIEvalQualityDimension(run.ReasoningEffort), run.TestType}
-			if !seen[key] || run.Status == "running" || run.DiagnosticOnly {
-				continue
-			}
-			previous, exists := result[key]
-			if !exists || run.FinishedAt.After(previous.FinishedAt) || (run.FinishedAt.Equal(previous.FinishedAt) && run.ID > previous.ID) {
-				result[key] = run
-			}
-		}
-	}
-	return result, nil
+	return loadOpenAIEvalModelQualityRuns(ctx, r.eval.repo, config, r.now())
 }
 
 func sortedRankingKeys[V any](values map[string]V) []string {

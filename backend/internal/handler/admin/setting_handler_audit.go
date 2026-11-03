@@ -452,6 +452,9 @@ func diffSettings(before *service.SystemSettings, after *service.SystemSettings,
 	if before.EnableFingerprintUnification != after.EnableFingerprintUnification {
 		changed = append(changed, "enable_fingerprint_unification")
 	}
+	if before.OpenAIWSModeRouterV2Enabled != after.OpenAIWSModeRouterV2Enabled {
+		changed = append(changed, "openai_ws_mode_router_v2_enabled")
+	}
 	if before.OpenAITTFTMode != after.OpenAITTFTMode {
 		changed = append(changed, "openai_ttft_mode")
 	}

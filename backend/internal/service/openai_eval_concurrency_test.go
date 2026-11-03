@@ -67,7 +67,7 @@ func (c *evalConcurrencyCache) counts() (int, int) {
 	return len(c.slots), c.peak
 }
 
-func TestEvalModelTraceSharesRemainingAccountConcurrency(t *testing.T) {
+func TestEvalFingerprintSharesRemainingAccountConcurrency(t *testing.T) {
 	for _, occupied := range []int{0, 1} {
 		t.Run(string(rune('0'+occupied))+" existing requests", func(t *testing.T) {
 			cache := newEvalConcurrencyCache()
@@ -104,7 +104,7 @@ func TestEvalModelTraceSharesRemainingAccountConcurrency(t *testing.T) {
 				err error
 			}, 1)
 			go func() {
-				run, err := svc.Run(ctx, OpenAIEvalRunRequest{AccountID: 995, RequestedModel: "gpt-5.4", TestType: OpenAIEvalTypeModelTrace}, 1, "manual")
+				run, err := svc.Run(ctx, OpenAIEvalRunRequest{AccountID: 995, RequestedModel: "gpt-5.4", TestType: OpenAIEvalTypeFingerprint}, 1, "manual")
 				done <- struct {
 					run *OpenAIEvalRun
 					err error

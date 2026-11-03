@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/service/cpaeval"
 	"github.com/stretchr/testify/require"
 )
 
@@ -67,7 +68,7 @@ func TestEvalNamedPrismAPIAccountRunsAllTextTests(t *testing.T) {
 	for _, tc := range []struct {
 		testType string
 		requests int
-	}{{OpenAIEvalTypeCandy, 1}, {OpenAIEvalTypeFingerprint, 60}, {OpenAIEvalTypeModelTrace, 3}} {
+	}{{OpenAIEvalTypeCandy, 1}, {OpenAIEvalTypeFingerprint, 3}, {OpenAIEvalTypePelican, 1}} {
 		t.Run(tc.testType, func(t *testing.T) {
 			svc, repo, upstream := evalRunHarness(t, func(req *http.Request, _ int) (*http.Response, error) {
 				require.Equal(t, "/v1/chat/completions", req.URL.Path)
@@ -75,37 +76,30 @@ func TestEvalNamedPrismAPIAccountRunsAllTextTests(t *testing.T) {
 				var payload map[string]any
 				require.NoError(t, json.NewDecoder(req.Body).Decode(&payload))
 				require.Equal(t, "gpt-5.4", payload["model"])
-				require.Equal(t, "medium", payload["reasoning_effort"])
+				if tc.testType == OpenAIEvalTypeFingerprint {
+					require.NotContains(t, payload, "reasoning_effort")
+				} else {
+					require.Equal(t, "medium", payload["reasoning_effort"])
+				}
 				require.Equal(t, false, payload["stream"])
-				require.Len(t, payload["messages"], 2)
+				require.GreaterOrEqual(t, len(payload["messages"].([]any)), 2)
 				require.NotContains(t, payload, "input")
 				require.NotContains(t, payload, "reasoning")
 				answer := "21"
 				switch tc.testType {
 				case OpenAIEvalTypeFingerprint:
 					messages := payload["messages"].([]any)
-					prompt := messages[1].(map[string]any)["content"].(string)
+					prompt := messages[len(messages)-1].(map[string]any)["content"].(string)
 					matched := false
-					for _, probe := range OpenAIEvalFingerprintProbes {
-						for _, question := range probe.Prompts {
-							if prompt == probe.Instructions+"\n"+question {
-								switch probe.Kind {
-								case "int":
-									answer = fmt.Sprint(probe.Low)
-								case "coin":
-									answer = "heads"
-								case "letter":
-									answer = "a"
-								default:
-									answer = "blue"
-								}
-								matched = true
-							}
+					for _, challenge := range cpaeval.FingerprintSuite() {
+						if prompt == challenge.Prompt {
+							matched = true
 						}
 					}
 					require.True(t, matched, "unknown fingerprint prompt")
-				case OpenAIEvalTypeModelTrace:
-					answer = strings.TrimSuffix(strings.Repeat("42,", 332), ",")
+					answer = strings.Repeat("42,", 350)
+				case OpenAIEvalTypePelican:
+					answer = "<html><body>pelican</body></html>"
 				}
 				return newJSONResponse(200, evalChatJSON(answer, "stop")), nil
 			})
@@ -120,7 +114,9 @@ func TestEvalNamedPrismAPIAccountRunsAllTextTests(t *testing.T) {
 			require.EqualValues(t, tc.requests, upstream.calls.Load())
 			require.Equal(t, tc.requests, run.Outcome.SampleCount)
 			require.Len(t, repo.runs, 1)
-			require.NotEqual(t, "insufficient", run.Status)
+			if tc.testType != OpenAIEvalTypeFingerprint || cpaeval.ModelEnrolled(run.RequestedModel) {
+				require.NotEqual(t, "insufficient", run.Status)
+			}
 			require.Empty(t, run.Error)
 			if tc.testType == OpenAIEvalTypeCandy {
 				require.Equal(t, "pass", run.Status)

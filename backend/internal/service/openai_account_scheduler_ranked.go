@@ -209,7 +209,7 @@ func (s *defaultOpenAIAccountScheduler) overviewPriorLocked(r *OpenAIEvalRanking
 		if rule.Enabled != nil && !*rule.Enabled {
 			continue
 		}
-		if openAIEvalQualityDimension(rule.RequestedModel) == openAIEvalQualityDimension(model) && (rule.ReasoningEffort == "" || rule.ReasoningEffort == effort) {
+		if openAIEvalQualityDimension(rule.RequestedModel) == openAIEvalQualityDimension(model) {
 			return nil, false
 		}
 	}
@@ -263,7 +263,7 @@ func (s *defaultOpenAIAccountScheduler) overviewPriorLocked(r *OpenAIEvalRanking
 			}
 		}
 		q := qualityFromLatestRuns(cfg, a.ID, model, effort, latest, now)
-		if q.Selected > 0 {
+		if q.Selected > 0 || openAIEvalAccountModelConfigured(cfg, a.ID, model) {
 			return nil, false
 		}
 		if modelConfigured {
@@ -273,13 +273,13 @@ func (s *defaultOpenAIAccountScheduler) overviewPriorLocked(r *OpenAIEvalRanking
 			return nil, false
 		}
 		for k := range latest {
-			if k.AccountID == a.ID && k.RequestedModel == model && k.ReasoningEffort == effort {
+			if k.AccountID == a.ID && k.RequestedModel == model {
 				return nil, false
 			}
 		}
 		upstream := a.GetMappedModel(req.RequestedModel)
 		for _, m := range monitoring {
-			if m.accountID == a.ID && m.model == upstream && m.effort == effort && len(m.rows) > 0 {
+			if m.accountID == a.ID && m.model == upstream && len(m.rows) > 0 {
 				return nil, false
 			}
 		}

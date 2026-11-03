@@ -3,12 +3,12 @@
 package service
 
 import (
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/service/cpaeval"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
@@ -104,7 +104,7 @@ func TestEvalAPIKeyAllResponsesTestsUseCodexTurns(t *testing.T) {
 	for _, tc := range []struct {
 		testType string
 		requests int
-	}{{OpenAIEvalTypeCandy, 1}, {OpenAIEvalTypeModelTrace, 3}, {OpenAIEvalTypeFingerprint, 60}} {
+	}{{OpenAIEvalTypeCandy, 1}, {OpenAIEvalTypeFingerprint, 3}, {OpenAIEvalTypePelican, 1}} {
 		t.Run(tc.testType, func(t *testing.T) {
 			svc, _, transport := evalRunHarness(t, func(req *http.Request, _ int) (*http.Response, error) {
 				body, err := io.ReadAll(req.Body)
@@ -112,39 +112,32 @@ func TestEvalAPIKeyAllResponsesTestsUseCodexTurns(t *testing.T) {
 				require.Equal(t, "/v1/responses", req.URL.Path)
 				require.True(t, gjson.GetBytes(body, "stream").Bool())
 				require.Equal(t, "additional_tools", gjson.GetBytes(body, "input.0.type").String())
-				prompt := gjson.GetBytes(body, "input.6.content.0.text").String()
-				require.Contains(t, prompt, "Do not use any external tools")
+				inputs := gjson.GetBytes(body, "input").Array()
+				prompt := inputs[len(inputs)-1].Get("content.0.text").String()
 				answer := "21"
 				switch tc.testType {
-				case OpenAIEvalTypeModelTrace:
-					answer = strings.TrimSuffix(strings.Repeat("42,", 332), ",")
 				case OpenAIEvalTypeCandy:
-					require.Equal(t, "Do not use any external tools to answer the following request.\n\n"+OpenAIEvalCandyPrompt, prompt)
+					require.Equal(t, OpenAIEvalCandyPrompt, prompt)
 				case OpenAIEvalTypeFingerprint:
 					matched := false
-					for _, probe := range OpenAIEvalFingerprintProbes {
-						for _, question := range probe.Prompts {
-							if prompt != "Do not use any external tools to answer the following request.\n\n"+probe.Instructions+"\n"+question {
-								continue
-							}
-							matched = true
-							switch probe.Kind {
-							case "int":
-								answer = fmt.Sprint(probe.Low)
-							case "coin":
-								answer = "heads"
-							case "letter":
-								answer = "a"
-							default:
-								answer = "blue"
-							}
+					for _, challenge := range cpaeval.FingerprintSuite() {
+						if prompt != challenge.Prompt {
+							continue
+						}
+						matched = true
+						if challenge.Instructions != "" {
+							require.Contains(t, inputs[2].Get("content.0.text").String(), challenge.Instructions)
 						}
 					}
 					require.True(t, matched)
+					require.False(t, gjson.GetBytes(body, "reasoning.effort").Exists())
+					answer = strings.Repeat("42,", 350)
+				case OpenAIEvalTypePelican:
+					answer = "<html><body>pelican</body></html>"
 				}
 				return newJSONResponse(200, evalCompletedJSON(answer)), nil
 			})
-			run, err := svc.Run(t.Context(), OpenAIEvalRunRequest{AccountID: 995, TestType: tc.testType, RequestedModel: "gpt-5.4", SampleMode: "quick"}, 1, "manual")
+			run, err := svc.Run(t.Context(), OpenAIEvalRunRequest{AccountID: 995, TestType: tc.testType, RequestedModel: "gpt-5.4", ReasoningEffort: "high", SampleMode: "quick"}, 1, "manual")
 			require.NoError(t, err)
 			require.Equal(t, tc.requests, run.RequestCount)
 			require.EqualValues(t, tc.requests, transport.calls.Load())

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/Wei-Shaw/sub2api/internal/service/cpaeval"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -25,20 +26,20 @@ func TestListOpenAIEvalModelsOnlyAdvertisesTextCatalogAndSampleCosts(t *testing.
 		Items []struct {
 			ID string `json:"id"`
 		} `json:"items"`
-		ModelTrace struct {
-			Models         []string `json:"models"`
-			CandidateCount int      `json:"candidate_count"`
-		} `json:"modeltrace"`
+		Fingerprint struct {
+			Models   []cpaeval.Model `json:"models"`
+			Requests int             `json:"requests"`
+		} `json:"fingerprint"`
 	}
-	_ = json.Unmarshal(response.Body.Bytes(), &payload)
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &payload))
 	require.NotEmpty(t, payload.Items)
 	for _, item := range payload.Items {
 		require.NotContains(t, item.ID, "gpt-image")
 		require.NotContains(t, item.ID, "embedding")
 	}
 	require.Len(t, payload.Items, len(service.OpenAIEvalSupportedModels()))
-	require.Equal(t, service.OpenAIEvalModelTraceModels(), payload.ModelTrace.Models)
-	require.Len(t, payload.ModelTrace.Models, payload.ModelTrace.CandidateCount)
+	require.Equal(t, cpaeval.Models(), payload.Fingerprint.Models)
+	require.Equal(t, 3, payload.Fingerprint.Requests)
 }
 
 func TestOpenAIEvalHandlersFailClosedWithoutService(t *testing.T) {

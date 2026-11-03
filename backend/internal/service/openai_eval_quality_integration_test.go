@@ -127,10 +127,11 @@ func TestOpenAIEvalQualityIntegrationPersistsCompletedManualAndAutomaticEvidence
 				require.Zero(t, assessment.PassCount)
 				require.Zero(t, assessment.Ratio(), "a warning Candy final verdict is not a half-passing test")
 			}
-			for _, dimensions := range [][2]string{{"gpt-6-astra", "high"}, {"gpt-5.4", "low"}} {
-				_, other := ReadOpenAIEvalQualityFromAccount(accounts.accountsByID[995], dimensions[0], dimensions[1], time.Now())
-				require.False(t, other)
-			}
+			_, other := ReadOpenAIEvalQualityFromAccount(accounts.accountsByID[995], "gpt-6-astra", "high", time.Now())
+			require.False(t, other, "different models remain isolated")
+			shared, other := ReadOpenAIEvalQualityFromAccount(accounts.accountsByID[995], "gpt-5.4", "low", time.Now())
+			require.True(t, other, "all efforts share model quality")
+			require.Equal(t, quality, shared)
 		})
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -36,7 +37,8 @@ func readOpenAIEvalChatCompletionsResponse(ctx context.Context, resp *http.Respo
 		return readOpenAIEvalResponse(ctx, resp, false, true)
 	}
 	result := &OpenAIEvalSampleResponse{HTTPStatus: resp.StatusCode}
-	limited := &io.LimitedReader{R: resp.Body, N: openAIEvalResponseLimit + 1}
+	responseLimit := openAIEvalResponseLimitFor(ctx)
+	limited := &io.LimitedReader{R: resp.Body, N: int64(responseLimit) + 1}
 	reader := bufio.NewReader(limited)
 	prefix, _ := reader.Peek(5)
 	isSSE := strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") ||
@@ -125,7 +127,7 @@ func readOpenAIEvalChatCompletionsResponse(ctx context.Context, resp *http.Respo
 			return result, openAIEvalIOError(ctx, err, resp.StatusCode)
 		}
 		if limited.N == 0 {
-			return result, newOpenAIEvalRequestError("response_too_large", "response exceeded 2 MiB", resp.StatusCode)
+			return result, newOpenAIEvalRequestError("response_too_large", fmt.Sprintf("response exceeded %d bytes", responseLimit), resp.StatusCode)
 		}
 		if err := apply(body); err != nil {
 			return result, err
@@ -135,7 +137,7 @@ func readOpenAIEvalChatCompletionsResponse(ctx context.Context, resp *http.Respo
 	// A few compatible providers stream despite stream=false. Keep their usage
 	// frame, but require both finish_reason and [DONE] before accepting a sample.
 	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 4096), openAIEvalResponseLimit+1)
+	scanner.Buffer(make([]byte, 4096), responseLimit+1)
 	var data strings.Builder
 	dispatch := func() (bool, error) {
 		raw := strings.TrimSpace(data.String())

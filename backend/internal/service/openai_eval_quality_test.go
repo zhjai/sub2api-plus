@@ -79,9 +79,14 @@ func TestOpenAIEvalQualityReadIsolationFreshnessAndMalformed(t *testing.T) {
 	got, ok := ReadOpenAIEvalQualityFromAccount(account, " GPT-6.1-SOL ", "HIGH", now)
 	require.True(t, ok)
 	require.Equal(t, 0.7, got.Ratio())
-	for _, dimension := range [][2]string{{"gpt-6-sol", "high"}, {"gpt-6.1-sol", "low"}, {"gpt-6.1-sol", ""}} {
+	for _, dimension := range [][2]string{{"gpt-6-sol", "high"}, {"gpt-6-astra", "low"}} {
 		_, ok := ReadOpenAIEvalQualityFromAccount(account, dimension[0], dimension[1], now)
 		require.False(t, ok)
+	}
+	for _, effort := range []string{"low", "", "high"} {
+		shared, ok := ReadOpenAIEvalQualityFromAccount(account, "gpt-6.1-sol", effort, now)
+		require.True(t, ok)
+		require.Equal(t, got, shared)
 	}
 	_, ok = ReadOpenAIEvalQualityFromAccount(account, "gpt-6.1-sol", "high", now.Add(OpenAIEvalQualityTTL))
 	require.False(t, ok)
@@ -90,7 +95,6 @@ func TestOpenAIEvalQualityReadIsolationFreshnessAndMalformed(t *testing.T) {
 		"old_schema":     func(q *OpenAIEvalQualityAggregate) { q.Version = "attempts-v0" },
 		"wrong_account":  func(q *OpenAIEvalQualityAggregate) { q.AccountID++ },
 		"wrong_model":    func(q *OpenAIEvalQualityAggregate) { q.RequestedModel = "gpt-6-sol" },
-		"wrong_effort":   func(q *OpenAIEvalQualityAggregate) { q.ReasoningEffort = "low" },
 		"unknown_source": func(q *OpenAIEvalQualityAggregate) { q.TriggerSource = "imported" },
 		"zero":           func(q *OpenAIEvalQualityAggregate) { q.EvaluatedCount = 0 },
 		"overflow":       func(q *OpenAIEvalQualityAggregate) { q.PassCount = 11 },
@@ -239,34 +243,29 @@ func TestOpenAIEvalQualityRecordIdentityBankAndPartialErrors(t *testing.T) {
 	accounts := &qualityAccountRepository{account: &Account{ID: 17, Extra: map[string]any{}}}
 	s := &OpenAIEvalService{accounts: accounts, repo: &qualityLeaseRepository{}}
 	now := time.Now().UTC().Add(-time.Second)
-	run := &OpenAIEvalRun{AccountID: 17, TestType: OpenAIEvalTypeModelTrace, RequestedModel: "gpt-6.1-sol", ReasoningEffort: "high",
-		DataVersion: OpenAIEvalQualityDataVersion, TriggerSource: "scheduled", Status: "suspected_normal", FinishedAt: now,
-		Outcome: OpenAIEvalOutcome{ModelTrace: &OpenAIEvalModelTraceResult{BankRevision: OpenAIEvalQualityModelTraceBankRevision, Prediction: "gpt-6.1-sol", UsedOutputs: 2}}}
+	value := modelDimensionFingerprint(1, "gpt-6.1-sol", "high", true, 2, now)
+	value.AccountID, value.Error = 17, "upstream_error"
+	run := &value
 	counts := OpenAIEvalQualityCounts{2, 2, 0}
 	require.NoError(t, s.recordOpenAIEvalQuality(context.Background(), 1, run, counts))
 	require.Equal(t, 1, accounts.writes)
+	require.Equal(t, "upstream_error", run.Error, "partial attribution preserves diagnostics")
 	run.FinishedAt = now.Add(time.Millisecond)
-	run.Outcome.ModelTrace.Samples = []OpenAIEvalModelTraceSample{{Valid: true}, {Error: "response_incomplete"}}
-	require.NoError(t, s.recordOpenAIEvalQuality(context.Background(), 2, run, counts))
-	require.Equal(t, 1, accounts.writes, "used output count must match valid outputs")
-	run.Outcome.ModelTrace.Samples = nil
-	run.Outcome.ModelTrace.BankRevision = "old-16-model-bank"
+	require.Error(t, s.recordOpenAIEvalQuality(context.Background(), 2, run, OpenAIEvalQualityCounts{3, 3, 0}))
+	revision := run.Outcome.LMFingerprint.DetectorRevision
+	run.Outcome.LMFingerprint.DetectorRevision = "old-detector"
 	require.Error(t, s.recordOpenAIEvalQuality(context.Background(), 2, run, counts))
-	run.Outcome.ModelTrace.BankRevision = OpenAIEvalQualityModelTraceBankRevision
-	run.Outcome.ModelTrace.Prediction = "gpt-6-luna"
+	run.Outcome.LMFingerprint.DetectorRevision = revision
+	run.BaselineVersion = "old-baseline"
 	require.Error(t, s.recordOpenAIEvalQuality(context.Background(), 2, run, counts))
-	run.Status = "warning"
+	run.BaselineVersion = OpenAIEvalQualityBaselineVersion
+	run.Outcome.LMFingerprint.Attribution.Prediction = "claude-sonnet-4.6"
+	require.Error(t, s.recordOpenAIEvalQuality(context.Background(), 2, run, counts))
+	run.Outcome = openAIEvalLMFingerprintOutcome(run.RequestedModel, run.Outcome.LMFingerprint)
+	run.Status = run.Outcome.Status
 	require.NoError(t, s.recordOpenAIEvalQuality(context.Background(), 2, run, OpenAIEvalQualityCounts{2, 0, 0}))
 	require.Equal(t, 2, accounts.writes)
-	run.FinishedAt = now.Add(2 * time.Millisecond)
-	run.TestType = OpenAIEvalTypeFingerprint
-	run.Status = "suspected_normal"
-	run.Outcome = OpenAIEvalOutcome{Fingerprint: &OpenAIEvalFingerprintResult{NearestModel: "gpt-6.1-sol", ValidSamples: 60}}
-	counts = OpenAIEvalQualityCounts{60, 0, 60}
-	run.BaselineVersion = "old-baseline"
-	require.Error(t, s.recordOpenAIEvalQuality(context.Background(), 3, run, counts))
-	run.BaselineVersion = OpenAIEvalQualityBaselineVersion
+	run.TestType = OpenAIEvalTypeModelTrace
 	require.NoError(t, s.recordOpenAIEvalQuality(context.Background(), 3, run, counts))
-	require.Equal(t, 3, accounts.writes)
-	require.Error(t, s.recordOpenAIEvalQuality(context.Background(), 4, run, OpenAIEvalQualityCounts{60, 60, 0}))
+	require.Equal(t, 2, accounts.writes, "retired ModelTrace remains history only")
 }

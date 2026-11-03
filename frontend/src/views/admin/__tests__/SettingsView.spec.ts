@@ -465,6 +465,7 @@ const baseSettingsResponse = {
   min_claude_code_version: "",
   max_claude_code_version: "",
   allow_ungrouped_key_scheduling: false,
+  openai_ws_mode_router_v2_enabled: true,
   openai_ttft_mode: "semantic",
   enable_fingerprint_unification: true,
   enable_metadata_passthrough: false,
@@ -1506,6 +1507,78 @@ describe("admin SettingsView payment visible method controls", () => {
 
     const payload = updateSettings.mock.calls.at(-1)?.[0] as Record<string, unknown>;
     expect(payload.openai_ttft_mode).toBe("semantic");
+  });
+
+  it("loads the OpenAI WS mode router switch on and saves an explicit false", async () => {
+    getSettings.mockResolvedValueOnce({
+      ...baseSettingsResponse,
+      openai_ws_mode_router_v2_enabled: true,
+    });
+    const wrapper = mountView();
+
+    await flushPromises();
+    await openGatewayTab(wrapper);
+
+    const toggle = wrapper.get('[data-testid="openai-ws-mode-router-v2-toggle"]');
+    expect((toggle.element as HTMLInputElement).checked).toBe(true);
+    expect((toggle.element as HTMLInputElement).disabled).toBe(false);
+    // It routes by each account's own mode; it never claims to force WebSocket.
+    const row = wrapper.get('[data-testid="openai-ws-mode-router-v2"]').text();
+    expect(row).toContain("admin.settings.gatewayForwarding.openaiWSModeRouterV2Hint");
+    expect(zhSettings.settings.gatewayForwarding.openaiWSModeRouterV2Hint).toContain("不会让所有请求都改走 WebSocket");
+    expect(enSettings.settings.gatewayForwarding.openaiWSModeRouterV2Hint).toContain("does not move every request to WebSocket");
+
+    await toggle.setValue(false);
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+
+    const payload = updateSettings.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(payload).toHaveProperty("openai_ws_mode_router_v2_enabled", false);
+  });
+
+  it("keeps a loaded false OpenAI WS mode router switch false on save and after the reply", async () => {
+    getSettings.mockResolvedValueOnce({
+      ...baseSettingsResponse,
+      openai_ws_mode_router_v2_enabled: false,
+    });
+    updateSettings.mockImplementationOnce(async (payload: Record<string, unknown>) => ({
+      ...baseSettingsResponse,
+      ...payload,
+    }));
+    const wrapper = mountView();
+
+    await flushPromises();
+    await openGatewayTab(wrapper);
+
+    const toggle = wrapper.get('[data-testid="openai-ws-mode-router-v2-toggle"]');
+    expect((toggle.element as HTMLInputElement).checked).toBe(false);
+
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+
+    const payload = updateSettings.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    // false is a real setting and is sent explicitly, never omitted.
+    expect(payload).toHaveProperty("openai_ws_mode_router_v2_enabled", false);
+    expect((wrapper.get('[data-testid="openai-ws-mode-router-v2-toggle"]').element as HTMLInputElement).checked).toBe(false);
+  });
+
+  it("does not send the OpenAI WS mode router switch when the server omits it", async () => {
+    const legacy: Record<string, unknown> = { ...baseSettingsResponse };
+    delete legacy.openai_ws_mode_router_v2_enabled;
+    getSettings.mockResolvedValueOnce(legacy);
+    const wrapper = mountView();
+
+    await flushPromises();
+    await openGatewayTab(wrapper);
+
+    expect((wrapper.get('[data-testid="openai-ws-mode-router-v2-toggle"]').element as HTMLInputElement).disabled).toBe(true);
+    expect(wrapper.find('[data-testid="openai-ws-mode-router-v2-unsupported"]').exists()).toBe(true);
+
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+
+    const payload = updateSettings.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(payload).not.toHaveProperty("openai_ws_mode_router_v2_enabled");
   });
 
   it("loads fail-safe-off Ollama Cloud usage refresh settings and saves an explicit opt-in", async () => {

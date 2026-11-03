@@ -10,6 +10,7 @@ const api = vi.hoisted(() => ({
   saveOpenAIEvalConfig: vi.fn(),
   runOpenAIEval: vi.fn(),
   listOpenAIEvalRuns: vi.fn(),
+  createOpenAIEvalPelicanFrameToken: vi.fn(),
   list: vi.fn()
 }))
 const store = vi.hoisted(() => ({ showError: vi.fn(), showSuccess: vi.fn(), showInfo: vi.fn() }))
@@ -148,17 +149,25 @@ describe('ModelIntegrityTestsView', () => {
     const wrapper = mountView()
     await flushPromises()
 
-    const trace = wrapper.get('[data-testid="test-modeltrace"]')
-    expect(trace.get('[data-testid="latest-status"]').text()).toBe('疑似正常')
-    expect(trace.find('.tt-result-likely').exists()).toBe(true)
+    // ModelTrace is retired: no panel or run button, its runs stay readable in history with a legacy tag.
+    expect(wrapper.find('[data-testid="test-modeltrace"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="run-modeltrace"]').exists()).toBe(false)
+    const trace = wrapper.findAll('[data-testid="history-row"]')[0]
+    expect(trace.get('[data-testid="history-status"]').text()).toBe('疑似正常')
+    expect(trace.get('[data-testid="history-status"]').classes()).toContain('tone-likely')
+    expect(trace.get('[data-testid="history-legacy"]').text()).toBe('旧版')
     expect(trace.text()).toContain('不代表实际路由已核实')
     // The inference qualifier is stated once, not repeated in a second note.
     expect(trace.text().split('不代表实际路由已核实')).toHaveLength(2)
     expect(trace.text()).not.toContain('不参与账号调度')
+    // A JSD fingerprint run is old-detector history: shown read-only under the current fingerprint panel.
     const fingerprint = wrapper.get('[data-testid="test-fingerprint"]')
-    expect(fingerprint.get('[data-testid="latest-status"]').text()).toBe('疑似 Luna')
+    // The status carries the legacy tag inside it.
+    expect(fingerprint.get('[data-testid="latest-status"]').text()).toBe('疑似 Luna旧版')
+    expect(fingerprint.get('[data-testid="latest-legacy"]').text()).toBe('旧版')
     expect(fingerprint.text()).toContain('不代表已确认降智')
-    expect(fingerprint.text()).not.toContain('异常')
+    // The verdict itself never reads as "abnormal" (the panel's description may name the word).
+    expect(fingerprint.get('.tt-result').text()).not.toContain('异常')
 
     const statuses = () => wrapper.findAll('[data-testid="history-status"]').map(item => item.text())
     expect(statuses()).toEqual(['疑似正常', '疑似 Luna', '证据不足'])
@@ -173,7 +182,8 @@ describe('ModelIntegrityTestsView', () => {
     await wrapper.get('[data-testid="history-row"]').trigger('click')
     await flushPromises()
     const note = document.body.querySelector('[data-testid="attribution-note"]')
-    expect(note?.textContent?.trim()).toBe('归因基于回答行为推断，不能证明实际路由。该测试开启自动运行时，最近一次已完成的归因结论会计入降智通过率，手动或自动运行均可。ModelTrace 只要有一条有效输出即可归因，失败的请求仍保留以供排查；行为指纹需全部计划采样均有效才会归因。')
+    // Old-detector records are history only: the note says so instead of claiming they count toward the pass rate.
+    expect(note?.textContent?.trim()).toBe('归因基于回答行为推断，不能证明实际路由。这是已下线测试的记录，按记录时的规则显示。')
     expect(document.body.querySelector('[data-testid="detail-status"]')?.textContent?.trim()).toBe('疑似 Luna')
     expect(document.body.textContent).toContain('gpt-5-luna')
     wrapper.unmount()
@@ -196,10 +206,10 @@ describe('ModelIntegrityTestsView', () => {
     const wrapper = mountView()
     await flushPromises()
 
-    const trace = wrapper.get('[data-testid="test-modeltrace"]')
-    expect(trace.get('[data-testid="latest-status"]').text()).toBe('正常')
-    expect(trace.find('.tt-result-ok').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="test-modeltrace"]').exists()).toBe(false)
     expect(wrapper.findAll('[data-testid="history-status"]').map(item => item.text())).toEqual(['正常', '异常'])
+    expect(wrapper.findAll('[data-testid="history-status"]')[0].classes()).toContain('tone-ok')
+    expect(wrapper.findAll('[data-testid="history-legacy"]')).toHaveLength(2)
 
     const rows = wrapper.findAll('[data-testid="history-row"]')
     await rows[0].trigger('click')
@@ -242,9 +252,13 @@ describe('ModelIntegrityTestsView', () => {
     const row = wrapper.get('[data-testid="history-row"]')
     expect(row.get('[data-testid="history-status"]').text()).toBe('正常')
     expect(row.text()).toContain('判定为正常。该结果为行为推断，不代表实际路由已核实。1 个样本请求失败：HTTP 502，bad gateway（尝试 3 次）。')
-    const latest = wrapper.get('[data-testid="test-modeltrace"]')
-    expect(latest.get('[data-testid="latest-status"]').text()).toBe('正常')
-    expect(latest.get('[data-testid="latest-explanation"]').text()).toContain('1 个样本请求失败')
+    expect(row.get('[data-testid="history-legacy"]').exists()).toBe(true)
+    // The retired test has no panel; the history row is where its result lives.
+    expect(wrapper.find('[data-testid="test-modeltrace"]').exists()).toBe(false)
+    await row.trigger('click')
+    await flushPromises()
+    expect(document.body.querySelector('[data-testid="detail-status"]')?.textContent?.trim()).toBe('正常')
+    expect(document.body.querySelector('[data-testid="detail-legacy-note"]')).not.toBeNull()
     wrapper.unmount()
   })
 
@@ -258,7 +272,9 @@ describe('ModelIntegrityTestsView', () => {
     await flushPromises()
 
     expect(wrapper.get('[data-testid="candy-sample-count"]').attributes('disabled')).toBeUndefined()
-    expect(wrapper.get('[data-testid="fingerprint-sample-mode"]').attributes('disabled')).toBeUndefined()
+    // Fingerprint has a fixed three challenges: concurrency is the one manual parameter, sample sizes are gone.
+    expect(wrapper.get('[data-testid="fingerprint-concurrency"]').attributes('disabled')).toBeUndefined()
+    expect(wrapper.find('[data-testid="fingerprint-sample-mode"]').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -324,25 +340,45 @@ describe('ModelIntegrityTestsView', () => {
     wrapper.unmount()
   })
 
-  it('asks for the fingerprint sample size before a manual run and does not change the schedule', async () => {
+  it('runs the three-challenge fingerprint at the target concurrency, with no sample size, and leaves the schedule alone', async () => {
+    api.getOpenAIEvalModels.mockResolvedValue({ ...catalog, fingerprint: { requests: 3, detector_revision: 'lmd-r9', models: [{ id: 'gpt-5', display_name: 'GPT-5', family: 'gpt', family_name: 'GPT' }, { id: 'gpt-5.6-luna', display_name: 'GPT-5.6 Luna', family: 'gpt', family_name: 'GPT' }], aliases: {} } })
     api.runOpenAIEval.mockResolvedValue({
-      id: 2, account_id: 12, test_type: 'fingerprint', requested_model: 'gpt-5', reasoning_effort: 'high', status: 'consistent',
-      outcome: { status: 'consistent', reason: 'behavior_distribution_consistent_with_versioned_reference', sample_count: 400, expected_count: 400, confidence: 'low', scheduling: 'alert_only' },
-      request_count: 400, input_tokens: 1, output_tokens: 1, duration_ms: 1000, started_at: '2026-10-01T08:00:00Z', trigger_source: 'manual'
+      id: 2, account_id: 12, test_type: 'fingerprint', requested_model: 'gpt-5', reasoning_effort: 'high', status: 'warning',
+      outcome: { status: 'warning', reason: 'fingerprint_target_mismatch', sample_count: 3, expected_count: 3, confidence: 'low', scheduling: 'alert_only',
+        lm_fingerprint: { detector_revision: 'lmd-r9', collection_status: 'completed', concurrency: 3, compared_as: 'gpt-5', enrolled: true, request_effort: '',
+          samples: [{ prompt: 'p1', expected_count: 40, attempts: 1, parsed_numbers: 40, accepted: true }, { prompt: 'p2', expected_count: 40, attempts: 2, parsed_numbers: 40, accepted: true }, { prompt: 'p3', expected_count: 40, attempts: 1, parsed_numbers: 40, accepted: true }],
+          attribution: { prediction: 'gpt-5.6-luna', prediction_name: 'GPT-5.6 Luna', probability: 0.71, used_outputs: 3, family_prediction_name: 'GPT',
+            results: [{ model: 'gpt-5.6-luna', display_name: 'GPT-5.6 Luna', family: 'gpt', family_name: 'GPT', probability: 0.71, score: 2 }, { model: 'gpt-5', display_name: 'GPT-5', family: 'gpt', family_name: 'GPT', probability: 0.2, score: 1 }] } } },
+      request_count: 4, input_tokens: 1, output_tokens: 1, duration_ms: 1000, started_at: '2026-10-01T08:00:00Z', finished_at: '2026-10-01T08:00:09Z', trigger_source: 'manual'
     })
     const wrapper = mountView()
     await flushPromises()
 
+    expect(wrapper.get('[data-testid="test-fingerprint"] [data-testid="per-run"]').text()).toBe('每次 3 次请求，失败重试时最多 9 次')
     await wrapper.get('[data-testid="run-fingerprint"]').trigger('click')
-    const strict = document.body.querySelector<HTMLInputElement>('input[name="manual-sample"][value="strict"]')
-    expect(strict).not.toBeNull()
-    strict!.checked = true
-    strict!.dispatchEvent(new Event('change'))
-    document.body.querySelector<HTMLButtonElement>('[data-testid="confirm-fingerprint"]')!.click()
     await flushPromises()
 
-    expect(api.runOpenAIEval).toHaveBeenCalledWith({ account_id: 12, requested_model: 'gpt-5', reasoning_effort: 'high', test_type: 'fingerprint', sample_mode: 'strict', max_attempts: 3 })
+    // No sample-size dialog any more; the route's effort identifies the run and is never sent upstream by the server.
+    expect(document.body.querySelector('input[name="manual-sample"]')).toBeNull()
+    expect(api.runOpenAIEval).toHaveBeenCalledWith({ account_id: 12, requested_model: 'gpt-5', reasoning_effort: 'high', test_type: 'fingerprint', concurrency: 3, max_attempts: 3 })
     expect(wrapper.text()).not.toContain('有未保存的更改')
+    // The finished run opens with prediction, family, probability, ranking and per-challenge counts.
+    const text = (id: string) => document.body.querySelector(`[data-testid="${id}"]`)?.textContent?.trim()
+    expect(text('lm-comparison')).toBe(zhT('admin.modelIntegrity.tests.lm.comparison.mismatch'))
+    expect(text('lm-prediction')).toContain('GPT-5.6 Luna')
+    expect(text('lm-family')).toBe('GPT')
+    expect(text('lm-probability')).toBe('71%')
+    expect(text('lm-used')).toBe('3 / 3')
+    expect(text('lm-effort')).toBe(zhT('admin.modelIntegrity.tests.lm.effortNotSent'))
+    expect(document.body.querySelectorAll('[data-testid="lm-sample"]')).toHaveLength(3)
+    expect(document.body.querySelector('[data-testid="lm-target-row"]')?.textContent).toContain('GPT-5')
+
+    // Concurrency is a schedule setting: picking 1 is an edit, and the next manual run sends it.
+    await wrapper.get('[data-testid="fingerprint-concurrency"]').setValue('1')
+    expect(wrapper.text()).toContain('有未保存的更改')
+    await wrapper.get('[data-testid="run-fingerprint"]').trigger('click')
+    await flushPromises()
+    expect(api.runOpenAIEval).toHaveBeenLastCalledWith({ account_id: 12, requested_model: 'gpt-5', reasoning_effort: 'high', test_type: 'fingerprint', concurrency: 1, max_attempts: 3 })
     wrapper.unmount()
   })
 
@@ -376,8 +412,10 @@ describe('ModelIntegrityTestsView', () => {
     expect(payload.revision).toBe(9)
     expect(payload.scheduling_policy).toBe('stability_first')
     // A legacy rule without the switch is sent back explicitly enabled, which the server reads the same way.
-    expect(payload.policies).toEqual([{ requested_model: 'gpt-5', reasoning_effort: 'high', policy: 'cost_first', enabled: true }])
+    // Scheduling is per account and model, so its legacy high effort is cleared, as the server does.
+    expect(payload.policies).toEqual([{ requested_model: 'gpt-5', reasoning_effort: '', policy: 'cost_first', enabled: true }])
     expect(payload.effects_enabled).toBe(true)
+    // Evaluation targets keep their effort; only scheduling rules lost it.
     expect(payload.accounts.map(route => `${route.account_id}:${route.reasoning_effort}`)).toEqual(['12:high', '11:', '12:'])
     expect(payload.accounts.every(route => !('direct_oauth_eligible' in route))).toBe(true)
     wrapper.unmount()
@@ -430,6 +468,12 @@ describe('ModelIntegrityTestsView', () => {
     wrapper.unmount()
   })
 })
+
+/** A loaded fingerprint schedule as the page saves it: timing kept, retired sample size dropped, concurrency 3 by default. */
+function currentFingerprint(schedule: { sample_mode?: string; concurrency?: number } & Record<string, unknown>) {
+  const { sample_mode: _retired, ...rest } = schedule
+  return { ...rest, concurrency: schedule.concurrency ?? 3 }
+}
 
 describe('ModelIntegrityTestsView target editing', () => {
   const bpsAccounts = [{ account_id: 11, probe_model: 'gpt-5', mode: 'auto' as const, failure_threshold: 4, recovery_threshold: 3, interval_seconds: 1800 }]
@@ -508,14 +552,16 @@ describe('ModelIntegrityTestsView target editing', () => {
     expect(payload.accounts.map(route => `${route.account_id}:${route.requested_model}:${route.reasoning_effort}`)).toEqual(['12:gpt-5.1:high', '11:gpt-5:'])
     const edited = payload.accounts[0]
     expect(edited.candy_schedule).toEqual(before.accounts[0].candy_schedule)
-    expect(edited.fingerprint_schedule).toEqual(before.accounts[0].fingerprint_schedule)
-    expect(edited.modeltrace_schedule).toEqual(before.accounts[0].modeltrace_schedule)
+    // The fingerprint schedule keeps its timing; the retired sample size gives way to concurrency (default 3).
+    expect(edited.fingerprint_schedule).toEqual(currentFingerprint(before.accounts[0].fingerprint_schedule))
+    // The retired ModelTrace schedule was off, so nothing is folded and it is never sent back.
+    expect(edited).not.toHaveProperty('modeltrace_schedule')
     expect(edited.state_probe_schedule).toEqual(before.accounts[0].state_probe_schedule)
     expect(edited.bps_mode).toBe('force_off')
     expect(payload.bps_auto_enabled).toBe(false)
     expect(payload.bps_accounts).toEqual([])
-    // A legacy rule without the switch is sent back explicitly enabled, which the server reads the same way.
-    expect(payload.policies).toEqual([{ requested_model: 'gpt-5', reasoning_effort: 'high', policy: 'cost_first', enabled: true }])
+    // A legacy rule without the switch is sent back explicitly enabled, without its retired effort.
+    expect(payload.policies).toEqual([{ requested_model: 'gpt-5', reasoning_effort: '', policy: 'cost_first', enabled: true }])
     wrapper.unmount()
   })
 
@@ -667,8 +713,9 @@ describe('ModelIntegrityTestsView target editing', () => {
     expect(edited).toMatchObject({ account_id: 11, requested_model: 'gpt-5', reasoning_effort: 'high', bps_mode: 'force_off' })
     expect(edited.state_probe_schedule).toEqual(before.state_probe_schedule)
     expect(edited.candy_schedule).toEqual(before.candy_schedule)
-    expect(edited.fingerprint_schedule).toEqual(before.fingerprint_schedule)
-    expect(edited.modeltrace_schedule).toEqual(before.modeltrace_schedule)
+    // Fingerprint was already on, so the server keeps it and the enabled ModelTrace schedule is dropped.
+    expect(edited.fingerprint_schedule).toEqual(currentFingerprint(before.fingerprint_schedule))
+    expect(edited).not.toHaveProperty('modeltrace_schedule')
     expect(payload.bps_accounts).toEqual([])
     wrapper.unmount()
   })
@@ -700,8 +747,8 @@ describe('ModelIntegrityTestsView target editing', () => {
     expect(edited).toMatchObject({ account_id: 11, requested_model: 'gpt-5.1', reasoning_effort: 'high', bps_mode: 'force_off', bps_auto: false })
     expect(edited.state_probe_schedule).toEqual(before.state_probe_schedule)
     expect(edited.candy_schedule).toEqual(before.candy_schedule)
-    expect(edited.fingerprint_schedule).toEqual(before.fingerprint_schedule)
-    expect(edited.modeltrace_schedule).toEqual(before.modeltrace_schedule)
+    expect(edited.fingerprint_schedule).toEqual(currentFingerprint(before.fingerprint_schedule))
+    expect(edited).not.toHaveProperty('modeltrace_schedule')
     expect(payload.bps_accounts).toEqual([])
     wrapper.unmount()
   })
@@ -890,7 +937,8 @@ describe('ModelIntegrityTestsView retries and per-sample diagnostics', () => {
       await input.trigger('change')
       expect(input.element.value).toBe(expected)
     }
-    expect(wrapper.get('[data-testid="test-modeltrace"] [data-testid="per-run"]').text()).toBe('每次 3 次请求，失败重试时最多 12 次')
+    // Three fingerprint challenges × four attempts each.
+    expect(wrapper.get('[data-testid="test-fingerprint"] [data-testid="per-run"]').text()).toBe('每次 3 次请求，失败重试时最多 12 次')
     await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
     await flushPromises()
     const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
@@ -910,12 +958,12 @@ describe('ModelIntegrityTestsView retries and per-sample diagnostics', () => {
     // Five attempts would be five chains, but the server caps a probe at three.
     expect(wrapper.get('[data-testid="test-state_probe"] [data-testid="per-run"]').text()).toBe('每次 2 次请求为一条链，失败重试时最多 3 条链、共 6 次请求')
 
-    await wrapper.get('[data-testid="run-modeltrace"]').trigger('click')
+    await wrapper.get('[data-testid="run-fingerprint"]').trigger('click')
     await flushPromises()
     await wrapper.get('[data-testid="run-state_probe"]').trigger('click')
     await flushPromises()
     const calls = api.runOpenAIEval.mock.calls.map(call => call[0])
-    expect(calls[0]).toEqual({ account_id: 12, requested_model: 'gpt-5', reasoning_effort: 'high', test_type: 'modeltrace', max_attempts: 5 })
+    expect(calls[0]).toEqual({ account_id: 12, requested_model: 'gpt-5', reasoning_effort: 'high', test_type: 'fingerprint', concurrency: 3, max_attempts: 5 })
     // The probe reads the same setting; the server clamps it to three chains.
     expect(calls[1]).toEqual({ account_id: 12, requested_model: 'gpt-5', reasoning_effort: 'high', test_type: 'state_probe', max_attempts: 5 })
     wrapper.unmount()
@@ -945,19 +993,21 @@ describe('ModelIntegrityTestsView retries and per-sample diagnostics', () => {
     await flushPromises()
     api.listOpenAIEvalRuns.mockResolvedValue({
       items: [{
-        id: 4, account_id: 12, test_type: 'modeltrace', requested_model: 'gpt-5', reasoning_effort: 'high', status: 'running',
+        id: 4, account_id: 12, test_type: 'fingerprint', requested_model: 'gpt-5', reasoning_effort: 'high', status: 'running',
         outcome: { status: 'running', sample_count: 2, expected_count: 3, confidence: 'none', scheduling: 'disabled' },
         request_count: 7, completed_samples: 2, expected_samples: 3, input_tokens: 1, output_tokens: 1,
         duration_ms: 500, started_at: '2026-10-02T08:00:00Z', trigger_source: 'manual'
       }]
     })
-    await wrapper.get('[data-testid="run-modeltrace"]').trigger('click')
+    await wrapper.get('[data-testid="run-fingerprint"]').trigger('click')
     await flushPromises()
-    const progress = wrapper.get('[data-testid="test-modeltrace"] [data-testid="test-progress"]')
+    // Two of three challenges done; retries pushed the physical sends to seven.
+    const progress = wrapper.get('[data-testid="test-fingerprint"] [data-testid="test-progress"]')
     expect(progress.text()).toContain('正在采样 2/3')
     expect(progress.find('.tt-progress-value').attributes('style')).toContain('67%')
     expect(progress.get('[data-testid="test-progress-requests"]').text()).toBe('已发出 7 次上游请求')
-    finish(candyRun(4, { test_type: 'modeltrace' }))
+    expect(wrapper.get('[data-testid="run-fingerprint"]').attributes('disabled')).toBeDefined()
+    finish(candyRun(4, { test_type: 'fingerprint' }))
     await flushPromises()
     wrapper.unmount()
   })
@@ -1569,5 +1619,100 @@ describe('ModelIntegrityTestsView State Probe diagnostics', () => {
       expect(run).toEqual(before)
       wrapper.unmount()
     })
+  })
+})
+
+describe('ModelIntegrityTestsView current detector, unknown models and Pelican', () => {
+  const bank = { requests: 3, detector_revision: 'lmd-r9', models: [{ id: 'gpt-5', display_name: 'GPT-5', family: 'gpt', family_name: 'GPT' }], aliases: {} }
+  const pelican = { requests: 1, variants: [{ id: 'original', label: '原版', prompt: '画一只骑自行车的鹈鹕' }, { id: 'all-in-one', label: '多合一版', prompt: '多合一提示' }] }
+  const target = (model: string, extra: Partial<OpenAIEvalConfig['accounts'][number]> = {}) => ({
+    account_id: 12, requested_model: model, reasoning_effort: 'high',
+    candy_schedule: { ...schedule(3600), sample_count: 1 }, fingerprint_schedule: schedule(86400), state_probe_schedule: schedule(21600),
+    bps_auto: false, direct_oauth_eligible: false, ...extra
+  })
+
+  it('saves a target whose model the server does not list, shows its warning, and offers no run the server would refuse', async () => {
+    const warning = 'account 12 model gpt-9-preview: automatic fingerprint disabled (model_not_enrolled)'
+    api.getOpenAIEvalModels.mockResolvedValue({ ...catalog, fingerprint: bank })
+    api.getOpenAIEvalConfig.mockResolvedValue({ ...serverConfig(), accounts: [target('gpt-9-preview', { candy_schedule: { ...schedule(3600, true), sample_count: 1 } })], warnings: [warning] })
+    api.saveOpenAIEvalConfig.mockImplementation(async (payload: OpenAIEvalConfig) => ({ ...payload, revision: 10, warnings: [warning] }))
+    api.listOpenAIEvalRuns.mockResolvedValue({ items: [] })
+    const wrapper = mountView()
+    await flushPromises()
+
+    const shown = wrapper.get('[data-testid="config-warning"]').text()
+    expect(shown).toContain('apikey-b #12 的 gpt-9-preview 不在指纹候选库中')
+    expect(shown).toContain('手动测试同样不会运行')
+    for (const type of ['candy', 'fingerprint', 'pelican']) {
+      expect(wrapper.get(`[data-testid="run-${type}"]`).attributes('disabled')).toBeDefined()
+      expect(wrapper.get(`[data-testid="test-${type}"] [data-testid="unavailable-note"]`).text()).toContain('gpt-9-preview 不在服务端可测模型列表中')
+    }
+    // The target is not counted as planned work the server will never send.
+    expect(wrapper.get('[data-testid="budget"]').text()).toContain('未开启自动测试')
+    // A schedule left on from before can still be switched off; untouched ones offer nothing.
+    expect(wrapper.find('[data-testid="test-fingerprint"] [data-testid="auto-off"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="test-candy"] [data-testid="auto-off"]').trigger('click')
+    expect(wrapper.find('[data-testid="test-candy"] [data-testid="auto-off"]').exists()).toBe(false)
+
+    await wrapper.get('[data-testid="model-integrity-save"]').trigger('click')
+    await flushPromises()
+    const payload = api.saveOpenAIEvalConfig.mock.calls[0][0] as OpenAIEvalConfig
+    expect(payload.accounts.map(route => route.requested_model)).toEqual(['gpt-9-preview'])
+    expect(payload.accounts[0].candy_schedule.enabled).toBe(false)
+    expect(payload).not.toHaveProperty('warnings')
+    expect(store.showError).not.toHaveBeenCalled()
+    expect(store.showSuccess).toHaveBeenCalled()
+    expect(wrapper.get('[data-testid="config-warning"]').text()).toContain('gpt-9-preview')
+    expect(api.runOpenAIEval).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('locks automatic fingerprint for a testable model outside the bank but keeps the manual diagnosis', async () => {
+    api.getOpenAIEvalModels.mockResolvedValue({ ...catalog, fingerprint: bank })
+    api.getOpenAIEvalConfig.mockResolvedValue({ ...serverConfig(), accounts: [target('gpt-5.1')] })
+    api.listOpenAIEvalRuns.mockResolvedValue({ items: [] })
+    const wrapper = mountView()
+    await flushPromises()
+
+    const panel = wrapper.get('[data-testid="test-fingerprint"]')
+    expect(panel.get('[data-testid="fingerprint-not-enrolled"]').text()).toContain('参考库中没有 gpt-5.1 的候选')
+    expect(panel.get('[data-testid="auto-toggle"]').attributes('disabled')).toBeDefined()
+    expect(panel.get('[data-testid="run-fingerprint"]').attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('draws a Pelican variant on demand and previews the finished page in a sandboxed server frame', async () => {
+    api.getOpenAIEvalModels.mockResolvedValue({ ...catalog, pelican })
+    api.createOpenAIEvalPelicanFrameToken.mockResolvedValue({ url: '/api/v1/openai-eval/pelican-frame/tok-1', expires_at: new Date(Date.now() + 300_000).toISOString() })
+    const drawn = {
+      id: 31, account_id: 12, test_type: 'pelican', requested_model: 'gpt-5', reasoning_effort: 'high', status: 'completed',
+      outcome: { status: 'completed', reason: 'page_generated', sample_count: 1, expected_count: 1, confidence: 'none', scheduling: 'manual_visual_review', pelican: { variant: 'original', attempts: 1, html_bytes: 2048, html_sha256: 'ab' } },
+      request_count: 1, input_tokens: 1, output_tokens: 1, duration_ms: 9000, started_at: '2026-10-02T08:00:00Z', finished_at: '2026-10-02T08:00:09Z', trigger_source: 'manual'
+    }
+    api.listOpenAIEvalRuns.mockResolvedValue({ items: [drawn] })
+    api.runOpenAIEval.mockResolvedValue({ ...drawn, id: 32, outcome: { ...drawn.outcome, pelican: { ...drawn.outcome.pelican, variant: 'all-in-one' } } })
+    const wrapper = mountView()
+    await flushPromises()
+
+    const panel = wrapper.get('[data-testid="test-pelican"]')
+    expect(panel.text()).toContain('原版')
+    expect(panel.text()).toContain('多合一版')
+    // A generated page is not a pass and never reads as one.
+    expect(panel.get('[data-testid="latest-status"]').text()).toBe('已生成')
+    expect(panel.get('[data-testid="latest-status"]').text()).not.toBe('正常')
+    const frame = panel.get('[data-testid="pelican-frame"]')
+    expect(api.createOpenAIEvalPelicanFrameToken).toHaveBeenCalledWith(31, 'preview')
+    expect(frame.attributes('sandbox')).toBe('allow-scripts')
+    expect(frame.attributes('referrerpolicy')).toBe('no-referrer')
+    expect(frame.attributes('src')).toBe('/api/v1/openai-eval/pelican-frame/tok-1')
+
+    await panel.get('[data-testid="pelican-variant-all-in-one"]').setValue(true)
+    expect(panel.get('[data-testid="pelican-prompt"]').text()).toBe('多合一提示')
+    await panel.get('[data-testid="run-pelican"]').trigger('click')
+    await flushPromises()
+    expect(api.runOpenAIEval).toHaveBeenCalledWith({ account_id: 12, requested_model: 'gpt-5', reasoning_effort: 'high', test_type: 'pelican', variant: 'all-in-one', max_attempts: 3 })
+    // The finished run opens in the dialog, which plays the page from its own frame grant.
+    expect(api.createOpenAIEvalPelicanFrameToken).toHaveBeenCalledWith(32, 'play')
+    wrapper.unmount()
   })
 })

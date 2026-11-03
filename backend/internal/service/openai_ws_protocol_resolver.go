@@ -67,7 +67,7 @@ func (r *defaultOpenAIWSProtocolResolver) Resolve(account *Account) OpenAIWSProt
 	} else {
 		return openAIWSHTTPDecision("unknown_auth_type")
 	}
-	if wsCfg.ModeRouterV2Enabled {
+	if r.cfg.OpenAIWSModeRouterV2Enabled() {
 		mode := account.ResolveOpenAIResponsesWebSocketV2Mode(wsCfg.IngressModeDefault)
 		switch mode {
 		case OpenAIWSIngressModeOff:

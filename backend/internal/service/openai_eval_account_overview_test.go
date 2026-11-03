@@ -30,6 +30,7 @@ func overviewMetric(t *testing.T, stats *openAIAccountRuntimeStats, id int64, mo
 	stat, ok := stats.loadRoute(id, model, effort)
 	require.True(t, ok)
 	stat.errorRateEWMABits.Store(math.Float64bits(rate))
+	stat.failureCount.Store(int64(rate * float64(samples)))
 	stat.sampleCount.Store(samples)
 }
 
@@ -159,11 +160,11 @@ func TestOpenAIAccountOverviewMacroMetricsAndFixedFleetTTFT(t *testing.T) {
 	require.Equal(t, 2, row.ModelCount)
 	require.Len(t, row.Models, 2)
 	require.Equal(t, "Model-A", row.Models[0].RequestedModel)
-	require.Equal(t, "high", row.Models[0].ReasoningEffort)
-	require.InDelta(t, .16, *row.Factors.ErrorRate.Value, 1e-12)
-	require.InDelta(t, .84, row.Factors.ErrorRate.Score, 1e-12)
+	require.Empty(t, row.Models[0].ReasoningEffort)
+	require.InDelta(t, 2000./100001, *row.Factors.ErrorRate.Value, 1e-12)
+	require.InDelta(t, 1-2000./100001, row.Factors.ErrorRate.Score, 1e-12)
 	require.Equal(t, 1., row.Factors.TTFT.Score)
-	require.Nil(t, row.Factors.TTFT.MS)
+	require.Equal(t, 5050., *row.Factors.TTFT.MS)
 	require.Equal(t, 0., overviewRow(t, result, 2).Factors.TTFT.Score)
 	filtered, err := s.SchedulingAccountOverview(OpenAIEvalRankingFilter{GroupID: rankingPtr(int64(8))})
 	require.NoError(t, err)
@@ -177,8 +178,8 @@ func TestOpenAIAccountOverviewMacroMetricsAndFixedFleetTTFT(t *testing.T) {
 	require.NoError(t, err)
 	row = overviewRow(t, result, 1)
 	require.Equal(t, 3, row.ModelCount, "distinct runtime identities must not merge through mappings or case folding")
-	require.Len(t, row.Models, 4)
-	require.InDelta(t, (.04+.30+.4)/3, *row.Factors.ErrorRate.Value, 1e-12)
+	require.Len(t, row.Models, 3)
+	require.InDelta(t, 1./6, *row.Factors.ErrorRate.Value, 1e-12)
 }
 
 func overviewQualityRun(id, account int64, model, effort, typ string, pass bool, now time.Time) OpenAIEvalRun {
@@ -192,15 +193,15 @@ func overviewQualityRun(id, account int64, model, effort, typ string, pass bool,
 	case OpenAIEvalTypeCandy:
 		run.Samples = []OpenAIEvalSampleRecord{{Valid: true, Answer: answer}}
 	case OpenAIEvalTypeFingerprint:
-		run.BaselineVersion = OpenAIEvalQualityBaselineVersion
-		run.Outcome.Fingerprint = &OpenAIEvalFingerprintResult{NearestModel: identity, ValidSamples: 60}
+		run = modelDimensionFingerprint(id, model, effort, pass, 2, now.Add(-time.Minute))
+		run.AccountID = account
 	case OpenAIEvalTypeModelTrace:
 		run.Outcome.ModelTrace = &OpenAIEvalModelTraceResult{Prediction: identity, BankRevision: OpenAIEvalQualityModelTraceBankRevision, UsedOutputs: 2}
 	}
 	return run
 }
 
-func TestOpenAIAccountOverviewQualityTestEffortModelWeighting(t *testing.T) {
+func TestOpenAIAccountOverviewQualityOneVotePerTypeAndModel(t *testing.T) {
 	s, repo, accounts, gateway := rankingHarness(t)
 	accounts.items[0].GroupIDs = []int64{7, 8}
 	repo.config.Revision++
@@ -234,18 +235,15 @@ func TestOpenAIAccountOverviewQualityTestEffortModelWeighting(t *testing.T) {
 	require.Equal(t, 3, row.ModelCount)
 	require.Equal(t, 2, row.QualityModelCount)
 	require.Equal(t, 1, row.UnknownQualityModelCount)
-	require.Equal(t, 3, row.QualityCellCount)
-	require.Equal(t, 2, row.UnknownQualityCellCount)
-	require.InDelta(t, ((.5+1./3)/2+1)/2, *row.Factors.Quality.Ratio, 1e-12)
+	require.Equal(t, 2, row.QualityCellCount)
+	require.Equal(t, 1, row.UnknownQualityCellCount)
+	require.InDelta(t, .75, *row.Factors.Quality.Ratio, 1e-12)
 	require.Equal(t, "gpt-6.1-sol", *row.WorstQualityModel)
-	require.InDelta(t, 5./12, *row.WorstQualityRatio, 1e-12)
+	require.InDelta(t, .5, *row.WorstQualityRatio, 1e-12)
 	for _, m := range row.Models {
 		if m.RequestedModel == "gpt-6.1-sol" {
-			want := .5
-			if m.ReasoningEffort == "low" {
-				want = 1. / 3
-			}
-			require.InDelta(t, want, *m.Factors.Quality.Ratio, 1e-12)
+			require.Empty(t, m.ReasoningEffort)
+			require.InDelta(t, .5, *m.Factors.Quality.Ratio, 1e-12)
 		}
 	}
 	require.Less(t, *row.Rank, *overviewRow(t, result, 2).Rank)
@@ -270,11 +268,8 @@ func TestOpenAIAccountOverviewQualityTestEffortModelWeighting(t *testing.T) {
 			}
 			latest[OpenAIEvalEvidenceKey{run.AccountID, run.RequestedModel, run.ReasoningEffort, run.TestType}] = run
 			q := qualityFromLatestRuns(&repo.config, 1, "gpt-6.1-sol", "high", latest, now)
-			require.False(t, q.Known)
-			require.Nil(t, q.Ratio)
-			if invalid == "error" {
-				require.Equal(t, "insufficient_valid_samples", q.EvidenceErrorCode)
-			}
+			require.True(t, q.Known, "the usable low-effort verdict still applies to this model")
+			require.Equal(t, .5, *q.Ratio)
 		})
 	}
 }
@@ -369,7 +364,8 @@ func TestOpenAIAccountOverviewStrictColdPriorAndMetricInvalidation(t *testing.T)
 	gateway.openaiAccountStats.reportForRequest(1, req.RequestedModel, "low", false, nil)
 	_, trace, err = scheduler.explicitRanking(context.Background(), req, accounts.items, nil)
 	require.NoError(t, err)
-	require.Equal(t, "snapshot", trace.RankingBasis, "other effort cannot invalidate this dimension")
+	require.Equal(t, "live_fallback", trace.RankingBasis, "all efforts update the same model dimension")
+	require.Equal(t, "request_metrics_updated", *trace.RankingFallbackReason)
 	gateway.openaiAccountStats.reportForRequest(1, req.RequestedModel, "high", false, nil)
 	_, trace, err = scheduler.explicitRanking(context.Background(), req, accounts.items, nil)
 	require.NoError(t, err)
@@ -438,7 +434,9 @@ func TestOpenAIAccountOverviewPartialQualityEvidenceExpiry(t *testing.T) {
 	require.NoError(t, err)
 	result, err = s.SchedulingAccountOverview(OpenAIEvalRankingFilter{})
 	require.NoError(t, err)
-	require.Zero(t, overviewRow(t, result, 1).ModelCount)
+	require.Equal(t, 1, overviewRow(t, result, 1).ModelCount, "configured models remain visible without evidence")
+	require.False(t, overviewRow(t, result, 1).Models[0].Factors.Quality.Known)
+	require.Nil(t, overviewRow(t, result, 1).Models[0].Factors.Quality.Ratio)
 	require.Len(t, result.Accounts, 2)
 }
 

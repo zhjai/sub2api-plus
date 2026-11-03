@@ -97,12 +97,12 @@ type OpenAIAccountScheduleRequest struct {
 	// ClientRequestedModel is the public model identifier before any group or
 	// account-specific upstream mapping. Eligibility still uses RequestedModel.
 	ClientRequestedModel string
-	// RequestedReasoningEffort keeps runtime quality state isolated for the
-	// client-requested model/effort route. It is intentionally not the mapped
-	// upstream effort, which may differ after group policy rewriting.
+	// RequestedReasoningEffort preserves the original request for tracing.
+	// Scheduling quality and runtime health are shared across all efforts
+	// for the client-requested model.
 	RequestedReasoningEffort string
 	// SchedulingPolicy is optional; when empty the active Model Integrity
-	// configuration is resolved by requested model and effort.
+	// configuration is resolved by requested model.
 	SchedulingPolicy string
 	// RouteMigrationActive enables deterministic rate-ladder selection after a
 	// session escapes an account. Candidates at the failed account's rate are
@@ -442,6 +442,8 @@ type openAIAccountRuntimeStat struct {
 	metricVersion         atomic.Uint64
 	errorRateEWMABits     atomic.Uint64
 	ttftEWMABits          atomic.Uint64
+	failureCount          atomic.Int64
+	ttftTotalMS           atomic.Int64
 	sampleCount           atomic.Int64
 	ttftSampleCount       atomic.Int64
 	observedAt            atomic.Int64
@@ -492,7 +494,7 @@ func normalizeOpenAIAccountRuntimeRoutePart(value string, maxBytes int) string {
 
 func openAIAccountRuntimeRouteKeyFor(accountID int64, model, effort string) (openAIAccountRuntimeRouteKey, bool) {
 	model = strings.TrimSpace(model)
-	effort = normalizeOpenAIAccountRuntimeRoutePart(effort, 64)
+	effort = "" // Scheduling state is shared across evaluation/request efforts.
 	if accountID <= 0 || model == "" || len(model) > openAIModelTransientMaxModelBytes {
 		return openAIAccountRuntimeRouteKey{}, false
 	}
@@ -576,10 +578,14 @@ func (s *openAIAccountRuntimeStats) reportStat(stat *openAIAccountRuntimeStat, s
 		errorSample = 0.0
 	}
 	updateEWMAAtomic(&stat.errorRateEWMABits, errorSample, alpha)
+	if !success {
+		stat.failureCount.Add(1)
+	}
 	stat.sampleCount.Add(1)
 	stat.observedAt.Store(time.Now().UnixNano())
 
 	if firstTokenMs != nil && *firstTokenMs > 0 {
+		stat.ttftTotalMS.Add(int64(*firstTokenMs))
 		stat.ttftSampleCount.Add(1)
 		stat.ttftObservedAt.Store(time.Now().UnixNano())
 		ttft := float64(*firstTokenMs)
@@ -626,7 +632,7 @@ func (s *openAIAccountRuntimeStats) snapshotForRequest(accountID int64, model, e
 		return 0, 0, false
 	}
 	if stat, ok := s.loadRoute(accountID, model, effort); ok {
-		// A missing route has no sample; do not let unrelated model/effort
+		// A missing route has no sample; do not let unrelated model
 		// health leak into this selection.
 		return snapshotOpenAIAccountRuntimeStat(stat)
 	}
@@ -1292,7 +1298,7 @@ func (s *defaultOpenAIAccountScheduler) shouldEscapeStickyAccount(accountID int6
 }
 
 // shouldEscapeStickyAccountForRequest keeps sticky health decisions isolated
-// to the client-requested model and reasoning effort. A cold route is neutral
+// to the client-requested model across efforts. A cold route is neutral
 // and must not inherit another model's aggregate failure history.
 func (s *defaultOpenAIAccountScheduler) shouldEscapeStickyAccountForRequest(accountID int64, model, effort string, cfg openAIStickyEscapeConfig) (reason string, errorRate float64, ttft float64, shouldEscape bool) {
 	if !cfg.enabled || s == nil || s.stats == nil || accountID <= 0 {
@@ -1449,7 +1455,6 @@ func deriveOpenAISelectionSeed(req OpenAIAccountScheduleRequest) uint64 {
 	writeValue(req.SessionHash)
 	writeValue(req.PreviousResponseID)
 	writeValue(openAIClientModelForSchedule(req))
-	writeValue(req.RequestedReasoningEffort)
 	if req.GroupID != nil {
 		_, _ = hasher.Write([]byte(strconv.FormatInt(*req.GroupID, 10)))
 	}
@@ -2914,7 +2919,7 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 	}) {
 		return false, "shadow_parent_unhealthy"
 	}
-	if req.RequestedModel != "" && !account.IsModelSupported(req.RequestedModel) {
+	if req.RequestedModel != "" && !supportsOpenAIRequestModel(account, req.RequestedModel, req.RequireCompact) {
 		return false, "model_not_supported"
 	}
 	if req.GroupID != nil && s != nil && s.service != nil &&
@@ -3657,7 +3662,7 @@ func (s *OpenAIGatewayService) isOpenAIAccountTransportCompatible(account *Accou
 		return false
 	}
 	if requiredTransport == OpenAIUpstreamTransportResponsesWebsocketV2Ingress {
-		if s.cfg == nil || !s.cfg.Gateway.OpenAIWS.ModeRouterV2Enabled {
+		if s.cfg == nil || !s.cfg.OpenAIWSModeRouterV2Enabled() {
 			return s.getOpenAIWSProtocolResolver().Resolve(account).Transport == OpenAIUpstreamTransportResponsesWebsocketV2
 		}
 		mode := account.ResolveOpenAIResponsesWebSocketV2Mode(s.cfg.Gateway.OpenAIWS.IngressModeDefault)
@@ -3678,7 +3683,7 @@ func (s *OpenAIGatewayService) ReportOpenAIAccountScheduleResult(account *Accoun
 // ReportOpenAIAccountScheduleResultForRequest preserves the client-requested
 // model and reasoning effort when a forwarding path has a result object. The
 // scheduler uses those dimensions for runtime quality state instead of mixing
-// unrelated model/effort traffic on one account-wide EWMA.
+// unrelated model traffic on one account-wide EWMA.
 func (s *OpenAIGatewayService) ReportOpenAIAccountScheduleResultForRequest(account *Account, model string, result *OpenAIForwardResult, success bool, firstTokenMs *int, observedErr ...error) bool {
 	return s.reportOpenAIAccountScheduleResult(account, model, result, success, firstTokenMs, observedErr...)
 }

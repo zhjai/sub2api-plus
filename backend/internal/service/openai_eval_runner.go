@@ -130,6 +130,12 @@ func (r *OpenAIEvalRunner) runDue(ctx context.Context) {
 	close(previous)
 	var wg sync.WaitGroup
 	for _, item := range items {
+		if item.TestType == OpenAIEvalTypeModelTrace || item.TestType == OpenAIEvalTypePelican {
+			if completionBased {
+				_ = completion.CompleteSchedule(ctx, item, time.Now().UTC())
+			}
+			continue
+		}
 		turn, next := previous, make(chan struct{})
 		previous = next
 		wg.Add(1)
@@ -191,7 +197,7 @@ func (r *OpenAIEvalRunner) runDue(ctx context.Context) {
 			request := OpenAIEvalRunRequest{
 				AccountID: schedule.AccountID, TestType: schedule.TestType,
 				RequestedModel: schedule.RequestedModel, ReasoningEffort: schedule.ReasoningEffort,
-				SampleMode: schedule.SampleMode, SampleCount: schedule.SampleCount,
+				SampleMode: schedule.SampleMode, SampleCount: schedule.SampleCount, Concurrency: schedule.Concurrency,
 			}
 			if completionBased {
 				latest, enabled, err := r.latestScheduledRequest(runCtx, schedule)
@@ -228,13 +234,12 @@ func (r *OpenAIEvalRunner) latestScheduledRequest(ctx context.Context, item Open
 		case OpenAIEvalTypeCandy:
 			schedule = route.CandySchedule
 		case OpenAIEvalTypeFingerprint:
-			schedule = route.FingerprintSchedule
-		case OpenAIEvalTypeModelTrace:
-			schedule = route.ModelTraceSchedule
+			schedule = openAIEvalDetectorSchedule(route)
 		case OpenAIEvalTypeStateProbe:
 			schedule = route.StateProbeSchedule
 		}
 		request.SampleMode, request.SampleCount = schedule.SampleMode, schedule.SampleCount
+		request.Concurrency = schedule.Concurrency
 		return request, schedule.Enabled, nil
 	}
 	return request, false, nil

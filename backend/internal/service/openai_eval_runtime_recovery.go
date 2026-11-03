@@ -45,7 +45,7 @@ func (s *openAIAccountRuntimeStats) reserveRuntimeRecovery(ctx context.Context, 
 		return nil
 	}
 	// Take the same lock as reports so simultaneous selectors cannot claim the
-	// same account/model/effort trial. No extra unbounded recovery map is needed.
+	// same account/model trial. No extra unbounded recovery map is needed.
 	f := s.rankingFactors(accountID, model, effort, now)
 	r := rankingRuntimeRecovery(policy, t, f, now)
 	if r == nil || r.State != "ready" {
@@ -77,7 +77,7 @@ func (s *openAIAccountRuntimeStats) reserveRuntimeRecovery(ctx context.Context, 
 			// HTTP handlers release concurrency before reporting the outcome.
 			// Keep the interval reserved across that gap. Only explicit client
 			// cancellation without a new sample refunds it; a missing report must
-			// not cause a hot retry loop. We never erase EWMA failure history.
+			// not cause a hot retry loop. We never erase recorded failure history.
 			if ctx.Err() != nil && stat.sampleCount.Load() == beforeSamples {
 				stat.recoveryLastAttemptAt.Store(previousAttempt)
 			}

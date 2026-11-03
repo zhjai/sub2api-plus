@@ -146,11 +146,15 @@ func TestR7CustomWeightValidationAndSaveIsolation(t *testing.T) {
 	require.True(t, ok)
 	high, ok := OpenAIEvalCustomBalanceForRequest("gpt-6-astra", "high")
 	require.True(t, ok)
-	require.Equal(t, reloaded.CustomBalance, low)
+	require.Equal(t, *reloaded.Policies[0].CustomBalance, low, "model rule applies regardless of request effort")
 	require.Equal(t, *reloaded.Policies[0].CustomBalance, high)
+	require.Empty(t, reloaded.Policies[0].ReasoningEffort)
+	otherModel, ok := OpenAIEvalCustomBalanceForRequest("gpt-6.1-sol", "low")
+	require.True(t, ok)
+	require.Equal(t, reloaded.CustomBalance, otherModel, "unconfigured models retain global weights")
 }
 
-func TestR7CustomPolicyRankingUsesModelEffortWeights(t *testing.T) {
+func TestR7CustomPolicyRankingUsesModelWeightsAcrossEfforts(t *testing.T) {
 	t.Cleanup(func() { SetOpenAIEvalEffectsEnabled(false); SetOpenAIEvalSchedulingPolicySnapshot(nil) })
 	SetOpenAIEvalEffectsEnabled(true)
 	SetOpenAIEvalSchedulingPolicySnapshot(&OpenAIEvalConfig{
@@ -175,7 +179,7 @@ func TestR7CustomPolicyRankingUsesModelEffortWeights(t *testing.T) {
 	for _, tc := range []struct {
 		effort    string
 		preferred int64
-	}{{"low", cheap.ID}, {"high", stable.ID}} {
+	}{{"low", stable.ID}, {"high", stable.ID}} {
 		plan := scheduler.buildOpenAIAccountLoadPlan(t.Context(), OpenAIAccountScheduleRequest{
 			RequestedModel: "mapped-model", ClientRequestedModel: "gpt-6-astra", RequestedReasoningEffort: tc.effort, UseUpstreamTokenCost: true,
 		}, []*Account{cheap, stable}, loads)

@@ -287,7 +287,7 @@ func TestOpenAIRankingCustomAbsolutePriorityUnknownFallsThrough(t *testing.T) {
 	require.Equal(t, int64(1), rows[0].AccountID, "known absolute factor must beat unknown")
 }
 
-func TestOpenAIRankingLatestOffPeriodUnknownAndExactEffort(t *testing.T) {
+func TestOpenAIRankingLatestUsableWithEffectsOffAcrossEfforts(t *testing.T) {
 	s, repo, _, _ := rankingHarness(t)
 	schedule := OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 300}
 	repo.config.EffectsEnabled = false
@@ -312,8 +312,8 @@ func TestOpenAIRankingLatestOffPeriodUnknownAndExactEffort(t *testing.T) {
 		_, err = s.EvaluateScheduling(context.Background(), 1)
 		require.NoError(t, err)
 		q := rankingDimension(t, s, 7, "gpt-6.1-sol", "").Accounts[0].Factors.Quality
-		require.False(t, q.Known)
-		require.Nil(t, q.Ratio)
+		require.True(t, q.Known)
+		require.Equal(t, 1., *q.Ratio)
 		require.Equal(t, 1, q.Selected)
 	}
 	repo.runs[1].Status = "running"
@@ -324,7 +324,7 @@ func TestOpenAIRankingLatestOffPeriodUnknownAndExactEffort(t *testing.T) {
 	repo.runs[1].ReasoningEffort = "high"
 	_, err = s.EvaluateScheduling(context.Background(), 1)
 	require.NoError(t, err)
-	require.Nil(t, rankingDimension(t, s, 7, "gpt-6.1-sol", "high").Accounts[0].Factors.Quality.Ratio)
+	require.Equal(t, 1., *rankingDimension(t, s, 7, "gpt-6.1-sol", "high").Accounts[0].Factors.Quality.Ratio)
 	require.Equal(t, 1, OpenAIEvalQualityRefreshStatus().RouteCount, "default-effort evidence stays visible without enabling routing")
 }
 
@@ -656,5 +656,5 @@ func TestOpenAIRankingMetricsCollectedWithEffectsAndAdvancedOff(t *testing.T) {
 	require.True(t, f.ErrorRate.Known)
 	require.Equal(t, int64(1), f.ErrorRate.SampleCount)
 	require.Equal(t, 250.0, *f.TTFT.MS)
-	require.False(t, gateway.openaiAccountStats.rankingFactors(1, "gpt-6.1-sol", "", time.Now()).ErrorRate.Known)
+	require.True(t, gateway.openaiAccountStats.rankingFactors(1, "gpt-6.1-sol", "", time.Now()).ErrorRate.Known)
 }

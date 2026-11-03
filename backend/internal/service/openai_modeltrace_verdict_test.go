@@ -1,7 +1,6 @@
 package service
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -31,16 +30,15 @@ func TestModelTraceCurrentVerdictHistoryQualityAndRanking(t *testing.T) {
 					Prediction: tc.predicted, BankRevision: OpenAIEvalQualityModelTraceBankRevision, UsedOutputs: 1,
 					Samples: []OpenAIEvalModelTraceSample{{Valid: true}, {Error: "http_502"}, {Error: "http_502"}},
 				}}}
-			require.Equal(t, OpenAIEvalQualityCounts{1, tc.pass, tc.suspected}, openAIEvalQualityCountsFromRun(&run))
+			require.Zero(t, openAIEvalQualityCountsFromRun(&run), "retired ModelTrace remains historical only")
 			require.Equal(t, "attributed", run.Status)
 			require.Equal(t, "legacy_attribution", run.Outcome.Reason)
 			cfg := &OpenAIEvalConfig{Accounts: []OpenAIEvalAccountConfig{{AccountID: 17, RequestedModel: model, ReasoningEffort: "high",
 				ModelTraceSchedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 3600}}}}
 			key := OpenAIEvalEvidenceKey{17, model, "high", OpenAIEvalTypeModelTrace}
 			q := qualityFromLatestRuns(cfg, 17, model, "high", map[OpenAIEvalEvidenceKey]OpenAIEvalRun{key: run}, now)
-			require.True(t, q.Known)
-			require.Equal(t, tc.pass, q.Pass)
-			require.Equal(t, tc.suspected, q.SuspectedPass)
+			require.False(t, q.Known)
+			require.Zero(t, q.Evaluated)
 			normalizeOpenAIEvalAttributionRun(&run)
 			require.Equal(t, tc.want, run.Status)
 			require.Equal(t, "attributed", run.Outcome.Attribution.OriginalStatus)
@@ -74,91 +72,37 @@ func TestDiagnosticOnlyRunCannotContributeQuality(t *testing.T) {
 	require.Equal(t, 1, quality.Pass)
 }
 
-func TestModelTraceExactVerdictStillVotesOncePerSelectedType(t *testing.T) {
+// A migrated schedule selects the new detector; historic ModelTrace output
+// must neither establish quality nor hide current model-level evidence.
+func TestLegacyModelTraceMigrationRequiresCurrentDetectorEvidence(t *testing.T) {
 	now := time.Now().UTC()
 	model := "gpt-6.1-sol"
 	schedule := OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 3600}
-	cfg := &OpenAIEvalConfig{Accounts: []OpenAIEvalAccountConfig{{AccountID: 17, RequestedModel: model, ReasoningEffort: "high", CandySchedule: schedule, ModelTraceSchedule: schedule}}}
-	latest := make(map[OpenAIEvalEvidenceKey]OpenAIEvalRun)
-	latest[OpenAIEvalEvidenceKey{17, model, "high", OpenAIEvalTypeCandy}] = OpenAIEvalRun{ID: 1, AccountID: 17, RequestedModel: model, ReasoningEffort: "high", TestType: OpenAIEvalTypeCandy,
-		Status: "warning", TriggerSource: "manual", DataVersion: OpenAIEvalQualityDataVersion, FinishedAt: now.Add(-time.Second), Samples: []OpenAIEvalSampleRecord{{Valid: true, Answer: "29"}}}
-	trace := OpenAIEvalRun{ID: 2, AccountID: 17, RequestedModel: model, ReasoningEffort: "high", TestType: OpenAIEvalTypeModelTrace,
-		Status: "attributed", TriggerSource: "manual", DataVersion: OpenAIEvalQualityDataVersion, FinishedAt: now.Add(-time.Second), Outcome: OpenAIEvalOutcome{ModelTrace: &OpenAIEvalModelTraceResult{UsedOutputs: 1, Prediction: model, BankRevision: OpenAIEvalQualityModelTraceBankRevision}}}
-	latest[OpenAIEvalEvidenceKey{17, model, "high", OpenAIEvalTypeModelTrace}] = trace
-	q := qualityFromLatestRuns(cfg, 17, model, "high", latest, now)
+	cfg := &OpenAIEvalConfig{Accounts: []OpenAIEvalAccountConfig{{AccountID: 1, RequestedModel: model, ReasoningEffort: "high", CandySchedule: schedule, ModelTraceSchedule: schedule}}}
+	NormalizeOpenAIEvalDetectorConfig(cfg)
+	require.False(t, cfg.Accounts[0].ModelTraceSchedule.Enabled)
+	require.True(t, cfg.Accounts[0].FingerprintSchedule.Enabled)
+	old := OpenAIEvalRun{ID: 2, AccountID: 1, RequestedModel: model, ReasoningEffort: "high", TestType: OpenAIEvalTypeModelTrace,
+		Status: "attributed", TriggerSource: "manual", DataVersion: OpenAIEvalQualityDataVersion, FinishedAt: now,
+		Outcome: OpenAIEvalOutcome{ModelTrace: &OpenAIEvalModelTraceResult{UsedOutputs: 1, Prediction: model, BankRevision: OpenAIEvalQualityModelTraceBankRevision}}}
+	candy := modelDimensionCandy(1, model, "low", "29", now.Add(-time.Second))
+	latest := map[OpenAIEvalEvidenceKey]OpenAIEvalRun{
+		{1, model, "high", OpenAIEvalTypeModelTrace}: old,
+		{1, model, "low", OpenAIEvalTypeCandy}:       candy,
+	}
+	q := qualityFromLatestRuns(cfg, 1, model, "max", latest, now)
+	require.False(t, q.Known)
+	require.Equal(t, 2, q.Selected)
+	require.Equal(t, 1, q.Evaluated)
+	require.Nil(t, q.Ratio)
+	fp := modelDimensionFingerprint(3, model, "max", true, 3, now)
+	latest[OpenAIEvalEvidenceKey{1, model, "max", OpenAIEvalTypeFingerprint}] = fp
+	q = qualityFromLatestRuns(cfg, 1, model, "high", latest, now)
 	require.True(t, q.Known)
 	require.Equal(t, 1, q.Pass)
-	require.InDelta(t, .5, *q.Ratio, 1e-12)
-	cfg.Accounts[0].FingerprintSchedule = schedule
-	jsd := .1
-	latest[OpenAIEvalEvidenceKey{17, model, "high", OpenAIEvalTypeFingerprint}] = OpenAIEvalRun{ID: 3, AccountID: 17, RequestedModel: model, ReasoningEffort: "high", TestType: OpenAIEvalTypeFingerprint,
-		Status: "warning", TriggerSource: "scheduled", DataVersion: OpenAIEvalQualityDataVersion, BaselineVersion: OpenAIEvalQualityBaselineVersion, FinishedAt: now.Add(-time.Second),
-		Outcome: OpenAIEvalOutcome{Fingerprint: &OpenAIEvalFingerprintResult{NearestModel: "gpt-6-luna", ValidSamples: 60, RequiredSamples: 60, CellCount: 4, MeanJSD: &jsd}}}
-	q = qualityFromLatestRuns(cfg, 17, model, "high", latest, now)
-	require.True(t, q.Known)
-	require.InDelta(t, 1./3, *q.Ratio, 1e-12)
-}
-
-type modelTraceLatestRefreshRepo struct {
-	*qualityRefreshRepository
-	runs []OpenAIEvalRun
-}
-
-func (r *modelTraceLatestRefreshRepo) LatestCompletedRuns(_ context.Context, _ []OpenAIEvalEvidenceKey) ([]OpenAIEvalRun, error) {
-	return r.runs, nil
-}
-
-func TestModelTraceQualityRefreshReinterpretsRawRunAndNeverRevivesOldPass(t *testing.T) {
-	s, repo, accounts := setupQualityRefreshTest(t)
-	repo.config.Accounts[0].CandySchedule.Enabled = false
-	repo.config.Accounts[0].ModelTraceSchedule = OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 3600}
-	now := time.Now().UTC().Add(-time.Minute)
-	old := qualityTestAggregate(now, 17, 1, 0, 1)
-	old.TestType, old.OutcomeStatus = OpenAIEvalTypeModelTrace, "suspected_normal"
-	addQualityEvidence(t, accounts.accounts[17], old)
-	_, known := ReadOpenAIEvalQualityFromAccount(accounts.accounts[17], "gpt-6.1-sol", "high", now, OpenAIEvalTypeModelTrace)
-	require.False(t, known, "unversioned counts cannot establish whether the public target matched")
-	latest := &modelTraceLatestRefreshRepo{qualityRefreshRepository: repo, runs: []OpenAIEvalRun{{ID: 1, AccountID: 17, RequestedModel: "gpt-6.1-sol", ReasoningEffort: "high",
-		TestType: OpenAIEvalTypeModelTrace, Status: "attributed", TriggerSource: "manual", DataVersion: OpenAIEvalQualityDataVersion, FinishedAt: now,
-		Outcome: OpenAIEvalOutcome{ModelTrace: &OpenAIEvalModelTraceResult{UsedOutputs: 1, Prediction: "gpt-6.1-sol", BankRevision: OpenAIEvalQualityModelTraceBankRevision}}}}}
-	s.repo = latest
-	result, err := s.refreshOpenAIEvalQuality(t.Context(), true)
-	require.NoError(t, err)
-	require.Equal(t, 1, result.RouteCount)
-	q, known := openAIEvalQualitySnapshots.lookup(17, "gpt-6.1-sol", "high", time.Now())
-	require.True(t, known)
-	require.Equal(t, 1, q.PassCount)
-	require.Equal(t, "attributed", latest.runs[0].Status, "raw record is immutable")
-	newer := latest.runs[0]
-	newer.ID, newer.Status, newer.FinishedAt = 2, "insufficient", now.Add(time.Second)
-	newer.Outcome = OpenAIEvalOutcome{}
-	latest.runs = append(latest.runs, newer)
-	result, err = s.refreshOpenAIEvalQuality(t.Context(), true)
-	require.NoError(t, err)
-	require.Zero(t, result.RouteCount)
-	_, known = openAIEvalQualitySnapshots.lookup(17, "gpt-6.1-sol", "high", time.Now())
-	require.False(t, known)
-}
-
-func TestModelTraceMixedCaseLatestRankingMatchesRefresh(t *testing.T) {
-	now := time.Now().UTC().Add(-time.Minute)
-	run := OpenAIEvalRun{ID: 1, AccountID: 17, RequestedModel: " GPT-6.1-SOL ", ReasoningEffort: " HIGH ", TestType: OpenAIEvalTypeModelTrace,
-		Status: "suspected_normal", TriggerSource: "manual", DataVersion: OpenAIEvalQualityDataVersion, FinishedAt: now,
-		Outcome: OpenAIEvalOutcome{ModelTrace: &OpenAIEvalModelTraceResult{UsedOutputs: 1, Prediction: "gpt-6.1-sol", BankRevision: OpenAIEvalQualityModelTraceBankRevision}}}
-	cfg := OpenAIEvalConfig{Accounts: []OpenAIEvalAccountConfig{{AccountID: 17, RequestedModel: "GPT-6.1-SOL", ReasoningEffort: "high", ModelTraceSchedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 3600}}}}
-	s := &OpenAIEvalService{repo: &rankingTestRepo{config: cfg, runs: []OpenAIEvalRun{run}}}
-	ranking := &OpenAIEvalRankingService{eval: s}
-	latest, err := ranking.readLatest(t.Context(), &cfg)
-	require.NoError(t, err)
-	require.Len(t, latest, 1)
-	q := qualityFromLatestRuns(&cfg, 17, "gpt-6.1-sol", "HIGH", latest, time.Now())
-	require.True(t, q.Known)
-	require.Equal(t, 1, q.Pass)
-	routes, err := openAIEvalQualityRoutes(&cfg)
-	require.NoError(t, err)
-	refreshLatest, err := s.latestQualityRefreshRuns(t.Context(), routes)
-	require.NoError(t, err)
-	require.Equal(t, latest, refreshLatest)
+	require.Equal(t, .5, *q.Ratio, "one outcome per selected type, independent of request count")
+	require.Equal(t, "attributed", old.Status, "raw history is immutable")
+	require.Equal(t, model, old.Outcome.ModelTrace.Prediction)
 }
 
 func TestModelTraceInvalidEvidenceNeverBecomesNormal(t *testing.T) {

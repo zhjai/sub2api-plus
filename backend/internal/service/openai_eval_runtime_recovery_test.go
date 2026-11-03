@@ -19,6 +19,8 @@ func agedRecoveryMetric(t *testing.T, stats *openAIAccountRuntimeStats, model, e
 	require.True(t, ok)
 	stat.errorRateEWMABits.Store(math.Float64bits(errorRate))
 	stat.ttftEWMABits.Store(math.Float64bits(ttft))
+	stat.failureCount.Store(int64(errorRate * 30))
+	stat.ttftTotalMS.Store(int64(ttft * 30))
 	stat.sampleCount.Store(30)
 	stat.ttftSampleCount.Store(30)
 	stat.observedAt.Store(at.UnixNano())
@@ -125,7 +127,8 @@ func TestRuntimeRecoveryActualDispatchAndEvidenceRecovery(t *testing.T) {
 	third, _ := selectAccount()
 	require.EqualValues(t, 2, third.Account.ID, "one successful trial cannot erase old failure evidence")
 	third.ReleaseFunc()
-	for i := 0; i < 15; i++ {
+	// 27 failures need at least 135 total samples to meet the 20% threshold.
+	for i := 0; i < 105; i++ {
 		stats.reportForRequest(1, "gpt-6.1-sol", "", true, nil)
 	}
 	fourth, decision := selectAccount()

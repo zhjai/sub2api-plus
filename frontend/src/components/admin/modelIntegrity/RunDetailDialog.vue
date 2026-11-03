@@ -1,16 +1,26 @@
 <template>
-  <BaseDialog :show="run !== null" :title="t('admin.modelIntegrity.tests.detail.title')" width="normal" @close="emit('close')">
+  <BaseDialog :show="run !== null" :title="t('admin.modelIntegrity.tests.detail.title')" :width="dialogWidth" @close="emit('close')">
     <div v-if="run" class="space-y-4 text-sm">
       <div>
         <p class="font-medium text-gray-900 dark:text-white">{{ target }}</p>
-        <p class="text-xs text-gray-500 dark:text-gray-400">{{ t(`admin.modelIntegrity.tests.types.${run.test_type}.name`) }} · {{ formatTime(run.finished_at || run.started_at) }}</p>
+        <p class="text-xs text-gray-500 dark:text-gray-400">
+          {{ t(`admin.modelIntegrity.tests.types.${run.test_type}.name`) }} · {{ formatTime(run.finished_at || run.started_at) }}
+          <span v-if="legacy" class="legacy-tag" data-testid="detail-legacy">{{ t('admin.modelIntegrity.tests.legacy.tag') }}</span>
+        </p>
+      </div>
+      <p v-if="legacy" class="attribution-note" data-testid="detail-legacy-note">{{ t('admin.modelIntegrity.tests.legacy.note', { test: t(`admin.modelIntegrity.tests.types.${run.test_type}.name`) }) }}</p>
+
+      <!-- Pelican: the page plays here, inside the isolated frame. -->
+      <div v-if="isPelican && run.status === 'completed'" class="pelican-stage" data-testid="pelican-stage">
+        <PelicanFrame :run-id="run.id" mode="play" :title="t('admin.modelIntegrity.tests.pelican.frameTitle', { variant: pelicanVariantName })" />
       </div>
       <div class="flex items-start gap-2">
         <span class="tone" :class="`tone-${resultTone(run.status)}`" data-testid="detail-status">{{ runStatusLabel(t, run) }}</span>
         <p class="text-gray-700 dark:text-gray-300">{{ runExplanation(t, run, catalog) }}</p>
       </div>
       <p v-if="reinterpreted" class="attribution-note" data-testid="detail-reinterpreted">{{ reinterpreted }}</p>
-      <p v-if="isAttributionRun(run)" class="attribution-note" data-testid="attribution-note">{{ t('admin.modelIntegrity.tests.detail.attributionNote') }}</p>
+      <p v-if="isAttributionRun(run) && legacy" class="attribution-note" data-testid="attribution-note">{{ t('admin.modelIntegrity.tests.detail.attributionNote') }}</p>
+      <p v-if="isPelican" class="attribution-note" data-testid="pelican-not-scored">{{ t('admin.modelIntegrity.tests.pelican.notScoredLong') }}</p>
 
       <dl class="facts">
         <div><dt>{{ t('admin.modelIntegrity.tests.detail.logicalSamples') }}</dt><dd data-testid="detail-logical">{{ run.outcome.sample_count }}/{{ run.outcome.expected_count }}</dd></div>
@@ -29,7 +39,15 @@
           <div v-if="run.outcome.modeltrace.bank_revision"><dt>{{ t('admin.modelIntegrity.tests.detail.bankRevision') }}</dt><dd class="break-all" data-testid="detail-bank">{{ run.outcome.modeltrace.bank_revision }}</dd></div>
         </template>
         <div v-if="run.outcome.attribution?.rule_version"><dt>{{ t('admin.modelIntegrity.tests.detail.attributionRule') }}</dt><dd class="break-all" data-testid="detail-rule">{{ run.outcome.attribution.rule_version }}</dd></div>
+        <template v-if="run.outcome.pelican">
+          <div><dt>{{ t('admin.modelIntegrity.tests.pelican.variant') }}</dt><dd data-testid="detail-pelican-variant">{{ pelicanVariantName }}</dd></div>
+          <div><dt>{{ t('admin.modelIntegrity.tests.pelican.bytes') }}</dt><dd>{{ formatBytes(run.outcome.pelican.html_bytes) }}</dd></div>
+          <div v-if="run.outcome.pelican.html_sha256" class="col-span-2"><dt>{{ t('admin.modelIntegrity.tests.pelican.sha') }}</dt><dd class="break-all">{{ run.outcome.pelican.html_sha256 }}</dd></div>
+        </template>
+        <div v-if="run.outcome.request_profile" class="col-span-2"><dt>{{ t('admin.modelIntegrity.tests.detail.requestProfile') }}</dt><dd class="break-all">{{ run.outcome.request_profile }}</dd></div>
       </dl>
+
+      <FingerprintAttribution v-if="run.outcome.lm_fingerprint" :run="run" :catalog="catalog" />
 
       <p v-if="run.outcome.fingerprint && run.outcome.fingerprint.mean_jsd != null" class="text-xs text-gray-600 dark:text-gray-300">
         {{ t('admin.modelIntegrity.tests.detail.fingerprintMetric', { jsd: formatMetric(run.outcome.fingerprint.mean_jsd), p: formatMetric(run.outcome.fingerprint.p_value) }) }}
@@ -52,7 +70,7 @@
       <p v-if="run.test_type === 'candy' && historical" class="attribution-note" data-testid="detail-historical">{{ t('admin.modelIntegrity.tests.detail.historical', { version: run.data_version }) }}</p>
       <p v-else-if="run.test_type === 'candy' && expectedAnswer === null" class="attribution-note" data-testid="detail-historical">{{ t('admin.modelIntegrity.tests.detail.expectedUnknown') }}</p>
 
-      <section v-if="run.status !== 'running'" data-testid="detail-samples">
+      <section v-if="run.status !== 'running' && !lmChallengesShown" data-testid="detail-samples">
         <p class="input-label">{{ t('admin.modelIntegrity.tests.samples.title') }}</p>
         <p v-if="!samples.length" class="mt-1 text-xs text-gray-500 dark:text-gray-400" data-testid="samples-none">{{ t('admin.modelIntegrity.tests.samples.none') }}</p>
         <ol v-else class="samples">
@@ -128,9 +146,11 @@
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import BaseDialog from '@/components/common/BaseDialog.vue'
+import FingerprintAttribution from './FingerprintAttribution.vue'
+import PelicanFrame from './PelicanFrame.vue'
 import type { OpenAIEvalModelCatalog, OpenAIEvalRun } from '@/api/admin/accounts'
-import { candyExpectedAnswer, candyExtractedAnswer, candyFullReply, isAttributionRun, isHistoricalDataVersion, redactSecrets, resultTone, sampleAnswer, sampleLacksDetail, sampleState, type EvalTestType } from '@/views/admin/modelIntegrity/modelIntegrity'
-import { diagnosticSamples, reinterpretationText, runExplanation, runStatusLabel, sampleErrorHeadline, stateProbeChainCount, stateProbeRequestName, stateProbeSampleTicketMissing, stateProbeTicketObservation } from '@/views/admin/modelIntegrity/runText'
+import { candyExpectedAnswer, candyExtractedAnswer, candyFullReply, isAttributionRun, isHistoricalDataVersion, isLegacyRun, pelicanVariantName as variantNameOf, redactSecrets, resultTone, sampleAnswer, sampleLacksDetail, sampleState, type EvalTestType } from '@/views/admin/modelIntegrity/modelIntegrity'
+import { diagnosticSamples, formatBytes, reinterpretationText, runExplanation, runStatusLabel, sampleErrorHeadline, stateProbeChainCount, stateProbeRequestName, stateProbeSampleTicketMissing, stateProbeTicketObservation } from '@/views/admin/modelIntegrity/runText'
 
 const props = defineProps<{
   run: OpenAIEvalRun | null
@@ -145,6 +165,15 @@ const SAMPLE_PREVIEW = 20
 const showAll = ref(false)
 watch(() => props.run?.id, () => { showAll.value = false })
 
+const legacy = computed(() => Boolean(props.run) && isLegacyRun(props.run!))
+const isPelican = computed(() => props.run?.test_type === 'pelican')
+const pelicanVariantName = computed(() => {
+  const id = props.run?.outcome.pelican?.variant
+  return variantNameOf(id, props.catalog)
+})
+/** The challenge records of the current fingerprint carry the prompts and counts; the generic list would repeat them. */
+const lmChallengesShown = computed(() => Boolean(props.run?.outcome.lm_fingerprint?.samples?.length))
+const dialogWidth = computed(() => (isPelican.value || props.run?.outcome.lm_fingerprint ? 'wide' : 'normal'))
 const expectedAnswer = computed(() => (props.run ? candyExpectedAnswer(props.run, props.catalog) : null))
 const historical = computed(() => Boolean(props.run) && isHistoricalDataVersion(props.run!, props.catalog))
 const reinterpreted = computed(() => (props.run ? reinterpretationText(t, props.run) : ''))
@@ -214,6 +243,9 @@ const formatTime = (value: string) => {
 </script>
 
 <style scoped>
+.legacy-tag { @apply ml-1 rounded border border-gray-300 px-1 py-px text-[0.6875rem] text-gray-600 dark:border-dark-500 dark:text-gray-400; }
+/* The play stage: a plain slate mat around the 4:3 canvas, never a verdict colour. */
+.pelican-stage { @apply overflow-hidden rounded-lg border border-slate-300 bg-slate-200 p-2 dark:border-slate-600 dark:bg-slate-700; }
 .facts { @apply grid grid-cols-2 gap-x-6 gap-y-2 rounded-lg bg-gray-50 p-3 text-xs dark:bg-dark-900/50; }
 .facts dt { @apply text-gray-500 dark:text-gray-400; }
 .facts dd { @apply font-medium tabular-nums text-gray-800 dark:text-gray-200; }

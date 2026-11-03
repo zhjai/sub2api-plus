@@ -27,7 +27,8 @@ func TestOpenAIRankingV1EvidenceIsMatchedFreshAndNotTTFTOrQuality(t *testing.T) 
 	for _, effort := range []string{"high", "xhigh"} {
 		f := emptyOpenAIEvalRankingFactors()
 		applyRankingMonitor(&f, evidence, 7, "gpt-6.1-sol", effort, now)
-		require.False(t, f.ErrorRate.Known)
+		require.True(t, f.ErrorRate.Known)
+		require.Equal(t, .5, *f.ErrorRate.Value)
 	}
 	f = emptyOpenAIEvalRankingFactors()
 	applyRankingMonitor(&f, evidence, 8, "gpt-6.1-sol", "", now)

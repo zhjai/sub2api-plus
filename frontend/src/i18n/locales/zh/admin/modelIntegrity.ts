@@ -36,7 +36,9 @@ export default {
       running: '进行中',
       healthy: '正常',
       degraded: '异常',
-      inconclusive: '证据不足'
+      inconclusive: '证据不足',
+      completed: '已生成',
+      failed: '未生成'
     },
     reason: {
       stateProbe: {
@@ -108,7 +110,7 @@ export default {
       maxAttempts: {
         label: '每个样本最多请求',
         unit: '次（含首次）',
-        hint: '适用于糖果题、行为指纹和 ModelTrace 的手动与自动测试，范围 1–10，默认 3。请求失败时自动重试，重试同样计费。状态探针读取同一个值，但它的一次尝试是一条全新的「取票 + 续写」链，最多 3 条链、共 6 次请求。'
+        hint: '适用于糖果题、行为指纹和鹈鹕画图的手动与自动测试，范围 1–10，默认 3。请求失败时自动重试，重试同样计费。状态探针读取同一个值，但它的一次尝试是一条全新的「取票 + 续写」链，最多 3 条链、共 6 次请求。'
       },
       background: {
         title: '{account} 的自动测试控制',
@@ -206,7 +208,7 @@ export default {
           hourly: '受每小时发送上限限制。',
           rpm: '受账号 RPM 上限限制，与服务端的准入判断一致。'
         },
-        fingerprintBlocked: '行为指纹 {counts} 次采样都超过 {capacity} 次，当前预算无法完成本轮，自动和手动都不会启动。需要指纹测试时，请调大限额或采样窗，或关闭实验限额。',
+        fingerprintBlocked: '行为指纹每轮 {counts} 次请求，超过当前限额允许的 {capacity} 次，自动和手动都不会启动。需要指纹测试时，请调大限额或采样窗，或关闭实验限额。',
         estimate: {
           test: '自动测试',
           sends: '每轮请求',
@@ -223,8 +225,7 @@ export default {
         instant: '立即',
         seconds: '{n} 秒',
         minutes: '{n} 分钟',
-        manualBlocked: '超过当前限额在采样窗内的 {capacity} 次，无法完成',
-        manualBudgetNote: '该账号已启用实验限额，手动测试同样计入预算；无法准入时服务端会拒绝并说明原因。',
+        manualBlocked: '当前实验限额在采样窗内最多允许 {capacity} 次请求，本测试一轮需要 {count} 次，服务端会拒绝手动运行。请调大限额或采样窗，或关闭实验限额。',
         notPersisted: '服务端未保存自动测试的暂停或限额设置，当前版本可能不支持，请勿依赖该暂停。'
       },
       targets: '测试对象',
@@ -247,11 +248,16 @@ export default {
         },
         fingerprint: {
           name: '行为指纹',
-          what: '多次采样回答行为，与参考样本比对并确定最接近的模型。归因为非 Luna 模型时判定为疑似正常。'
+          what: '从 36 道固定挑战中随机抽 {count} 道，请模型写出一串 1–355 的整数，再按数字的分布与走向在参考库 {candidates} 个模型中排出最接近的一个。与被测模型一致判定为正常；与其他模型一致，或数字不像语言模型写出的，判定为异常。被测模型不在参考库时只作诊断，不计入通过率。',
+          whatUnknownBank: '从 36 道固定挑战中随机抽 {count} 道，请模型写出一串 1–355 的整数，再按数字的分布与走向在参考库中排出最接近的模型。与被测模型一致判定为正常；与其他模型一致，或数字不像语言模型写出的，判定为异常。被测模型不在参考库时只作诊断，不计入通过率。'
+        },
+        pelican: {
+          name: '鹈鹕画图',
+          what: '请模型直接写出一幅鹈鹕骑自行车的 SVG 动画，画面交给人看。生成完成不代表通过：不评分、不计入降智通过率、不参与调度。'
         },
         modeltrace: {
-          name: 'ModelTrace 归因',
-          what: '发送 {count} 次请求，根据回答行为在 {candidates} 个参考模型中推断最接近的模型。归因与被测模型一致时判定为正常，归因为其他非 Luna 模型时判定为疑似正常，归因为 Luna 系列模型时判定为异常。'
+          name: 'ModelTrace（已下线）',
+          what: '已下线的归因测试，只保留历史记录。'
         },
         state_probe: {
           name: '状态探针',
@@ -289,6 +295,111 @@ export default {
       },
       candySamples: '每次请求数',
       candySamplesHint: '每次糖果题的请求次数，范围 1–10，默认 1。',
+      candyPrompt: '查看题目原文',
+      fingerprint: {
+        concurrency: '同时发送',
+        concurrencyOption: '{n} 道挑战',
+        concurrencyHint: '一轮的 3 道挑战最多同时发送几道，范围 1–3，默认 3。仍受账号 RPM 与并发限制，超出时排队等待。',
+        effortNote: '指纹请求不发送推理强度（参考库在默认强度下采集），结果仍记在该测试对象「{effort}」下。',
+        notEnrolled: '参考库中没有 {model} 的候选，自动指纹无法开启。仍可手动测试作诊断，结果不计入通过率。',
+        notEnrolledEnabled: '参考库中没有 {model} 的候选，结果无法计分。这里的自动指纹保存时会被服务器关闭；你也可以现在关掉它。'
+      },
+      pelican: {
+        manualOnly: '仅手动',
+        draw: '生成画面',
+        drawing: '模型正在作画，单次最长约 10 分钟',
+        variant: '版本',
+        variants: {
+          original: '原版',
+          allInOne: '多合一版'
+        },
+        effort: '推理强度：{effort}',
+        prompt: '查看提示词',
+        notScored: '不计入降智通过率',
+        notScoredShort: '生成完成不代表通过，需人工查看。',
+        notScoredLong: '鹈鹕画图只生成画面供人工查看，不评分、不计入降智通过率，也不参与调度。画面在隔离框架中运行：脚本可以执行，但无法访问本页面、发起网络请求或跳转。',
+        made: '已生成{variant}画面（{size}）。',
+        notMade: '未生成画面。',
+        open: '放大播放',
+        openLabel: '放大播放 {time} 生成的画面',
+        frameTitle: '鹈鹕画面：{variant}',
+        loading: '正在加载画面',
+        loadFailed: '画面加载失败：{error}',
+        loadFailedGeneric: '无法取得画面地址',
+        retry: '重新加载',
+        bytes: '页面大小',
+        sha: '页面 SHA-256'
+      },
+      lm: {
+        prediction: '最接近的模型',
+        family: '模型家族',
+        probability: '归因概率',
+        noProbability: '未计算',
+        usedOutputs: '有效回答',
+        closest: '最接近 {model}。',
+        closestWithProbability: '最接近 {model}（{probability}）。',
+        comparison: {
+          match: '与被测模型一致',
+          mismatch: '与被测模型不一致',
+          not_model: '数字不像语言模型写出的',
+          not_enrolled: '被测模型不在参考库中，本次只作诊断'
+        },
+        comparisonSentence: {
+          match: '与被测模型 {target} 一致。',
+          mismatch: '与被测模型 {target} 不一致，建议复测确认。',
+          not_model: '数字不像语言模型写出的。',
+          not_enrolled: '{target} 不在参考库中，不计入通过率。'
+        },
+        partial: '有效回答不足三条，只给出排名分，不计算归因概率。',
+        partialShort: '仅 {used}/{total} 条有效回答，未计算概率。',
+        notModel: '相邻数字的变化方式与参考库中的语言模型回答不同，常见于程序生成、排序或打乱的数字，因此没有排名。',
+        notModelShort: '相邻数字的变化方式不像语言模型写出的，未生成排名。',
+        sequence: '自相关 {ac}，相邻差值 ≤ 20 的占比 {ss}。',
+        aliasNote: '参考库把 {model} 的回答登记在 {candidate} 名下，因此按 {candidate} 比对。',
+        notEnrolledNote: '参考库中没有 {model} 的候选。下面的排名仅供诊断，结果不计入通过率。',
+        lineup: '候选模型排名',
+        lineupProbability: '按归因概率',
+        lineupScore: '按排名分（未计算概率）',
+        targetMark: '被测模型的比对候选',
+        showAll: '显示全部 {count} 个候选',
+        noRanking: '该记录未包含候选排名。',
+        requestEffort: '发送的推理强度',
+        effortNotSent: '未发送',
+        recordedUnder: '记录在测试对象',
+        concurrency: '同时发送',
+        collection: '采集结果',
+        collectionStatus: {
+          completed: '3 条均有效',
+          partial: '部分有效',
+          failed: '没有有效回答',
+          cancelled: '已停止',
+          skipped: '已跳过'
+        },
+        comparedAs: '比对候选',
+        detector: '检测器版本',
+        challenges: '挑战记录',
+        challengeRequests: '共 {count} 次请求',
+        challenge: '挑战 {n}',
+        numbers: '{parsed}/{expected} 个数字',
+        minimum: '至少 {min} 个',
+        retries: '重试 {count} 次',
+        accepted: '已计入',
+        rejected: '未计入',
+        instructions: '开发者指令',
+        prompt: '提示词',
+        answer: '计分的数字',
+        identityNote: '概率只在参考库收录的候选之间比较。结果来自回答行为，不能证明实际使用的模型。'
+      },
+      legacy: {
+        tag: '旧版',
+        note: '这条记录来自已下线的测试（{test}），按记录时的结果只读显示，不按新规则重新解读，也不再计入通过率。'
+      },
+      warnings: {
+        title: '服务器调整了部分设置',
+        fingerprintNotEnrolled: '{account} 的 {model} 不在指纹候选库中，服务端已关闭它的自动行为指纹，其余设置照常保存。仍可手动运行指纹诊断，结果不计分。',
+        fingerprintNotEnrolledUnsupported: '{account} 的 {model} 不在指纹候选库中，服务端已关闭它的自动行为指纹，其余设置照常保存。该模型也不在可测模型列表中，手动测试同样不会运行。',
+        dismiss: '知道了'
+      },
       jitter: '随机延迟（分钟）',
       jitterHint: '在测试间隔后随机延迟 0–{max} 分钟，以错开多个账号的测试时间。',
       jitterUnavailable: '当前间隔不支持随机延迟。',
@@ -307,6 +418,8 @@ export default {
       nextRun: '下次 {time}',
       lastRun: '上次 {time}',
       neverRun: '尚未测试',
+      unsupportedModel: '{model} 不在服务端可测模型列表中，手动和自动测试都不会运行；测试对象和计划仍会保存。',
+      autoOff: '关闭此项自动运行',
       onlyDirectOAuth: '只支持直连 OpenAI OAuth 账号。',
       stateProbeDefaultEffort: '状态探针按账号的默认推理强度运行，与该测试对象的推理强度无关。',
       goScheduling: '配置调度策略',
@@ -360,7 +473,8 @@ export default {
         bankRevision: '参考库版本',
         attributionRule: '归因规则',
         reinterpreted: '该记录原判定为{status}（规则 {rule}）。上方结果按当前规则 {current} 对同一批已记录输出重新解读，测试并未重新运行。',
-        attributionNote: '归因基于回答行为推断，不能证明实际路由。该测试开启自动运行时，最近一次已完成的归因结论会计入降智通过率，手动或自动运行均可。ModelTrace 只要有一条有效输出即可归因，失败的请求仍保留以供排查；行为指纹需全部计划采样均有效才会归因。',
+        attributionNote: '归因基于回答行为推断，不能证明实际路由。这是已下线测试的记录，按记录时的规则显示。',
+        requestProfile: '请求上下文版本',
         stateProbeMetric: '两次请求状态码 {mint} / {cont}，{ticket}',
         stateProbeMetricChains: '共发送 {chains} 条链，最后一条链的状态码 {mint} / {cont}，{ticket}',
         newTicket: '票据有变化',
@@ -445,7 +559,8 @@ export default {
         stateProbeDefault: '状态探针会继续按账号的默认推理强度运行，自动计划不变。'
       },
 
-      baselineNote: '行为指纹参考样本版本 {version}。'
+      baselineNote: '行为指纹参考样本版本 {version}。',
+      detectorNote: '行为指纹检测器版本 {version}。'
     },
     scheduling: {
       title: '调度策略',
@@ -565,7 +680,7 @@ export default {
             summaryJoin: '，其次'
           }
         },
-        avoidNote: '降智通过率按测试项计算：已勾选的糖果题、行为指纹、ModelTrace 中，最近一次已完成测试的结论为通过或疑似通过的项数 ÷ 勾选项数。开启自动运行即为勾选；最新结果无论来自手动还是自动运行都计入，进行中的测试不会替代它。例如勾选两项、通过一项为 50%，勾选三项、通过一项为 33.3%。每项只看最终结论，与采样次数和重试无关。任一勾选项的最新结果缺少有效结论（没有有效输出、运行失败或取消、已过期）时，通过率为未知，既不算通过也不算降智，也不会改用更早的通过结果。「避免降智」始终先从通过率最高的一档中选择，同一档内按价格排序；只有该档没有账号能处理请求时，才尝试下一档。运行阈值最多让账号在本档内向后移动一位，不会让低一档排到前面。通过率未知的账号排在所有已评估账号之后。账号停用、模型支持、容量和续写响应的账号绑定仍实时判断。',
+        avoidNote: '降智通过率按测试项计算：已勾选的糖果题、行为指纹中，最近一次已完成测试的结论为通过或疑似通过的项数 ÷ 勾选项数。开启自动运行即为勾选；最新结果无论来自手动还是自动运行都计入，进行中的测试不会替代它。例如勾选两项、通过一项为 50%，两项都通过为 100%。每项只看最终结论，与采样次数和重试无关。任一勾选项的最新结果缺少有效结论（没有有效输出、运行失败或取消、已过期）时，通过率为未知，既不算通过也不算降智，也不会改用更早的通过结果。「避免降智」始终先从通过率最高的一档中选择，同一档内按价格排序；只有该档没有账号能处理请求时，才尝试下一档。运行阈值最多让账号在本档内向后移动一位，不会让低一档排到前面。通过率未知的账号排在所有已评估账号之后。账号停用、模型支持、容量和续写响应的账号绑定仍实时判断。',
         sharedNote: '选用「系统默认」以外的策略后，已发布的顺序会取代账号优先级、系统调度权重和可迁移的会话粘性；只有续写响应等必须绑定的请求仍留在原账号。负载权重仅在「自定义平衡」下可调，其余策略使用固定权重。'
       },
       thresholds: {
@@ -617,20 +732,30 @@ export default {
       },
       rules: {
         title: '模型规则',
-        hint: '为指定模型设置独立策略，规则优先于默认策略；指定推理强度的规则优先于未指定的规则。',
+        hint: '为指定模型设置独立策略，规则优先于默认策略。规则按请求模型匹配，不区分推理强度。',
         empty: '未配置规则，所有模型使用默认策略。',
         model: '模型',
-        effort: '推理强度',
         policy: '策略',
         add: '添加规则',
         remove: '删除规则',
-        duplicate: '该模型与推理强度的规则已存在。',
+        duplicate: '{model} 已有规则。每个模型只保留一条规则，停用的规则也算在内。',
+        merged: {
+          title: '旧版按推理强度区分的模型规则已合并为每个模型一条',
+          kept: '{model}：以最后一条{rule}为准，{effect}。不再生效：{dropped}。',
+          cleared: '{model}：{rule}不再只限这一推理强度，{effect}。',
+          rule: '「{policy}」（原推理强度 {effort}{state}）',
+          disabled: '，已停用',
+          join: '、',
+          effectOn: '现适用于该模型的全部请求',
+          effectOff: '该规则已停用，该模型使用默认策略',
+          hint: '请求已按合并结果调度，下次保存时写入配置。需要别的策略时，直接修改该模型的规则。'
+        },
         pickModel: '请选择模型',
         weights: '规则权重',
         weightsSeparator: '，',
         editWeights: '编辑权重',
         doneWeights: '收起',
-        weightsFor: '{model}（{effort}）自定义权重',
+        weightsFor: '{model} 自定义权重',
         weightsHint: '仅作用于本规则，与默认策略的权重相互独立。按百分比填写，保存时自动归一化。',
         enabled: '启用',
         enableLabel: '启用 {model} 的规则',
@@ -775,12 +900,12 @@ export default {
         qualityContribution: '分数贡献 {value}',
         qualityUnknown: '未知',
         qualityEvidenceError: '最新评测未计入：',
-        qualityHint: '已勾选测试项中，最近一次已完成结论（手动或自动）为通过或疑似通过的项数 ÷ 勾选项数，每项权重相同。任一勾选项的最新结果缺少有效结论时显示未知，不等于 100%。该模型与推理强度没有配置测试项时，本模型通过率仍显示未知，档位由下方的「账号参考」决定：它来自该账号在其他模型或推理强度上的通过率，不是本模型与推理强度的实测通过率。',
+        qualityHint: '已勾选测试项中，最近一次已完成结论（手动或自动）为通过或疑似通过的项数 ÷ 勾选项数，每项权重相同。任一勾选项的最新结果缺少有效结论时显示未知，不等于 100%。调度按账号与请求模型统计，同一模型在各推理强度下的测试合并计入，每项取最新的有效结论。该模型没有配置测试项时，本模型通过率仍显示未知，档位由下方的「账号参考」决定：它来自该账号在其他模型上的通过率，不是本模型的实测通过率。',
         accountReference: '账号参考 {ratio}',
         accountReferenceHint: '该账号其他模型或推理强度的通过率参考：{sources}；评估于 {evaluated}，可用至 {expires}（取诊断有效期与本次评估有效期两者中较早者）。不是本次模型与推理强度的实测通过率。',
         accountReferenceNoSources: '无记录',
         accountReferenceTrace: '本次排序的档位使用了账号参考：该模型与推理强度没有配置测试项，因此按账号在其他模型或推理强度上的通过率参考分档。本模型与推理强度自身的通过率仍为未知。',
-        qualityUnknownAccountReference: '该模型与推理强度没有配置测试项，本模型的通过率没有证据，因此为未知；档位参考见下方账号参考。',
+        qualityUnknownAccountReference: '该模型没有配置测试项，本模型的通过率没有证据，因此为未知；档位参考见下方账号参考。',
         verdict: {
           selected: '选中',
           topK: '候选',
@@ -903,7 +1028,7 @@ export default {
       },
       board: {
         title: '账号排行',
-        hint: '每个账号一行，覆盖全部分组，按默认策略和全部模型的汇总真实证据排序。实际调度优先使用所请求模型的证据，其次参考同模型其他推理强度，最后参考此汇总排行。分数与名次由服务端计算，浏览器不会重新计算。',
+        hint: '每个账号一行，覆盖全部分组，按默认策略和全部模型的汇总真实证据排序。实际调度按账号与所请求模型的证据排序，该模型没有证据时才参考此汇总排行。分数与名次由服务端计算，浏览器不会重新计算。',
         group: '分组',
         allGroups: '全部分组',
         ungrouped: '无分组',
@@ -977,13 +1102,13 @@ export default {
         moreGroups: '+{count}',
         coverage: '{models} 个模型有证据，{known} 个通过率已知',
         coverageNone: '暂无模型证据',
-        coverageDetail: '共 {models} 个模型有真实证据：{known} 个通过率已知，{unknown} 个未知。账号通过率为已知模型的等权平均；每个模型内先平均各推理强度。',
+        coverageDetail: '共 {models} 个模型有真实证据：{known} 个通过率已知，{unknown} 个未知。账号通过率为已知模型的等权平均；同一模型各推理强度的证据合并为一个模型计算。',
         coverageNoneDetail: '该账号还没有真实请求、有效的降智测试结果或匹配的探测证据。仅出现在模型目录或映射中的模型不计入。缺失的因子按标注的默认值计分。',
         cells: '模型与推理强度组合：{known} 个通过率已知，{unknown} 个未知。',
         worst: '通过率最低的模型：{model}，{ratio}',
         contributions: '得分构成',
         contribution: '{factor} +{value}',
-        ruleException: '{model}（{effort}）设有模型规则「{policy}」，该模型的请求按规则排序，不按本排行。',
+        ruleException: '{model} 设有模型规则「{policy}」，该模型的请求按规则排序，不按本排行。',
         exclusionScope: {
           account: '账号：',
           route: '路由：',
@@ -994,10 +1119,12 @@ export default {
         noModels: '没有可计入该账号的模型证据。',
         models: {
           model: '模型',
-          effort: '推理强度',
           upstream: '上游模型',
           policy: '适用策略',
-          defaultPolicy: '默认策略'
+          defaultPolicy: '默认策略',
+          projected: '由 {count} 个推理强度的记录汇总',
+          projectedHint: '服务端返回了按推理强度分开的记录，本页把它们合并为一行：错误率和首包延迟按样本数加权，通过率只平均已知的部分，未知不算 0%。调度按账号与模型进行。',
+          withSamples: '{value}（{count} 个样本）'
         },
         showDetails: '展开详情',
         hideDetails: '收起详情',

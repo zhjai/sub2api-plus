@@ -114,7 +114,7 @@ func TestOpenAIEvalCompletionRunnerLatestTargetsSkipsAndAdmissionOrder(t *testin
 	svc, base, upstream := evalRunHarness(t, func(*http.Request, int) (*http.Response, error) {
 		return newJSONResponse(200, evalCompletedJSON("21")), nil
 	})
-	base.config = &OpenAIEvalConfig{Accounts: []OpenAIEvalAccountConfig{{AccountID: 995, RequestedModel: "gpt-5.4", CandySchedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 300, SampleCount: 1}, FingerprintSchedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 300, SampleMode: "quick"}}}, BackgroundControls: []OpenAIEvalBackgroundControl{{AccountID: 995, BudgetEnabled: true}}}
+	base.config = &OpenAIEvalConfig{Accounts: []OpenAIEvalAccountConfig{{AccountID: 995, RequestedModel: "gpt-5.4", CandySchedule: OpenAIEvalSchedule{Enabled: true, IntervalSeconds: 300, SampleCount: 1}, FingerprintSchedule: OpenAIEvalSchedule{Enabled: false, IntervalSeconds: 300, SampleMode: "quick"}}}, BackgroundControls: []OpenAIEvalBackgroundControl{{AccountID: 995, BudgetEnabled: true}}}
 	svc.accountTest.openaiGatewayService.cache = &evalBudgetSpy{}
 	base.due = []OpenAIEvalScheduledRun{{AccountID: 995, TestType: OpenAIEvalTypeFingerprint, RequestedModel: "gpt-5.4", SampleMode: "full"}, {AccountID: 995, TestType: OpenAIEvalTypeCandy, RequestedModel: "gpt-5.4", SampleCount: 10}, {AccountID: 995, TestType: OpenAIEvalTypeModelTrace, RequestedModel: "gpt-5.4"}}
 	repo := &evalCompletionSpy{openAIEvalRepoFake: base}
@@ -202,7 +202,7 @@ func TestOpenAIEvalBudgetFingerprintDefersManualAndRPMOneWorks(t *testing.T) {
 	account, err := svc.accounts.GetByID(t.Context(), 995)
 	require.NoError(t, err)
 	account.Extra["rpm_limit"] = 1
-	c := OpenAIEvalBackgroundControl{AccountID: 995, BudgetEnabled: true}
+	c := OpenAIEvalBackgroundControl{AccountID: 995, BudgetEnabled: true, MaxRequestsPerHour: 1}
 	require.NoError(t, normalizeOpenAIEvalBackgroundControl(&c))
 	repo.config = &OpenAIEvalConfig{BackgroundControls: []OpenAIEvalBackgroundControl{c}}
 	spy := &evalBudgetSpy{}

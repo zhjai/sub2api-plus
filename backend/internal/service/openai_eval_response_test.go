@@ -258,19 +258,19 @@ func evalRunHarness(t *testing.T, respond func(*http.Request, int) (*http.Respon
 	return NewOpenAIEvalService(repo, accounts, at), repo, upstream
 }
 
-func TestEvalModelTracePhysicalAttemptCapAndEvidence(t *testing.T) {
+func TestEvalFingerprintPhysicalAttemptCapAndEvidence(t *testing.T) {
 	svc, repo, upstream := evalRunHarness(t, func(*http.Request, int) (*http.Response, error) {
 		return newJSONResponse(503, `{"error":{"code":"server_error","message":"capacity unavailable"}}`), nil
 	})
-	run, err := svc.Run(t.Context(), OpenAIEvalRunRequest{AccountID: 995, TestType: OpenAIEvalTypeModelTrace, RequestedModel: "gpt-5.4"}, 1, "manual")
+	run, err := svc.Run(t.Context(), OpenAIEvalRunRequest{AccountID: 995, TestType: OpenAIEvalTypeFingerprint, RequestedModel: "gpt-5.4"}, 1, "manual")
 	require.NoError(t, err)
 	require.Equal(t, "insufficient", run.Status)
 	require.EqualValues(t, 9, upstream.calls.Load())
 	require.Equal(t, 9, run.RequestCount)
 	require.Equal(t, 3, run.CompletedSamples)
 	require.Equal(t, 3, run.Outcome.ExpectedCount)
-	require.NotNil(t, run.Outcome.ModelTrace)
-	require.Len(t, run.Outcome.ModelTrace.Samples, 3)
+	require.NotNil(t, run.Outcome.LMFingerprint)
+	require.Len(t, run.Outcome.LMFingerprint.Samples, 3)
 	require.Len(t, repo.runs[0].Samples, 3)
 	require.Equal(t, "server_error", run.Error)
 	for _, sample := range run.Samples {
@@ -315,30 +315,15 @@ func TestEvalManualAndScheduledAttemptSettingsAndLogicalCounts(t *testing.T) {
 	require.Equal(t, "29", run.Samples[0].Answer)
 }
 
-func TestEvalFingerprintAndModelTraceDoNotRetryInvalidAnswers(t *testing.T) {
-	for _, kind := range []string{OpenAIEvalTypeFingerprint, OpenAIEvalTypeModelTrace} {
-		t.Run(kind, func(t *testing.T) {
-			svc, _, upstream := evalRunHarness(t, func(*http.Request, int) (*http.Response, error) {
-				return newJSONResponse(200, evalCompletedJSON("invalid answer")), nil
-			})
-			run, err := svc.Run(t.Context(), OpenAIEvalRunRequest{AccountID: 995, TestType: kind, RequestedModel: "gpt-5.4", SampleMode: "quick"}, 1, "manual")
-			require.NoError(t, err)
-			require.Equal(t, "insufficient", run.Status)
-			want := 3
-			if kind == OpenAIEvalTypeFingerprint {
-				want = 60
-			}
-			require.EqualValues(t, want, upstream.calls.Load())
-			require.Equal(t, want, run.CompletedSamples)
-			for _, sample := range run.Samples {
-				require.Equal(t, 1, sample.Attempts)
-				if !sample.Valid {
-					require.NotEmpty(t, sample.ErrorMessage)
-				}
-				require.Empty(t, sample.AttemptErrors)
-			}
-		})
-	}
+func TestEvalRetiredModelTraceNeverSends(t *testing.T) {
+	svc, _, upstream := evalRunHarness(t, func(*http.Request, int) (*http.Response, error) {
+		t.Fatal("retired detector sent a request")
+		return nil, nil
+	})
+	run, err := svc.Run(t.Context(), OpenAIEvalRunRequest{AccountID: 995, TestType: OpenAIEvalTypeModelTrace, RequestedModel: "gpt-5.4"}, 1, "manual")
+	require.ErrorContains(t, err, "retired")
+	require.Nil(t, run)
+	require.Zero(t, upstream.calls.Load())
 }
 
 func TestEvalUsageIncludesFailedAttemptsAndJSONOrSSE(t *testing.T) {

@@ -12,7 +12,7 @@ import {
   type RankingError
 } from '@/api/admin/accounts'
 import type { AccountListItem } from '@/types'
-import { cloneBackgroundControl, DEFAULT_CUSTOM_BALANCE, DEFAULT_MAX_REQUEST_ATTEMPTS, DEFAULT_QUALITY_REFRESH_SECONDS, isRuleEnabled, normalizeAccountPriorityRule, normalizeCustomBalance, normalizeMaxRequestAttempts, normalizeQualityRefreshInterval, normalizeRoute, normalizeSchedulingThresholds, toSavePayload } from './modelIntegrity'
+import { cloneBackgroundControl, DEFAULT_CUSTOM_BALANCE, DEFAULT_MAX_REQUEST_ATTEMPTS, DEFAULT_QUALITY_REFRESH_SECONDS, isRuleEnabled, normalizeAccountPriorityRule, normalizeCustomBalance, normalizeMaxRequestAttempts, normalizeModelPolicyRules, normalizeQualityRefreshInterval, normalizeRoute, normalizeSchedulingThresholds, toSavePayload, type LegacyRuleMerge } from './modelIntegrity'
 
 /**
  * 'saved_evaluation_failed' is a real, distinct outcome: the server accepted
@@ -65,10 +65,21 @@ export function useModelIntegrityConfig() {
   /** Model rules as the server stored them; they, not unsaved edits, apply to requests. */
   const savedRules = ref<OpenAIEvalSchedulingPolicyRule[]>([])
   /**
+   * Legacy effort-specific model rules folded into one rule per model on load.
+   * Requests already resolve them this way; the next save stores the result.
+   */
+  const legacyRuleMerges = ref<LegacyRuleMerge[]>([])
+  /**
    * Background controls as the server stored them, with their live runtime.
    * The tests page compares the draft against these to mark unsaved pauses.
    */
   const savedBackgroundControls = ref<OpenAIEvalBackgroundControl[]>([])
+  /**
+   * Adjustments the server reported instead of rejecting a save or while
+   * reading an older config (e.g. automatic fingerprint turned off for a model
+   * outside the candidate bank). Shown until dismissed or the next load.
+   */
+  const warnings = ref<string[]>([])
   /**
    * What the gateway is applying now, straight from the server. This is never
    * derived from unsaved edits: the published order belongs to a revision, and
@@ -120,9 +131,11 @@ export function useModelIntegrityConfig() {
     config.custom_balance = normalizeCustomBalance(saved.custom_balance)
     // A legacy response without the field reads as the defaults; a configured one is kept as sent.
     config.scheduling_thresholds = normalizeSchedulingThresholds(saved.scheduling_thresholds)
-    config.policies = (saved.policies ?? []).map(rule => ({
+    // One rule per model: the last saved rule for a model wins, a disabled one included.
+    const modelRules = normalizeModelPolicyRules(saved.policies)
+    legacyRuleMerges.value = modelRules.merges
+    config.policies = modelRules.rules.map(rule => ({
       ...rule,
-      reasoning_effort: rule.reasoning_effort || '',
       enabled: isRuleEnabled(rule),
       ...(rule.policy === 'custom_balance' ? { custom_balance: normalizeCustomBalance(rule.custom_balance ?? saved.custom_balance) } : {})
     }))
@@ -134,7 +147,7 @@ export function useModelIntegrityConfig() {
     config.quality_next_refresh_at = saved.quality_next_refresh_at ?? null
     savedQualityRefreshInterval.value = config.quality_refresh_interval_seconds
     // Disabled rules are kept in the config but never apply to requests.
-    savedRules.value = (saved.policies ?? []).filter(isRuleEnabled).map(rule => ({ ...rule, reasoning_effort: rule.reasoning_effort || '' }))
+    savedRules.value = modelRules.rules.filter(isRuleEnabled)
     config.accounts = (saved.accounts ?? []).map(route => normalizeRoute({ ...route }))
     // Kept undefined when an older server omits it, so saves do not add it.
     config.background_controls = Array.isArray(saved.background_controls) ? saved.background_controls.map(cloneBackgroundControl) : undefined
@@ -155,6 +168,7 @@ export function useModelIntegrityConfig() {
       catalog.value = meta
       accounts.value = accountPage.items
       apply(saved)
+      warnings.value = uniqueWarnings(saved.warnings)
       conflict.value = false
       loaded.value = true
     } catch (error) {
@@ -167,7 +181,9 @@ export function useModelIntegrityConfig() {
 
   /** Re-reads the server config while keeping the catalog and account list. */
   async function reloadConfig() {
-    apply(await accountsAPI.getOpenAIEvalConfig())
+    const fresh = await accountsAPI.getOpenAIEvalConfig()
+    apply(fresh)
+    warnings.value = uniqueWarnings(fresh.warnings)
     conflict.value = false
   }
 
@@ -203,6 +219,7 @@ export function useModelIntegrityConfig() {
         // Keep the PUT response; it already carries the evaluation outcome.
       }
       apply(authoritative)
+      warnings.value = uniqueWarnings(saved.warnings, authoritative === saved ? undefined : authoritative.warnings)
       conflict.value = false
       return isEvaluationError(authoritative) ? 'saved_evaluation_failed' : 'saved'
     } catch (error) {
@@ -214,6 +231,14 @@ export function useModelIntegrityConfig() {
     } finally {
       saving.value = false
     }
+  }
+
+  function uniqueWarnings(...lists: Array<string[] | undefined>): string[] {
+    return [...new Set(lists.flatMap(list => (Array.isArray(list) ? list : [])).map(item => String(item).trim()).filter(Boolean))]
+  }
+
+  function dismissWarnings() {
+    warnings.value = []
   }
 
   /** True when the configuration was stored but its evaluation did not complete. */
@@ -242,5 +267,5 @@ export function useModelIntegrityConfig() {
     else applyRankingSnapshot({ ranking_error: result.ranking_error ?? null })
   }
 
-  return { config, catalog, accounts, loading, loaded, saving, conflict, loadError, dirty, ranking, load, reloadConfig, save, accountName, accountLabel, savedQualityRefreshInterval, savedRules, savedBackgroundControls, refreshBackgroundRuntime, applyQualityRefresh, applyRankingSnapshot, applyRankingSummary, foldedLegacyStability }
+  return { config, catalog, accounts, loading, loaded, saving, conflict, loadError, dirty, ranking, warnings, dismissWarnings, load, reloadConfig, save, accountName, accountLabel, savedQualityRefreshInterval, savedRules, legacyRuleMerges, savedBackgroundControls, refreshBackgroundRuntime, applyQualityRefresh, applyRankingSnapshot, applyRankingSummary, foldedLegacyStability }
 }

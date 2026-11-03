@@ -500,3 +500,62 @@ describe('AccountLeaderboard scheduled recovery', () => {
     expect(wrapper.find('[data-testid="board-recovery-note"]').exists()).toBe(false)
   })
 })
+
+describe('AccountLeaderboard model rows', () => {
+  const modelRow = (model: string, effort: string, overrides: Partial<{ [K in keyof OpenAIEvalRankingFactors]: Partial<OpenAIEvalRankingFactors[K]> }> = {}) => ({
+    requested_model: model, reasoning_effort: effort, upstream_models: [model], policy: 'avoid_degradation' as const,
+    factors: factors({ error_rate: { source: 'request_ewma_account_model_effort' }, ...overrides }),
+    sources: ['request_ewma_account_model_effort']
+  })
+
+  async function expand(models: ReturnType<typeof modelRow>[]) {
+    api.getOpenAIEvalAccountOverview.mockResolvedValue(page({ accounts: [account(11, 1, { models, model_count: 2 })] }))
+    const wrapper = mountBoard()
+    await flushPromises()
+    await wrapper.get('[data-testid="board-toggle"]').trigger('click')
+    return wrapper
+  }
+
+  it('uses the server’s per-model rows as sent, without an effort column or a second average', async () => {
+    const wrapper = await expand([
+      modelRow('gpt-6.1-sol', '', { error_rate: { value: 0.25, sample_count: 8 }, ttft: { ms: 900, sample_count: 8 }, quality: { ratio: 0.5 } }),
+      modelRow('gpt-6-astra', '', { error_rate: { value: 0.01, sample_count: 50 }, quality: { ratio: 1 } })
+    ])
+    const rows = wrapper.findAll('[data-testid="board-model-row"]')
+    // sol and astra are different gateway models, even though the fingerprint compares sol as astra.
+    expect(rows.map(row => row.find('td').text())).toEqual(['gpt-6.1-sol', 'gpt-6-astra'])
+    expect(rows.every(row => row.attributes('data-basis') === 'server')).toBe(true)
+    expect(wrapper.get('[data-testid="board-models"]').text()).not.toContain('推理强度')
+    expect(rows[0].get('[data-testid="board-model-error_rate"]').text()).toContain('25%')
+    expect(rows[0].get('[data-testid="board-model-ttft"]').text()).toContain('900 ms')
+    expect(rows[0].get('[data-testid="board-model-quality"]').text()).toContain('50%')
+    expect(wrapper.find('[data-testid="board-model-efforts"]').exists()).toBe(false)
+  })
+
+  it('folds an older server’s effort rows to one row per model, weighting by samples and skipping unknown pass rates', async () => {
+    const wrapper = await expand([
+      modelRow('gpt-6.1-sol', '', { error_rate: { value: 0, sample_count: 10 }, ttft: { ms: 1000, sample_count: 10 }, quality: { ratio: 1 } }),
+      modelRow('gpt-6-astra', '', { error_rate: { value: 0.02, sample_count: 5 } }),
+      modelRow('gpt-6.1-sol', 'high', { error_rate: { value: 1, sample_count: 1 }, ttft: { ms: 2100, sample_count: 1 }, quality: { state: 'unknown', ratio: null, known: false } }),
+      modelRow('GPT-6-ASTRA', 'high', { error_rate: { value: 0.04, sample_count: 5 } })
+    ])
+    const rows = wrapper.findAll('[data-testid="board-model-row"]')
+    expect(rows).toHaveLength(2)
+    expect(rows.map(row => row.attributes('data-basis'))).toEqual(['projected', 'projected'])
+    const sol = rows[0]
+    // 0 % over 10 requests and 100 % over 1 request is 1/11, not 50 %.
+    expect(sol.get('[data-testid="board-model-error_rate"]').text()).toContain('9.1%')
+    // (1000 × 10 + 2100 × 1) / 11 = 1100 ms.
+    expect(sol.get('[data-testid="board-model-ttft"]').text()).toContain('1100 ms')
+    // The unknown high-effort pass rate is left out, never read as 0 %.
+    expect(sol.get('[data-testid="board-model-quality"]').text()).toContain('100%')
+    expect(rows[1].get('[data-testid="board-model-error_rate"]').text()).toContain('3%')
+    const efforts = sol.get('[data-testid="board-model-efforts"]')
+    expect(efforts.text()).toContain('由 2 个推理强度的记录汇总')
+    expect(efforts.findAll('[data-testid="board-model-effort"]').map(item => item.text())).toEqual([
+      expect.stringContaining('未指定'),
+      expect.stringContaining('high')
+    ])
+    expect(efforts.text()).toContain('100%（1 个样本）')
+  })
+})

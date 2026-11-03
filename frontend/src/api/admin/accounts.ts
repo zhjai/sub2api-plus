@@ -30,6 +30,7 @@ import type {
   OllamaCloudUsageState,
   GrokMediaEligibilityMode,
   GrokMediaEligibilityState,
+  GrokModelDiagnostics,
   OpenCodeGoUsageSettings,
   OpenCodeGoUsageState
 } from '@/types'
@@ -170,8 +171,11 @@ export interface OpenAIEvalSchedule {
   enabled: boolean
   interval_seconds: number
   jitter_seconds: number
+  /** Legacy fingerprint sample size (quick/standard/strict); read-only, never sent. */
   sample_mode?: string
   sample_count?: number
+  /** Fingerprint only: challenges in flight at once on this target (1–3, default 3). */
+  concurrency?: number
   last_run_at?: string | null
   next_run_at?: string | null
 }
@@ -182,7 +186,11 @@ export interface OpenAIEvalRouteConfig {
   reasoning_effort: string
   candy_schedule: OpenAIEvalSchedule
   fingerprint_schedule: OpenAIEvalSchedule
-  modeltrace_schedule: OpenAIEvalSchedule
+  /**
+   * Retired ModelTrace schedule. Older servers still send it; the page folds an
+   * enabled one into fingerprint_schedule on load and never sends it back.
+   */
+  modeltrace_schedule?: OpenAIEvalSchedule
   state_probe_schedule: OpenAIEvalSchedule
   bps_auto: boolean
   /** Legacy storage compatibility only; BPS is retired and always disabled. */
@@ -347,6 +355,12 @@ export interface OpenAIEvalConfig {
   evaluation_in_progress?: boolean
   /** Revision the server stored on the last accepted save. */
   saved_revision?: number
+  /**
+   * Adjustments the server made instead of rejecting the save, e.g. an
+   * automatic fingerprint turned off for a model outside the candidate bank.
+   * Read-only; never sent back.
+   */
+  warnings?: string[]
 }
 
 /** Live counters for one account's automatic tests; GET only, never saved. */
@@ -458,10 +472,97 @@ export interface OpenAIEvalModelTraceSample {
   accepted?: boolean
 }
 
+/** Test types that can run now. ModelTrace is retired and only appears in history. */
+export type OpenAIEvalRunnableType = 'candy' | 'fingerprint' | 'pelican' | 'state_probe'
+export type OpenAIEvalRunType = OpenAIEvalRunnableType | 'modeltrace'
+
+/** One ranked candidate, exactly as the plugin's fingerprint detector reports it. */
+export interface OpenAIEvalLMFingerprintCandidate {
+  model: string
+  display_name: string
+  family: string
+  family_name: string
+  /** Calibrated probability; null when fewer than three answers were valid. */
+  probability: number | null
+  score: number
+}
+
+export interface OpenAIEvalLMFingerprintDiagnostic {
+  index: number
+  parsed_numbers: number
+  minimum_numbers: number
+  accepted: boolean
+}
+
+/** The plugin's fingerprintAttribution JSON, stored unchanged. */
+export interface OpenAIEvalLMFingerprintAttribution {
+  /** '' (full ranking), 'partial' (1–2 valid answers, scores only) or 'not_model'. */
+  decision?: string
+  prediction: string
+  prediction_name?: string
+  probability: number | null
+  used_outputs: number
+  family_prediction_name: string
+  sequence?: { autocorrelation: number; small_step_share: number; model_like: boolean }
+  /** Omitted from list summaries; the run detail carries them. */
+  results?: OpenAIEvalLMFingerprintCandidate[] | null
+  diagnostics?: OpenAIEvalLMFingerprintDiagnostic[] | null
+}
+
+export interface OpenAIEvalLMFingerprintSample {
+  instructions?: string
+  prompt: string
+  expected_count: number
+  attempts?: number
+  text?: string
+  error?: string
+  parsed_numbers: number
+  accepted: boolean
+}
+
+export interface OpenAIEvalLMFingerprintResult {
+  detector_revision: string
+  /** The plugin's own status: completed, partial, failed, cancelled or skipped. */
+  collection_status: string
+  concurrency: number
+  /** Candidate the tested model is compared as, after the plugin's alias table. */
+  compared_as: string
+  /** False when that candidate is not in the bank: the result cannot be scored. */
+  enrolled: boolean
+  /** Effort sent upstream; always '' because the detector bank was collected without one. */
+  request_effort: string
+  samples?: OpenAIEvalLMFingerprintSample[] | null
+  attribution?: OpenAIEvalLMFingerprintAttribution | null
+}
+
+export interface OpenAIEvalPelicanResult {
+  variant: string
+  attempts: number
+  html_bytes: number
+  html_sha256: string
+}
+
+/** The plugin's variant: `label` is its display name; `name`/`language` are accepted from older drafts of the contract. */
+export interface OpenAIEvalPelicanVariant {
+  id: string
+  label?: string
+  name?: string
+  language?: string
+  prompt: string
+}
+
+export interface OpenAIEvalFingerprintModel {
+  id: string
+  display_name: string
+  family: string
+  family_name: string
+  response_count?: number
+}
+
 export interface OpenAIEvalRun {
   id: number
   account_id: number
-  test_type: 'candy' | 'fingerprint' | 'modeltrace' | 'state_probe'
+  test_type: OpenAIEvalRunType
   requested_model: string
   upstream_model?: string
   reasoning_effort: string
@@ -476,8 +577,14 @@ export interface OpenAIEvalRun {
     expected_count: number
     confidence: string
     scheduling: string
+    /** Retired JSD fingerprint; read-only history. */
     fingerprint?: OpenAIEvalFingerprintResult
+    /** Retired ModelTrace; read-only history. */
     modeltrace?: OpenAIEvalModelTraceResult
+    /** Current fingerprint detector (plugin v0.4.4). */
+    lm_fingerprint?: OpenAIEvalLMFingerprintResult
+    pelican?: OpenAIEvalPelicanResult
+    request_profile?: string
     state_probe?: OpenAIStateProbeResult
     /** Present when the server reads an attribution under its current rule; older servers omit it. */
     attribution?: OpenAIEvalAttributionMeta
@@ -555,12 +662,21 @@ export interface OpenAIEvalModelCatalog {
   baseline_models: string[]
   /** Current question/data revision; runs with another value used older questions. */
   data_version?: string
-  candy: { expected_answer: number; confidence: string; scheduling: string }
+  candy: { expected_answer: number; confidence: string; scheduling: string; prompt?: string }
   evaluation_notice: string
   reasoning_efforts: string[]
-  fingerprint_modes: Array<{ id: string; samples: number }>
-  /** `models`: baseline-covered actual model IDs; absent on older servers. */
-  modeltrace: { requests: number; bank_revision: string; candidate_count: number; scheduling: string; models?: string[] }
+  /** Retired sample sizes; older servers send them, the page never shows them. */
+  fingerprint_modes?: Array<{ id: string; samples: number }>
+  /** Retired ModelTrace description; older servers only. */
+  modeltrace?: { requests: number; bank_revision: string; candidate_count: number; scheduling: string; models?: string[] }
+  fingerprint?: {
+    requests: number
+    detector_revision: string
+    models: OpenAIEvalFingerprintModel[]
+    /** Tested model → candidate it is compared as, e.g. gpt-6.1-sol → gpt-6-astra. */
+    aliases: Record<string, string>
+  }
+  pelican?: { variants: OpenAIEvalPelicanVariant[]; requests: number }
 }
 
 // ---------------------------------------------------------------------------
@@ -919,18 +1035,24 @@ export async function saveOpenAIEvalConfig(config: OpenAIEvalConfig): Promise<Op
   return data
 }
 
-export async function runOpenAIEval(request: {
+export interface OpenAIEvalRunRequest {
   account_id: number
-  test_type: 'candy' | 'fingerprint' | 'modeltrace' | 'state_probe'
+  test_type: OpenAIEvalRunnableType
   requested_model: string
+  /** The target's effort. Fingerprint records the run under it but sends none upstream. */
   reasoning_effort: string
-  sample_mode?: string
   sample_count?: number
+  /** Fingerprint: challenges in flight at once (1–3). */
+  concurrency?: number
+  /** Pelican: the plugin variant id ('original' or 'all-in-one'). */
+  variant?: string
   /** Attempts per sample including the first; ignored by State Probe. */
   max_attempts?: number
-}): Promise<OpenAIEvalRun> {
-  // Fingerprint runs can make 60-400 upstream requests; the shared 30s UI
-  // timeout would cancel a healthy run and incorrectly show an error.
+}
+
+export async function runOpenAIEval(request: OpenAIEvalRunRequest): Promise<OpenAIEvalRun> {
+  // A Pelican drawing may take ten minutes per attempt and runs are
+  // synchronous; the shared 30s UI timeout would cancel a healthy run.
   const { data } = await apiClient.post<OpenAIEvalRun>('/admin/accounts/evaluations/run', request, { timeout: 30 * 60 * 1000 })
   return data
 }
@@ -943,6 +1065,17 @@ export async function listOpenAIEvalRuns(params?: {
   limit?: number
 }): Promise<{ items: OpenAIEvalRun[] }> {
   const { data } = await apiClient.get<{ items: OpenAIEvalRun[] }>('/admin/accounts/evaluations/runs', { params })
+  return data
+}
+
+export type OpenAIEvalPelicanFrameMode = 'preview' | 'play'
+
+/**
+ * Short-lived URL of the isolated Pelican page. The frame endpoint serves the
+ * stored page with its own CSP; the URL carries a capability token only.
+ */
+export async function createOpenAIEvalPelicanFrameToken(runID: number, mode: OpenAIEvalPelicanFrameMode): Promise<{ url: string; expires_at: string }> {
+  const { data } = await apiClient.post<{ url: string; expires_at: string }>(`/admin/accounts/evaluations/runs/${runID}/pelican-frame-token`, { mode })
   return data
 }
 
@@ -1620,6 +1753,8 @@ export interface SyncUpstreamModelsResult {
   models: string[]
   metadata?: Record<string, UpstreamModelMetadata>
   warnings?: UpstreamModelSyncWarning[]
+  discovery_source?: 'upstream' | 'configured_fallback'
+  grok_model_diagnostics?: GrokModelDiagnostics
 }
 
 export interface UpstreamModelSyncWarning {
@@ -2214,6 +2349,7 @@ export const accountsAPI = {
   ,saveOpenAIEvalConfig
   ,runOpenAIEval
   ,listOpenAIEvalRuns
+  ,createOpenAIEvalPelicanFrameToken
   ,refreshOpenAIEvalQuality
   ,evaluateOpenAIEvalRanking
   ,getOpenAIEvalRankings

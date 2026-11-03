@@ -15,7 +15,7 @@ func TestSavedSchedulingThresholdsChangeActualDispatch(t *testing.T) {
 	s, repo, _, gateway := rankingHarness(t)
 	scheduler := gateway.persistentOpenAIAccountScheduler().(*defaultOpenAIAccountScheduler)
 	for i := 0; i < 20; i++ {
-		scheduler.stats.reportForRequest(1, "gpt-6.1-sol", "", i < 18, nil)
+		scheduler.stats.reportForRequest(1, "gpt-6.1-sol", "", i < 14, nil)
 	}
 	group := int64(7)
 	selectID := func() int64 {

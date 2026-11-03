@@ -187,6 +187,7 @@ import {
   DAY,
   HOUR,
   PAUSE_DURATIONS,
+  FINGERPRINT_REQUESTS,
   TEST_TYPES,
   accountHourlyPlan,
   backgroundControlPayload,
@@ -392,14 +393,16 @@ const previewControl = computed<OpenAIEvalBackgroundControl | null>(() => {
 })
 const previewRows = computed(() => (previewControl.value ? estimateRows(previewControl.value) : []))
 const previewCapacity = computed(() => runFeasibility(0, 0, previewControl.value ?? BACKGROUND_DEFAULTS, props.rpmLimit))
-const fingerprintModes = computed(() => props.catalog?.fingerprint_modes?.length ? props.catalog.fingerprint_modes : [{ id: 'quick', samples: 60 }, { id: 'standard', samples: 200 }, { id: 'strict', samples: 400 }])
-/** Fingerprint sample sizes are fixed, so say plainly which ones cannot fit. */
+/**
+ * A fingerprint run is a fixed set of challenges, so say plainly when even
+ * one run cannot fit the limits (automatic and manual runs alike).
+ */
 const fingerprintBlocked = computed(() => {
   if (!previewControl.value) return ''
   const capacity = previewCapacity.value.capacity
-  const blocked = fingerprintModes.value.filter(mode => mode.samples > capacity)
-  if (!blocked.length) return ''
-  return t('admin.modelIntegrity.tests.background.fingerprintBlocked', { counts: blocked.map(mode => mode.samples).join(' / '), capacity })
+  const requests = props.catalog?.fingerprint?.requests || FINGERPRINT_REQUESTS
+  if (requests <= capacity) return ''
+  return t('admin.modelIntegrity.tests.background.fingerprintBlocked', { counts: requests, capacity })
 })
 
 function confirmLimits() {

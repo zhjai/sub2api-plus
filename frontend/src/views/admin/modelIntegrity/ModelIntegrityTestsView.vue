@@ -22,6 +22,15 @@
       </div>
 
       <template v-else>
+        <div v-if="warnings.length" class="server-warnings" role="status" data-testid="config-warnings">
+          <div class="min-w-0">
+            <p class="server-warnings-title">{{ t('admin.modelIntegrity.tests.warnings.title') }}</p>
+            <ul class="server-warnings-list">
+              <li v-for="warning in warnings" :key="warning" data-testid="config-warning">{{ warningText(warning) }}</li>
+            </ul>
+          </div>
+          <button type="button" class="server-warnings-dismiss" @click="dismissWarnings">{{ t('admin.modelIntegrity.tests.warnings.dismiss') }}</button>
+        </div>
         <div class="budget-row">
           <p class="budget" data-testid="budget">
             <template v-if="planCount">{{ t('admin.modelIntegrity.tests.budget', { requests: formatCount(dailyTotal), plans: planCount }) }}<template v-if="dailyMax > dailyTotal"> {{ t('admin.modelIntegrity.tests.budgetRetry', { max: formatCount(dailyMax) }) }}</template></template>
@@ -138,21 +147,38 @@
               @update="updateControl"
             />
             <div class="detail-body">
-              <TestTypePanel
-                v-for="type in TEST_TYPES"
-                :key="type"
-                :route="selected"
-                :type="type"
-                :catalog="catalog"
-                :latest="latestRunFor(panelRuns, selected, type)"
-                :progress="runningProgress.get(runKey(selected, type))"
-                :running="isRunning(selected, type)"
-                :available="testAvailable(selected, type)"
-                :max-attempts="maxAttempts"
-                :auto-note="autoNote(selected, type)"
-                @run="requestRun(selected, type)"
-                @open="detailRun = $event"
-              />
+              <template v-for="type in TEST_TYPES" :key="type">
+                <PelicanPanel
+                  v-if="type === 'pelican'"
+                  :route="selected"
+                  :catalog="catalog"
+                  :latest="latestRunFor(panelRuns, selected, type)"
+                  :progress="runningProgress.get(runKey(selected, type))"
+                  :running="isRunning(selected, type)"
+                  :available="testAvailable(selected, type)"
+                  :unavailable-reason="unavailableReason(selected, type)"
+                  :run-blocked="manualRunBlocked(selected, type)"
+                  :max-attempts="maxAttempts"
+                  @run="requestRun(selected, type, $event)"
+                  @open="detailRun = $event"
+                />
+                <TestTypePanel
+                  v-else
+                  :route="selected"
+                  :type="type"
+                  :catalog="catalog"
+                  :latest="latestRunFor(panelRuns, selected, type)"
+                  :progress="runningProgress.get(runKey(selected, type))"
+                  :running="isRunning(selected, type)"
+                  :available="testAvailable(selected, type)"
+                  :unavailable-reason="unavailableReason(selected, type)"
+                  :run-blocked="manualRunBlocked(selected, type)"
+                  :max-attempts="maxAttempts"
+                  :auto-note="autoNote(selected, type)"
+                  @run="requestRun(selected, type)"
+                  @open="detailRun = $event"
+                />
+              </template>
             </div>
           </section>
           <p v-else class="detail detail-placeholder">{{ t('admin.modelIntegrity.tests.selectTarget') }}</p>
@@ -171,7 +197,7 @@
               </div>
               <select v-model="typeFilter" class="input h-9 w-auto py-1 text-sm" :aria-label="t('admin.modelIntegrity.tests.filterType')">
                 <option value="">{{ t('admin.modelIntegrity.tests.filterType') }}</option>
-                <option v-for="type in TEST_TYPES" :key="type" :value="type">{{ t(`admin.modelIntegrity.tests.types.${type}.name`) }}</option>
+                <option v-for="type in historyTypes" :key="type" :value="type">{{ t(`admin.modelIntegrity.tests.types.${type}.name`) }}</option>
               </select>
               <select v-model="toneFilter" class="input h-9 w-auto py-1 text-sm" :aria-label="t('admin.modelIntegrity.tests.filterResult')">
                 <option value="">{{ t('admin.modelIntegrity.tests.filterResult') }}</option>
@@ -208,7 +234,10 @@
                     <span class="block text-gray-900 dark:text-gray-100">{{ accountName(run.account_id) }}</span>
                     <span class="block text-xs text-gray-500">{{ run.requested_model }} · {{ run.reasoning_effort || t('admin.modelIntegrity.common.defaultEffort') }}</span>
                   </td>
-                  <td class="history-test whitespace-nowrap">{{ t(`admin.modelIntegrity.tests.types.${run.test_type}.name`) }}</td>
+                  <td class="history-test whitespace-nowrap">
+                    {{ t(`admin.modelIntegrity.tests.types.${run.test_type}.name`) }}
+                    <span v-if="isLegacyRun(run)" class="legacy-tag" data-testid="history-legacy">{{ t('admin.modelIntegrity.tests.legacy.tag') }}</span>
+                  </td>
                   <td class="history-result">
                     <span class="tone" :class="`tone-${resultTone(run.status)}`" data-testid="history-status">{{ runStatusLabel(t, run) }}</span>
                     <span class="mt-1 block text-xs text-gray-600 dark:text-gray-400">{{ runExplanation(t, run, catalog) }}</span>
@@ -220,7 +249,7 @@
               </tbody>
             </table>
           </div>
-          <p class="tests-note">{{ t('admin.modelIntegrity.tests.baselineNote', { version: catalog?.baseline_version || '—' }) }}</p>
+          <p class="tests-note">{{ t('admin.modelIntegrity.tests.detectorNote', { version: catalog?.fingerprint?.detector_revision || '—' }) }}</p>
         </section>
       </template>
     </ModelIntegrityShell>
@@ -235,27 +264,6 @@
       @save="saveEdit"
     />
     <RunDetailDialog :run="detailRun" :target="detailRun ? `${accountName(detailRun.account_id)} · ${detailRun.requested_model} · ${detailRun.reasoning_effort || t('admin.modelIntegrity.common.defaultEffort')}` : ''" :catalog="catalog" @close="detailRun = null" />
-
-    <BaseDialog :show="pendingFingerprint !== null" :title="t('admin.modelIntegrity.tests.manualSampleTitle')" width="narrow" @close="pendingFingerprint = null">
-      <fieldset class="space-y-2">
-        <legend class="sr-only">{{ t('admin.modelIntegrity.tests.sampleMode') }}</legend>
-        <label v-for="mode in fingerprintModes" :key="mode.id" class="sample-choice" :class="{ 'sample-choice-blocked': manualBlocked(mode.samples) }">
-          <input v-model="manualSampleMode" type="radio" name="manual-sample" :value="mode.id" :disabled="manualBlocked(mode.samples)" class="text-primary-600 focus:ring-primary-500" />
-          <span>
-            {{ t('admin.modelIntegrity.tests.manualSampleOption', { mode: sampleModeLabel(mode.id), count: mode.samples }) }}
-            <span v-if="manualBlocked(mode.samples)" class="block text-xs text-rose-700 dark:text-rose-300">{{ t('admin.modelIntegrity.tests.background.manualBlocked', { capacity: manualCapacity }) }}</span>
-          </span>
-        </label>
-      </fieldset>
-      <p class="mt-3 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.modelIntegrity.tests.manualSampleHint') }}</p>
-      <p v-if="manualControl?.budget_enabled" class="mt-2 text-xs text-gray-500 dark:text-gray-400" data-testid="manual-budget-note">{{ t('admin.modelIntegrity.tests.background.manualBudgetNote') }}</p>
-      <template #footer>
-        <div class="flex justify-end gap-2">
-          <button type="button" class="btn btn-secondary" @click="pendingFingerprint = null">{{ t('admin.modelIntegrity.common.cancel') }}</button>
-          <button type="button" class="btn btn-primary" data-testid="confirm-fingerprint" :disabled="manualBlocked(selectedManualSamples)" @click="confirmFingerprint">{{ t('admin.modelIntegrity.tests.runNow') }}</button>
-        </div>
-      </template>
-    </BaseDialog>
 
     <ConfirmDialog
       :show="pendingRemove !== null"
@@ -275,15 +283,15 @@ import { useI18n } from 'vue-i18n'
 import { onBeforeRouteLeave } from 'vue-router'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import Icon from '@/components/icons/Icon.vue'
-import BaseDialog from '@/components/common/BaseDialog.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import ModelIntegrityShell from '@/components/admin/modelIntegrity/ModelIntegrityShell.vue'
 import TestTypePanel from '@/components/admin/modelIntegrity/TestTypePanel.vue'
+import PelicanPanel from '@/components/admin/modelIntegrity/PelicanPanel.vue'
 import AddTargetsDialog from '@/components/admin/modelIntegrity/AddTargetsDialog.vue'
 import EditTargetDialog from '@/components/admin/modelIntegrity/EditTargetDialog.vue'
 import RunDetailDialog from '@/components/admin/modelIntegrity/RunDetailDialog.vue'
 import AccountAutoTestControls from '@/components/admin/modelIntegrity/AccountAutoTestControls.vue'
-import { accountsAPI, type OpenAIEvalBackgroundControl, type OpenAIEvalRouteConfig, type OpenAIEvalRun } from '@/api/admin/accounts'
+import { accountsAPI, type OpenAIEvalBackgroundControl, type OpenAIEvalRouteConfig, type OpenAIEvalRun, type OpenAIEvalRunRequest } from '@/api/admin/accounts'
 import { useAppStore } from '@/stores/app'
 import { extractApiErrorMessage } from '@/utils/apiError'
 import {
@@ -294,7 +302,12 @@ import {
   findBackgroundControl,
   isDirectOAuthAccount,
   isDirectOAuthRoute,
+  isCatalogModel,
+  isLegacyRun,
+  parseFingerprintDisabledWarning,
+  isScheduledType,
   latestRunFor,
+  normalizeFingerprintConcurrency,
   newRoute,
   normalizeMaxRequestAttempts,
   pausedUntil,
@@ -307,14 +320,15 @@ import {
   totalDailyRequests,
   requestsPerRun,
   maxRequestsPerRun,
-  type EvalTestType
+  type EvalTestType,
+  type HistoryTestType
 } from './modelIntegrity'
 import { runExplanation, runStatusLabel } from './runText'
 import { useModelIntegrityConfig } from './useModelIntegrityConfig'
 
 const { t } = useI18n()
 const appStore = useAppStore()
-const { config, catalog, accounts, loading, loaded, saving, conflict, dirty, load, reloadConfig, save, accountName, accountLabel, savedBackgroundControls, refreshBackgroundRuntime } = useModelIntegrityConfig()
+const { config, catalog, accounts, loading, loaded, saving, conflict, dirty, warnings, dismissWarnings, load, reloadConfig, save, accountName, accountLabel, savedBackgroundControls, refreshBackgroundRuntime } = useModelIntegrityConfig()
 
 const search = ref('')
 const selectedKey = ref('')
@@ -323,19 +337,39 @@ const runs = ref<OpenAIEvalRun[]>([])
 const targetRuns = ref<{ key: string; items: OpenAIEvalRun[] } | null>(null)
 const historyLoading = ref(false)
 const historyScope = ref<'all' | 'target'>('all')
-const typeFilter = ref<'' | EvalTestType>('')
+const typeFilter = ref<'' | HistoryTestType>('')
 const toneFilter = ref('')
 const detailRun = ref<OpenAIEvalRun | null>(null)
 const pendingRemove = ref<OpenAIEvalRouteConfig | null>(null)
 const editing = ref<OpenAIEvalRouteConfig | null>(null)
-const pendingFingerprint = ref<OpenAIEvalRouteConfig | null>(null)
-const manualSampleMode = ref('quick')
 const runningKeys = reactive(new Set<string>())
 const runningProgress = reactive(new Map<string, OpenAIEvalRun>())
 
 const accountOf = (accountID: number) => accounts.value.find(item => item.id === accountID)
+/**
+ * Whether the server will run this test for the target at all. A model the
+ * server's catalog does not list is still saved (it only loses automatic
+ * fingerprinting, with a warning), but no manual or automatic test runs for it.
+ */
 function testAvailable(route: OpenAIEvalRouteConfig, type: EvalTestType) {
-  return accountOf(route.account_id)?.platform === 'openai' && (type !== 'state_probe' || isDirectOAuthRoute(route))
+  return accountOf(route.account_id)?.platform === 'openai' && isCatalogModel(route.requested_model, catalog.value) && (type !== 'state_probe' || isDirectOAuthRoute(route))
+}
+/** Why a test is unavailable; undefined keeps the panel's direct-OAuth note. */
+function unavailableReason(route: OpenAIEvalRouteConfig, type: EvalTestType) {
+  if (testAvailable(route, type)) return undefined
+  if (!isCatalogModel(route.requested_model, catalog.value)) return t('admin.modelIntegrity.tests.unsupportedModel', { model: route.requested_model })
+  return undefined
+}
+/**
+ * Experimental limits apply to manual runs too, and the server admits a run
+ * only when all of its planned sends fit the sampling window. Say so before
+ * the click instead of letting the server refuse it.
+ */
+function manualRunBlocked(route: OpenAIEvalRouteConfig, type: EvalTestType) {
+  const control = controlFor(route.account_id)
+  if (!control?.budget_enabled) return undefined
+  const feasibility = runFeasibility(requestsPerRun(route, type, catalog.value), maxRequestsPerRun(route, type, maxAttempts.value, catalog.value), control, accountOf(route.account_id)?.rpm_limit)
+  return feasibility.fits ? undefined : t('admin.modelIntegrity.tests.background.manualBlocked', { count: feasibility.nominal, capacity: feasibility.capacity })
 }
 const progressTimers = new Set<ReturnType<typeof setInterval>>()
 
@@ -358,7 +392,6 @@ function commitAttempts() {
   attemptsInput.value = value
 }
 const planCount = computed(() => activeScheduleCount(config.accounts, testAvailable))
-const fingerprintModes = computed(() => catalog.value?.fingerprint_modes?.length ? catalog.value.fingerprint_modes : [{ id: 'quick', samples: 60 }, { id: 'standard', samples: 200 }, { id: 'strict', samples: 400 }])
 
 // -- Account-wide automatic-test controls (pause and experimental limits) --
 // They live in the shared config and persist with the page's Save. Pausing
@@ -381,7 +414,7 @@ const pausedAccounts = computed(() => (config.background_controls ?? [])
     return { accountID: control.account_id, firstKey: first ? routeKey(first) : '' }
   }))
 function autoNote(route: OpenAIEvalRouteConfig, type: EvalTestType) {
-  if (!scheduleOf(route, type).enabled) return undefined
+  if (!isScheduledType(type) || !scheduleOf(route, type).enabled) return undefined
   const until = pausedUntil(controlFor(route.account_id))
   if (until) return t('admin.modelIntegrity.tests.background.panelPaused', { time: formatTime(until.toISOString()) })
   const control = controlFor(route.account_id)
@@ -389,11 +422,6 @@ function autoNote(route: OpenAIEvalRouteConfig, type: EvalTestType) {
   const feasibility = runFeasibility(requestsPerRun(route, type, catalog.value), maxRequestsPerRun(route, type, maxAttempts.value, catalog.value), control, accountOf(route.account_id)?.rpm_limit)
   return feasibility.fits ? undefined : t('admin.modelIntegrity.tests.background.panelBlocked', { count: feasibility.nominal, capacity: feasibility.capacity })
 }
-// A manual run under enabled limits must fit the same window as an automatic one.
-const manualControl = computed(() => (pendingFingerprint.value ? savedControlFor(pendingFingerprint.value.account_id) : undefined))
-const manualCapacity = computed(() => (manualControl.value?.budget_enabled ? runFeasibility(0, 0, manualControl.value, pendingFingerprint.value ? accountOf(pendingFingerprint.value.account_id)?.rpm_limit : undefined).capacity : Number.POSITIVE_INFINITY))
-const manualBlocked = (samples: number) => samples > manualCapacity.value
-const selectedManualSamples = computed(() => fingerprintModes.value.find(mode => mode.id === manualSampleMode.value)?.samples ?? 0)
 
 const panelRuns = computed(() => (selected.value && targetRuns.value?.key === routeKey(selected.value) ? [...targetRuns.value.items, ...runs.value] : runs.value))
 const historyRuns = computed(() => {
@@ -402,6 +430,8 @@ const historyRuns = computed(() => {
   }
   return runs.value
 })
+/** Retired ModelTrace appears in the filter only while its history is on screen. */
+const historyTypes = computed<HistoryTestType[]>(() => (historyRuns.value.some(run => run.test_type === 'modeltrace') ? [...TEST_TYPES, 'modeltrace'] : [...TEST_TYPES]))
 const visibleRuns = computed(() => historyRuns.value.filter(run => (!typeFilter.value || run.test_type === typeFilter.value) && (!toneFilter.value || resultTone(run.status) === toneFilter.value || (toneFilter.value === 'neutral' && ['running', 'error'].includes(resultTone(run.status))))))
 
 watch(() => config.accounts.length, () => {
@@ -500,32 +530,22 @@ const persistedRunFor = (route: OpenAIEvalRouteConfig, type: EvalTestType) => {
 }
 const isRunning = (route: OpenAIEvalRouteConfig, type: EvalTestType) => persistedRunFor(route, type)
 
-function requestRun(route: OpenAIEvalRouteConfig, type: EvalTestType) {
-  if (isRunning(route, type)) return
-  if (type === 'fingerprint') {
-    pendingFingerprint.value = route
-    manualSampleMode.value = route.fingerprint_schedule.sample_mode || 'quick'
-    if (manualBlocked(selectedManualSamples.value)) manualSampleMode.value = fingerprintModes.value.find(mode => !manualBlocked(mode.samples))?.id ?? manualSampleMode.value
-    return
-  }
-  void runNow(route, type)
+function requestRun(route: OpenAIEvalRouteConfig, type: EvalTestType, options: { variant?: string } = {}) {
+  if (isRunning(route, type) || !testAvailable(route, type) || manualRunBlocked(route, type)) return
+  void runNow(route, type, options)
 }
 
-function confirmFingerprint() {
-  const route = pendingFingerprint.value
-  pendingFingerprint.value = null
-  if (route) void runNow(route, 'fingerprint', manualSampleMode.value)
-}
-
-async function runNow(route: OpenAIEvalRouteConfig, type: EvalTestType, sampleMode?: string) {
+async function runNow(route: OpenAIEvalRouteConfig, type: EvalTestType, options: { variant?: string } = {}) {
   // Snapshot the identity: the target may be edited while this run is in flight.
   const target = { account_id: route.account_id, requested_model: route.requested_model, reasoning_effort: route.reasoning_effort }
   const key = runKey(route, type)
   runningKeys.add(key)
   let pollTimer: ReturnType<typeof setInterval> | undefined
   try {
-    const request: Parameters<typeof accountsAPI.runOpenAIEval>[0] = { ...target, test_type: type }
-    if (type === 'fingerprint') request.sample_mode = sampleMode || 'quick'
+    // The target's effort identifies the run; fingerprint records under it but the server sends none upstream.
+    const request: OpenAIEvalRunRequest = { ...target, test_type: type }
+    if (type === 'fingerprint') request.concurrency = normalizeFingerprintConcurrency(route.fingerprint_schedule.concurrency)
+    if (type === 'pelican') request.variant = options.variant
     if (type === 'candy') request.sample_count = Math.max(1, Math.trunc(Number(route.candy_schedule.sample_count) || 1))
     // State probe reads the same setting: the server clamps it to three chains.
     request.max_attempts = maxAttempts.value
@@ -649,11 +669,15 @@ async function initialLoad() {
   await loadHistory()
 }
 
-function sampleModeLabel(id: string) {
-  const key = `admin.modelIntegrity.tests.sampleModes.${id}`
-  const text = t(key)
-  return text === key ? id : text
+/** A known server adjustment in the reader's language; anything else as sent, with secrets masked. */
+function warningText(warning: string) {
+  const parsed = parseFingerprintDisabledWarning(warning)
+  if (!parsed) return redactSecrets(warning)
+  // A model outside the server's catalog cannot run manually either, so the note must not offer it.
+  const key = isCatalogModel(parsed.model, catalog.value) ? 'fingerprintNotEnrolled' : 'fingerprintNotEnrolledUnsupported'
+  return t(`admin.modelIntegrity.tests.warnings.${key}`, { account: accountLabel(parsed.accountID), model: parsed.model })
 }
+
 function triggerLabel(source: string) {
   const key = `admin.modelIntegrity.tests.trigger.${source}`
   const text = t(key)
@@ -756,9 +780,11 @@ onMounted(initialLoad)
 .tone-neutral { @apply bg-gray-100 text-gray-700 dark:bg-dark-700 dark:text-gray-300; }
 .tone-error { @apply bg-rose-50 text-rose-800 dark:bg-rose-950/40 dark:text-rose-300; }
 .tone-running { @apply bg-sky-50 text-sky-800 dark:bg-sky-950/40 dark:text-sky-300; }
-.sample-choice { @apply flex cursor-pointer items-center gap-3 rounded-lg border border-gray-200 px-3 py-2.5 text-sm dark:border-dark-600; }
-.sample-choice:has(input:checked) { @apply border-primary-600 bg-primary-50/50 dark:bg-primary-950/30; }
-.sample-choice-blocked { @apply cursor-not-allowed opacity-70; }
+.legacy-tag { @apply ml-1 rounded border border-gray-300 px-1 py-px text-[0.6875rem] text-gray-600 dark:border-dark-500 dark:text-gray-400; }
+.server-warnings { @apply flex items-start justify-between gap-4 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-800/70 dark:bg-amber-950/30 dark:text-amber-200; }
+.server-warnings-title { @apply font-medium; }
+.server-warnings-list { @apply mt-1 list-disc space-y-0.5 pl-5 text-[0.8125rem] leading-relaxed; }
+.server-warnings-dismiss { @apply shrink-0 rounded-md px-2 py-1 text-xs font-medium hover:bg-amber-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 dark:hover:bg-amber-900/40; }
 .paused-summary { @apply mt-2 flex flex-wrap items-center gap-1.5; }
 .paused-summary-label { @apply text-gray-700 dark:text-gray-300; }
 .paused-chip { @apply rounded-md border border-gray-300 px-2 py-0.5 text-xs text-gray-700 hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 disabled:cursor-default disabled:hover:bg-transparent dark:border-dark-500 dark:text-gray-300 dark:hover:bg-dark-700; }

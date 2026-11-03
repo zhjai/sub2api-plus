@@ -11,6 +11,7 @@ import type {
   OpenAIEvalEffectiveStatus,
   OpenAIEvalModelCatalog,
   OpenAIEvalOverviewModel,
+  OpenAIEvalRunType,
   OpenAIEvalPolicyWeights,
   OpenAIEvalRankingFactorKey,
   OpenAIEvalRankingFactorWeights,
@@ -27,9 +28,25 @@ import type {
 } from '@/api/admin/accounts'
 import type { Account } from '@/types'
 
-export type EvalTestType = 'candy' | 'fingerprint' | 'modeltrace' | 'state_probe'
+/** Tests a target can run now. Retired ModelTrace only appears in history (HistoryTestType). */
+export type EvalTestType = 'candy' | 'fingerprint' | 'pelican' | 'state_probe'
+export type HistoryTestType = OpenAIEvalRunType
 
-export const TEST_TYPES: EvalTestType[] = ['candy', 'fingerprint', 'modeltrace', 'state_probe']
+export const TEST_TYPES: EvalTestType[] = ['candy', 'fingerprint', 'pelican', 'state_probe']
+
+/** Tests with an automatic schedule. Pelican is manual only and never scored. */
+export type ScheduledTestType = Exclude<EvalTestType, 'pelican'>
+export const SCHEDULED_TEST_TYPES: ScheduledTestType[] = ['candy', 'fingerprint', 'state_probe']
+
+export function isScheduledType(type: string): type is ScheduledTestType {
+  return (SCHEDULED_TEST_TYPES as string[]).includes(type)
+}
+
+/** Fingerprint challenges per run and the per-target concurrency bounds (plugin fingerprintTarget). */
+export const FINGERPRINT_REQUESTS = 3
+export const FINGERPRINT_MIN_CONCURRENCY = 1
+export const FINGERPRINT_MAX_CONCURRENCY = 3
+export const PELICAN_REQUESTS = 1
 
 export const HOUR = 3600
 export const DAY = 24 * HOUR
@@ -78,16 +95,18 @@ export function normalizeQualityRefreshInterval(value: unknown): number {
 }
 
 interface TestTypeMeta {
-  scheduleKey: 'candy_schedule' | 'fingerprint_schedule' | 'modeltrace_schedule' | 'state_probe_schedule'
+  scheduleKey: 'candy_schedule' | 'fingerprint_schedule' | 'state_probe_schedule'
   minInterval: number
   intervals: number[]
 }
 
-export const TEST_TYPE_META: Record<EvalTestType, TestTypeMeta> = {
-  candy: { scheduleKey: 'candy_schedule', minInterval: 5 * 60, intervals: [5 * 60, 10 * 60, 30 * 60, HOUR, 6 * HOUR, 12 * HOUR, DAY] },
-  fingerprint: { scheduleKey: 'fingerprint_schedule', minInterval: 5 * 60, intervals: [5 * 60, 10 * 60, 30 * 60, HOUR, 6 * HOUR, 12 * HOUR, DAY] },
-  modeltrace: { scheduleKey: 'modeltrace_schedule', minInterval: 5 * 60, intervals: [5 * 60, 10 * 60, 30 * 60, HOUR, 6 * HOUR, 12 * HOUR, DAY] },
-  state_probe: { scheduleKey: 'state_probe_schedule', minInterval: 5 * 60, intervals: [5 * 60, 10 * 60, 30 * 60, HOUR, 6 * HOUR, 12 * HOUR, DAY] }
+/** Presets run from 5 minutes to 24 hours; any whole number of minutes is allowed as a custom interval. */
+export const SCHEDULE_INTERVALS = [5 * 60, 10 * 60, 30 * 60, HOUR, 6 * HOUR, 12 * HOUR, DAY]
+
+export const TEST_TYPE_META: Record<ScheduledTestType, TestTypeMeta> = {
+  candy: { scheduleKey: 'candy_schedule', minInterval: 5 * 60, intervals: SCHEDULE_INTERVALS },
+  fingerprint: { scheduleKey: 'fingerprint_schedule', minInterval: 5 * 60, intervals: SCHEDULE_INTERVALS },
+  state_probe: { scheduleKey: 'state_probe_schedule', minInterval: 5 * 60, intervals: SCHEDULE_INTERVALS }
 }
 
 /**
@@ -130,22 +149,34 @@ export function stateProbeChains(maxAttempts: number): number {
 export function stateProbeMaxRequests(maxAttempts: number): number {
   return STATE_PROBE_REQUESTS * stateProbeChains(maxAttempts)
 }
-const DEFAULT_FINGERPRINT_SAMPLES: Record<string, number> = { quick: 60, standard: 200, strict: 400 }
-
+/**
+ * The schedule of a test on a target. Pelican has none: it gets a fresh,
+ * always-disabled schedule so counting and budget code can treat every test
+ * alike without ever enabling it.
+ */
 export function scheduleOf(route: OpenAIEvalRouteConfig, type: EvalTestType): OpenAIEvalSchedule {
+  if (!isScheduledType(type)) return { enabled: false, interval_seconds: 0, jitter_seconds: 0 }
   return route[TEST_TYPE_META[type].scheduleKey]
 }
 
-export function emptySchedule(type: EvalTestType): OpenAIEvalSchedule {
+export function emptySchedule(type: ScheduledTestType): OpenAIEvalSchedule {
   return {
     enabled: false,
     interval_seconds: TEST_TYPE_META[type].minInterval,
     jitter_seconds: 0,
-    ...(type === 'fingerprint' ? { sample_mode: 'quick' } : {})
+    ...(type === 'fingerprint' ? { concurrency: FINGERPRINT_MAX_CONCURRENCY } : {})
   }
 }
 
-export function normalizeSchedule(schedule: OpenAIEvalSchedule, type: EvalTestType): OpenAIEvalSchedule {
+/** 1–3, default 3 (the plugin's default sends all three challenges at once). */
+export function normalizeFingerprintConcurrency(value: unknown): number {
+  if (value === undefined || value === null || value === '') return FINGERPRINT_MAX_CONCURRENCY
+  const raw = Number(value)
+  if (!Number.isFinite(raw)) return FINGERPRINT_MAX_CONCURRENCY
+  return Math.min(Math.max(Math.trunc(raw), FINGERPRINT_MIN_CONCURRENCY), FINGERPRINT_MAX_CONCURRENCY)
+}
+
+export function normalizeSchedule(schedule: OpenAIEvalSchedule, type: ScheduledTestType): OpenAIEvalSchedule {
   const minimum = TEST_TYPE_META[type].minInterval
   const rawInterval = Number(schedule.interval_seconds)
   const interval = Number.isFinite(rawInterval) ? Math.trunc(rawInterval) : minimum
@@ -160,8 +191,31 @@ export function normalizeSchedule(schedule: OpenAIEvalSchedule, type: EvalTestTy
     const samples = Number.isFinite(rawSamples) ? Math.trunc(rawSamples) : CANDY_MIN_SAMPLES
     schedule.sample_count = Math.min(Math.max(samples, CANDY_MIN_SAMPLES), CANDY_MAX_SAMPLES)
   }
-  if (type === 'fingerprint' && !schedule.sample_mode) schedule.sample_mode = 'quick'
+  if (type === 'fingerprint') {
+    // The retired quick/standard/strict size has no meaning for three challenges.
+    delete schedule.sample_mode
+    schedule.concurrency = normalizeFingerprintConcurrency(schedule.concurrency)
+  }
   return schedule
+}
+
+/**
+ * Folds a retired ModelTrace schedule into the fingerprint schedule exactly as
+ * the server does (openAIEvalDetectorSchedule): an enabled fingerprint
+ * schedule is kept as it is; otherwise an enabled ModelTrace schedule becomes
+ * the fingerprint schedule (on, with its interval and jitter). The ModelTrace
+ * schedule is then dropped from the draft; it is never shown or sent back.
+ */
+export function mergeLegacyModelTraceSchedule(route: OpenAIEvalRouteConfig): OpenAIEvalRouteConfig {
+  const legacy = route.modeltrace_schedule
+  delete route.modeltrace_schedule
+  const fingerprint = route.fingerprint_schedule
+  if (!legacy?.enabled || fingerprint.enabled) return route
+  const legacyInterval = Number(legacy.interval_seconds)
+  fingerprint.enabled = true
+  if (Number.isFinite(legacyInterval) && legacyInterval > 0) fingerprint.interval_seconds = legacyInterval
+  fingerprint.jitter_seconds = Number(legacy.jitter_seconds) || 0
+  return route
 }
 
 export function maxScheduleJitterSeconds(intervalSeconds: number): number {
@@ -202,12 +256,12 @@ export function isDirectOAuthAccount(account: Partial<DirectOAuthAccountFields> 
 export function normalizeRoute(route: OpenAIEvalRouteConfig): OpenAIEvalRouteConfig {
   route.candy_schedule ||= emptySchedule('candy')
   route.fingerprint_schedule ||= emptySchedule('fingerprint')
-  route.modeltrace_schedule ||= emptySchedule('modeltrace')
   route.state_probe_schedule ||= emptySchedule('state_probe')
+  mergeLegacyModelTraceSchedule(route)
   route.reasoning_effort = route.reasoning_effort ?? ''
   route.bps_mode = 'force_off'
   route.bps_auto = false
-  for (const type of TEST_TYPES) normalizeSchedule(scheduleOf(route, type), type)
+  for (const type of SCHEDULED_TEST_TYPES) normalizeSchedule(scheduleOf(route, type), type)
   return route
 }
 
@@ -218,7 +272,6 @@ export function newRoute(accountID: number, model: string, effort: string): Open
     reasoning_effort: effort,
     candy_schedule: emptySchedule('candy'),
     fingerprint_schedule: emptySchedule('fingerprint'),
-    modeltrace_schedule: emptySchedule('modeltrace'),
     state_probe_schedule: emptySchedule('state_probe'),
     bps_auto: false,
     bps_mode: 'force_off'
@@ -232,6 +285,56 @@ export function routeKey(route: Pick<OpenAIEvalRouteConfig, 'account_id' | 'requ
 /** Rules saved before the switch existed omit it and stay in force. */
 export function isRuleEnabled(rule: { enabled?: boolean }): boolean {
   return rule.enabled !== false
+}
+
+// ---------------------------------------------------------------------------
+// Model rules (production scheduling is per account + requested model)
+//
+// Scheduling no longer has a reasoning-effort dimension. A rule names a model
+// only. Older configs could hold several rules for one model at different
+// efforts; like the server (NormalizeOpenAIEvalModelPolicies) the last one for
+// a model wins, a disabled one included, and its effort is cleared. Model
+// names are compared trimmed and case-insensitively, without the fingerprint
+// alias table: gpt-6.1-sol and gpt-6-astra are different gateway models.
+// ---------------------------------------------------------------------------
+
+export function policyModelKey(model: string | null | undefined): string {
+  return String(model ?? '').trim().toLowerCase()
+}
+
+/** One model whose legacy effort-specific rules were folded into a single model rule. */
+export interface LegacyRuleMerge {
+  model: string
+  /** The rule that now applies to every request for the model. */
+  kept: { effort: string; policy: OpenAIEvalSchedulingPolicyRule['policy']; enabled: boolean }
+  /** Earlier rules for the same model that no longer apply, in their saved order. */
+  dropped: Array<{ effort: string; policy: OpenAIEvalSchedulingPolicyRule['policy']; enabled: boolean }>
+}
+
+/**
+ * Folds legacy rules to one rule per model: the last rule for a model wins
+ * (disabled or not), survivors keep their relative order and every effort is
+ * cleared. Returns what changed so the page can say so; a config that already
+ * has one effort-less rule per model comes back unchanged with no merges.
+ */
+export function normalizeModelPolicyRules(rules: OpenAIEvalSchedulingPolicyRule[] | null | undefined): { rules: OpenAIEvalSchedulingPolicyRule[]; merges: LegacyRuleMerge[] } {
+  const list = rules ?? []
+  const last = new Map<string, number>()
+  list.forEach((rule, index) => last.set(policyModelKey(rule.requested_model), index))
+  const merges: LegacyRuleMerge[] = []
+  const out: OpenAIEvalSchedulingPolicyRule[] = []
+  list.forEach((rule, index) => {
+    const key = policyModelKey(rule.requested_model)
+    if (last.get(key) !== index) return
+    const dropped = list
+      .filter((other, otherIndex) => otherIndex < index && policyModelKey(other.requested_model) === key)
+      .map(other => ({ effort: (other.reasoning_effort || '').trim(), policy: other.policy, enabled: isRuleEnabled(other) }))
+    const effort = (rule.reasoning_effort || '').trim()
+    // An unnamed rule is an unfinished row on the scheduling page, not a legacy merge.
+    if (key && (dropped.length || effort)) merges.push({ model: rule.requested_model.trim(), kept: { effort, policy: rule.policy, enabled: isRuleEnabled(rule) }, dropped })
+    out.push({ ...rule, reasoning_effort: '' })
+  })
+  return { rules: out, merges }
 }
 
 export function accountRuleModelID(model: string): string {
@@ -375,9 +478,10 @@ export function toSavePayload(config: OpenAIEvalConfig): OpenAIEvalConfig {
     // Copied as edited: the scheduling page refuses to save invalid values,
     // and the tests page never touches them.
     scheduling_thresholds: normalizeSchedulingThresholds(config.scheduling_thresholds),
+    // Model rules carry no effort: scheduling is per account and requested model.
     policies: (config.policies ?? []).map(rule => ({
       ...rule,
-      reasoning_effort: rule.reasoning_effort || '',
+      reasoning_effort: '',
       enabled: isRuleEnabled(rule),
       ...(rule.policy === 'custom_balance'
         ? { custom_balance: customBalancePayload(rule.custom_balance ?? config.custom_balance) }
@@ -389,8 +493,10 @@ export function toSavePayload(config: OpenAIEvalConfig): OpenAIEvalConfig {
     quality_refresh_interval_seconds: normalizeQualityRefreshInterval(config.quality_refresh_interval_seconds),
     accounts: config.accounts.map(route => {
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      const { bps_state, direct_oauth_eligible, ...rest } = route
-      return { ...rest, bps_mode: 'force_off', bps_auto: false }
+      const { bps_state, direct_oauth_eligible, modeltrace_schedule, ...rest } = route
+      const fingerprint = { ...rest.fingerprint_schedule }
+      delete fingerprint.sample_mode
+      return { ...rest, fingerprint_schedule: fingerprint, bps_mode: 'force_off', bps_auto: false }
     }),
     // Omitted when the server never sent it (older servers), so a save cannot
     // invent an empty list; otherwise sent back with runtime stripped.
@@ -650,18 +756,16 @@ export function parseThresholdInput(text: string): number {
   return trimmed === '' ? NaN : Number(trimmed)
 }
 
-export function requestsPerRun(route: OpenAIEvalRouteConfig, type: EvalTestType, catalog?: OpenAIEvalModelCatalog | null, sampleMode?: string): number {
+export function requestsPerRun(route: OpenAIEvalRouteConfig, type: EvalTestType, catalog?: OpenAIEvalModelCatalog | null): number {
   switch (type) {
     case 'candy':
       return Math.max(1, Math.trunc(Number(route.candy_schedule.sample_count) || CANDY_REQUESTS))
     case 'state_probe':
       return STATE_PROBE_REQUESTS
-    case 'modeltrace':
-      return catalog?.modeltrace?.requests || 3
-    case 'fingerprint': {
-      const mode = sampleMode || route.fingerprint_schedule.sample_mode || 'quick'
-      return catalog?.fingerprint_modes?.find(item => item.id === mode)?.samples ?? DEFAULT_FINGERPRINT_SAMPLES[mode] ?? 60
-    }
+    case 'fingerprint':
+      return catalog?.fingerprint?.requests || FINGERPRINT_REQUESTS
+    case 'pelican':
+      return catalog?.pelican?.requests || PELICAN_REQUESTS
   }
 }
 
@@ -686,9 +790,9 @@ export function totalDailyRequests(routes: OpenAIEvalRouteConfig[], catalog?: Op
  * Probe is not exempt: its attempts are chains of two linked requests, capped
  * at STATE_PROBE_MAX_CHAINS, so the ceiling is 2 × min(attempts, 3).
  */
-export function maxRequestsPerRun(route: OpenAIEvalRouteConfig, type: EvalTestType, maxAttempts: number, catalog?: OpenAIEvalModelCatalog | null, sampleMode?: string): number {
+export function maxRequestsPerRun(route: OpenAIEvalRouteConfig, type: EvalTestType, maxAttempts: number, catalog?: OpenAIEvalModelCatalog | null): number {
   if (type === 'state_probe') return stateProbeMaxRequests(maxAttempts)
-  const samples = requestsPerRun(route, type, catalog, sampleMode)
+  const samples = requestsPerRun(route, type, catalog)
   return samples * normalizeMaxRequestAttempts(maxAttempts)
 }
 
@@ -714,7 +818,8 @@ export function resultTone(status: string | undefined): ResultTone {
   if (status === 'pass' || status === 'consistent' || status === 'healthy') return 'ok'
   if (status === 'suspected_normal') return 'likely'
   if (status === 'warning' || status === 'different' || status === 'degraded') return 'attention'
-  if (status === 'error') return 'error'
+  // Pelican: a generated page is not a pass, so 'completed' stays neutral.
+  if (status === 'error' || status === 'failed') return 'error'
   if (status === 'running') return 'running'
   return 'neutral'
 }
@@ -877,6 +982,110 @@ export function latestRunFor(runs: OpenAIEvalRun[], route: OpenAIEvalRouteConfig
   const model = route.requested_model.toLowerCase()
   const effort = type === 'state_probe' ? '' : (route.reasoning_effort || '').toLowerCase()
   return runs.find(run => run.account_id === route.account_id && run.test_type === type && run.requested_model.toLowerCase() === model && (run.reasoning_effort || '').toLowerCase() === effort)
+}
+
+// ---------------------------------------------------------------------------
+// Current fingerprint detector, Pelican and read-only legacy history
+// ---------------------------------------------------------------------------
+
+/**
+ * Runs from retired tests: ModelTrace, and fingerprint runs scored by the old
+ * JSD detector (60/200/400 samples). They keep their stored verdict and are
+ * shown read-only with a legacy tag; nothing reinterprets them.
+ */
+export function isLegacyRun(run: Pick<OpenAIEvalRun, 'test_type' | 'outcome' | 'baseline_version'>): boolean {
+  if (run.test_type === 'modeltrace') return true
+  if (run.test_type !== 'fingerprint') return false
+  if (run.outcome?.lm_fingerprint) return false
+  if (run.outcome?.fingerprint) return true
+  return Boolean(run.baseline_version) && !run.baseline_version!.startsWith('sha256:')
+}
+
+/**
+ * The candidate a model name stands for, as the plugin compares them: lower
+ * case, without a provider prefix such as "openai/", then the alias table
+ * (gpt-6.1-sol is enrolled as gpt-6-astra).
+ */
+export function fingerprintModelID(model: string | null | undefined, aliases?: Record<string, string> | null): string {
+  const id = String(model ?? '').trim().toLowerCase().split('/').pop() ?? ''
+  return aliases && Object.prototype.hasOwnProperty.call(aliases, id) ? aliases[id] : id
+}
+
+/**
+ * Whether the server will run tests for a model at all: manual and automatic
+ * runs require a model from its catalog (isOpenAIEvalSupportedModel). A target
+ * with another model still saves. Without a catalog nothing is blocked.
+ */
+export function isCatalogModel(model: string, catalog?: OpenAIEvalModelCatalog | null): boolean {
+  const items = catalog?.items
+  if (!items?.length) return true
+  const id = model.trim().toLowerCase()
+  return items.some(item => item.id.trim().toLowerCase() === id)
+}
+
+/**
+ * A configuration warning the server writes when it turns automatic
+ * fingerprinting off for a model outside the candidate bank
+ * (NormalizeOpenAIEvalDetectorConfig). Anything else is shown as sent.
+ */
+export function parseFingerprintDisabledWarning(text: string): { accountID: number; model: string } | null {
+  const match = /^account (\d+) model (\S+): automatic fingerprint disabled \(model_not_enrolled\)$/.exec(text.trim())
+  return match ? { accountID: Number(match[1]), model: match[2] } : null
+}
+
+export type FingerprintEnrollment = 'enrolled' | 'not_enrolled' | 'unknown'
+
+/**
+ * Whether the detector bank has a candidate for the tested model. Only an
+ * enrolled model can be scored; 'unknown' means the server did not publish
+ * the bank (older server), so nothing is blocked on a guess.
+ */
+export function fingerprintEnrollment(model: string, catalog?: OpenAIEvalModelCatalog | null): FingerprintEnrollment {
+  const bank = catalog?.fingerprint?.models
+  if (!bank?.length) return 'unknown'
+  const id = fingerprintModelID(model, catalog?.fingerprint?.aliases)
+  return bank.some(candidate => candidate.id.toLowerCase() === id) ? 'enrolled' : 'not_enrolled'
+}
+
+export type FingerprintComparison = 'match' | 'mismatch' | 'not_model' | 'not_enrolled' | 'none'
+
+/**
+ * How the attribution compares with the tested model (plugin inspection rule):
+ * the same candidate after aliases matches; another candidate, or answers
+ * that do not move like a language model's, do not. A model outside the bank
+ * cannot be compared at all.
+ */
+export function fingerprintComparison(run: Pick<OpenAIEvalRun, 'outcome' | 'requested_model'>, catalog?: OpenAIEvalModelCatalog | null): FingerprintComparison {
+  const lm = run.outcome?.lm_fingerprint
+  const attribution = lm?.attribution
+  if (!lm || !attribution || !['completed', 'partial'].includes(lm.collection_status)) return 'none'
+  if (attribution.decision === 'not_model') return 'not_model'
+  if (!lm.enrolled) return 'not_enrolled'
+  const aliases = catalog?.fingerprint?.aliases
+  const target = lm.compared_as || fingerprintModelID(run.requested_model, aliases)
+  return fingerprintModelID(attribution.prediction, aliases) === target.toLowerCase() ? 'match' : 'mismatch'
+}
+
+/** Whether the tested model is compared as another candidate (e.g. gpt-6.1-sol as gpt-6-astra). */
+export function fingerprintAliasNote(run: Pick<OpenAIEvalRun, 'outcome' | 'requested_model'>): string | null {
+  const comparedAs = run.outcome?.lm_fingerprint?.compared_as
+  if (!comparedAs) return null
+  const own = String(run.requested_model ?? '').trim().toLowerCase().split('/').pop()
+  return own && own !== comparedAs.toLowerCase() ? comparedAs : null
+}
+
+export function pelicanVariant(id: string | undefined, catalog?: OpenAIEvalModelCatalog | null) {
+  return catalog?.pelican?.variants?.find(variant => variant.id === id)
+}
+
+/** The plugin labels a variant with `label`; `name` is read too, and the id is the last resort. */
+export function pelicanVariantLabel(variant: { id: string; label?: string; name?: string } | undefined): string {
+  return variant ? (variant.label || variant.name || variant.id) : ''
+}
+
+/** Display name of a stored run's variant, or its raw id when the catalog no longer lists it. */
+export function pelicanVariantName(id: string | undefined, catalog?: OpenAIEvalModelCatalog | null): string {
+  return pelicanVariantLabel(pelicanVariant(id, catalog)) || id || ''
 }
 
 // ---------------------------------------------------------------------------
@@ -1406,6 +1615,8 @@ const PROBE_SOURCES = new Set(['probe', 'v1_matched_probe', 'matched_probe', 'pr
 const DEFAULT_SOURCES = new Set(['default', 'labeled_default', 'optimistic_default'])
 const NEUTRAL_SOURCES = new Set(['neutral', 'legacy_neutral', 'neutral_default'])
 const UNKNOWN_SOURCES = new Set(['unknown', 'missing', 'none'])
+/** Set by overviewModelRows when real requests and probe estimates were folded together. */
+const MIXED_SOURCES = new Set(['mixed'])
 
 /** Groups a server source code; an unrecognised code is never promoted to "measured". */
 export function sourceKind(source: string | null | undefined): FactorSourceKind | null {
@@ -1416,6 +1627,7 @@ export function sourceKind(source: string | null | undefined): FactorSourceKind 
   if (DEFAULT_SOURCES.has(code)) return 'default'
   if (NEUTRAL_SOURCES.has(code)) return 'neutral'
   if (UNKNOWN_SOURCES.has(code)) return 'unknown'
+  if (MIXED_SOURCES.has(code)) return 'mixed'
   return 'other'
 }
 
@@ -1439,7 +1651,7 @@ export function factorSourceKind(
   if (meta.default_applied) return meta.known ? 'mixed' : 'default'
   const own = factor === 'price' ? factors.price.source : factor === 'error_rate' ? factors.error_rate.source : null
   const kind = sourceKind(own)
-  if (kind === 'default' || kind === 'probe' || kind === 'unknown') return kind
+  if (kind === 'default' || kind === 'probe' || kind === 'unknown' || kind === 'mixed') return kind
   if (!meta.known) return 'unknown'
   return kind === 'other' ? 'other' : 'measured'
 }
@@ -1480,21 +1692,152 @@ export function factorRawValue(factor: OpenAIEvalRankingFactorKey, factors: Open
 }
 
 /**
+ * One requested model in an account's expanded overview. The server
+ * aggregates evidence per account and model; its row is shown as sent. An
+ * older server could still send one row per reasoning effort, and only then
+ * are those rows folded here, so a model is never listed twice.
+ */
+export interface OverviewModelRow {
+  key: string
+  requested_model: string
+  upstream_models: string[]
+  factors: OpenAIEvalRankingFactors
+  sources: string[]
+  policy?: OpenAIEvalOverviewModel['policy']
+  /** 'server': the server's own row. 'projected': this page folded several effort rows. */
+  basis: 'server' | 'projected'
+  /** The effort rows behind a projected row, kept for the detail disclosure. */
+  efforts: Array<{ effort: string; factors: OpenAIEvalRankingFactors }>
+}
+
+/** Sample-weighted mean of the readings that have samples; null when none has any. */
+function sampleWeighted(items: Array<{ value: number | null | undefined; samples: number; known: boolean }>): { value: number; samples: number } | null {
+  const counted = items.filter(item => item.known && item.value != null && Number.isFinite(item.value) && item.samples > 0)
+  const samples = counted.reduce((sum, item) => sum + item.samples, 0)
+  if (samples > 0) return { value: counted.reduce((sum, item) => sum + item.value! * item.samples, 0) / samples, samples }
+  // A single reading without a count is still that reading; several cannot be weighed.
+  const known = items.filter(item => item.known && item.value != null && Number.isFinite(item.value))
+  return known.length === 1 ? { value: known[0].value!, samples: 0 } : null
+}
+
+/** One code for a folded factor: the shared code, or 'mixed' when readings came from different kinds of evidence. */
+function foldedSource(codes: Array<string | null | undefined>): string | null {
+  const present = [...new Set(codes.map(code => code ?? '').filter(Boolean))]
+  if (present.length <= 1) return present[0] ?? null
+  const kinds = new Set(present.map(sourceKind))
+  return kinds.size === 1 ? present[0] : 'mixed'
+}
+
+/**
+ * Folds effort rows of one model. Error rate and first-output latency are
+ * weighted by their own sample counts (0 % over 10 requests and 100 % over one
+ * request is 9.1 %, not 50 %); the pass rate averages only the efforts whose
+ * pass rate is known, an unknown one is never read as 0. Price and load are
+ * account facts and are taken from the first row.
+ */
+function foldOverviewModels(group: OpenAIEvalOverviewModel[]): OpenAIEvalRankingFactors {
+  const first = group[0].factors
+  const errors = group.map(item => item.factors.error_rate)
+  const latencies = group.map(item => item.factors.ttft)
+  const error = sampleWeighted(errors.map(item => ({ value: item.value, samples: Number(item.sample_count) || 0, known: item.known })))
+  const ttft = sampleWeighted(latencies.map(item => ({ value: item.ms, samples: Number(item.sample_count) || 0, known: item.known })))
+  const weightedScore = (items: Array<{ score: number; sample_count: number; known: boolean }>) => {
+    const counted = items.filter(item => item.known && item.sample_count > 0)
+    const total = counted.reduce((sum, item) => sum + item.sample_count, 0)
+    return total > 0 ? counted.reduce((sum, item) => sum + item.score * item.sample_count, 0) / total : 0.5
+  }
+  const qualities = group.map(item => item.factors.quality)
+  const assessed = qualities.filter(item => isQualityAssessed(item.state) && item.ratio != null && Number.isFinite(item.ratio))
+  const ratio = assessed.length ? assessed.reduce((sum, item) => sum + item.ratio!, 0) / assessed.length : null
+  const sum = (key: 'pass' | 'suspected_pass' | 'selected' | 'evaluated', items = qualities) => items.reduce((total, item) => total + (Number(item[key]) || 0), 0)
+  const expiries = assessed.map(item => item.expires_at).filter((value): value is string => Boolean(value)).sort()
+  const anyDefault = (key: 'error_rate' | 'ttft') => group.some(item => item.factors[key].default_applied)
+  return {
+    ...first,
+    error_rate: {
+      ...first.error_rate,
+      known: error !== null,
+      value: error?.value ?? null,
+      sample_count: error?.samples ?? errors.reduce((total, item) => total + (Number(item.sample_count) || 0), 0),
+      score: error ? weightedScore(errors) : 0.5,
+      unknown_reason: error ? null : (errors.find(item => item.unknown_reason)?.unknown_reason ?? 'no_request_samples'),
+      source: foldedSource(errors.filter(item => item.known).map(item => item.source)),
+      default_applied: anyDefault('error_rate') || undefined
+    },
+    ttft: {
+      ...first.ttft,
+      known: ttft !== null,
+      ms: ttft?.value ?? null,
+      sample_count: ttft?.samples ?? latencies.reduce((total, item) => total + (Number(item.sample_count) || 0), 0),
+      score: ttft ? weightedScore(latencies) : 0.5,
+      unknown_reason: ttft ? null : (latencies.find(item => item.unknown_reason)?.unknown_reason ?? 'no_first_output_samples'),
+      default_applied: anyDefault('ttft') || undefined
+    },
+    quality: ratio !== null
+      ? { ...assessed[0], state: 'assessed', known: true, ratio, score: ratio, unknown_reason: null, pass: sum('pass', assessed), suspected_pass: sum('suspected_pass', assessed), selected: sum('selected', assessed), evaluated: sum('evaluated', assessed), expires_at: expiries[0] ?? null }
+      : { ...qualities[0], ratio: null, pass: sum('pass'), suspected_pass: sum('suspected_pass'), selected: sum('selected'), evaluated: sum('evaluated') },
+    runtime_recovery: group.map(item => item.factors.runtime_recovery).find(Boolean) ?? first.runtime_recovery,
+    monitoring: group.flatMap(item => item.factors.monitoring ?? [])
+  }
+}
+
+/**
+ * The expanded overview's model list: one row per requested model, in the
+ * server's order. Names are compared trimmed and case-insensitively, without
+ * the fingerprint alias table, so gpt-6.1-sol and gpt-6-astra stay apart.
+ */
+export function overviewModelRows(models: OpenAIEvalOverviewModel[] | null | undefined): OverviewModelRow[] {
+  const groups = new Map<string, OpenAIEvalOverviewModel[]>()
+  for (const model of models ?? []) {
+    const key = policyModelKey(model.requested_model)
+    const list = groups.get(key)
+    if (list) list.push(model)
+    else groups.set(key, [model])
+  }
+  return [...groups.entries()].map(([key, group]) => {
+    const efforts = group.map(item => ({ effort: item.reasoning_effort || '', factors: item.factors }))
+    if (group.length === 1) {
+      const only = group[0]
+      return { key, requested_model: only.requested_model, upstream_models: only.upstream_models ?? [], factors: only.factors, sources: only.sources ?? [], policy: only.policy, basis: 'server', efforts }
+    }
+    return {
+      key,
+      requested_model: group[0].requested_model,
+      upstream_models: [...new Set(group.flatMap(item => item.upstream_models ?? []))],
+      factors: foldOverviewModels(group),
+      sources: [...new Set(group.flatMap(item => item.sources ?? []))],
+      policy: group.find(item => item.policy != null)?.policy,
+      basis: 'projected',
+      efforts
+    }
+  })
+}
+
+/**
  * Model rules that override the default policy for a model this account has
  * evidence for. They stay authoritative at request time, so each one is shown
- * as an exception to the overview order.
+ * as an exception to the overview order. Rules are per model; any effort a
+ * legacy rule still carries is ignored, as the server ignores it.
  */
 export function ruleExceptionsFor(
   rules: OpenAIEvalSchedulingPolicyRule[],
-  models: Pick<OpenAIEvalOverviewModel, 'requested_model' | 'reasoning_effort'>[],
+  models: Pick<OpenAIEvalOverviewModel, 'requested_model'>[],
   defaultPolicy: OpenAIEvalSchedulingPolicy
 ): OpenAIEvalSchedulingPolicyRule[] {
-  return rules.filter(rule => {
-    if (!rule.requested_model || rule.policy === defaultPolicy && rule.policy !== 'custom_balance') return false
-    const model = rule.requested_model.toLowerCase()
-    const effort = (rule.reasoning_effort || '').toLowerCase()
-    return models.some(item => item.requested_model.toLowerCase() === model && (!effort || (item.reasoning_effort || '').toLowerCase() === effort))
+  const own = new Set(models.map(item => policyModelKey(item.requested_model)))
+  return normalizeModelPolicyRules(rules).rules.filter(rule => {
+    if (!rule.requested_model || !isRuleEnabled(rule) || (rule.policy === defaultPolicy && rule.policy !== 'custom_balance')) return false
+    return own.has(policyModelKey(rule.requested_model))
   })
+}
+
+/** The saved rule a request for this model uses: the last rule for the model, or none when that rule is disabled. */
+export function modelPolicyRule(rules: OpenAIEvalSchedulingPolicyRule[], model: string): OpenAIEvalSchedulingPolicyRule | null {
+  const key = policyModelKey(model)
+  for (let index = rules.length - 1; index >= 0; index--) {
+    if (policyModelKey(rules[index].requested_model) === key) return isRuleEnabled(rules[index]) ? rules[index] : null
+  }
+  return null
 }
 
 /** A reclaimed generation answers 409 RANKING_SNAPSHOT_CHANGED. */
