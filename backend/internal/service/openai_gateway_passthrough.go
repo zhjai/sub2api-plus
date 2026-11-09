@@ -2137,6 +2137,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	defer stopKeepalive()
 	// flushPending 表示已写入但未到 SSE 空行边界的脏状态；defer 兜底函数退出前的残留，断连后不再 Flush。
 	flushPending := false
+	deliveredFrameOpen := false
 	pendingSSEEventType := ""
 	flushPendingOutput := func() {
 		if clientDisconnected || !flushPending {
@@ -2149,8 +2150,12 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	deliveredEventType := ""
 	observeDeliveredLine := func(line string) {
 		if line == "" {
+			deliveredFrameOpen = false
 			deliveredEventType = ""
-		} else if strings.HasPrefix(line, "event:") {
+			return
+		}
+		deliveredFrameOpen = true
+		if strings.HasPrefix(line, "event:") {
 			deliveredEventType = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
 		} else if data, ok := extractOpenAISSEDataLine(line); ok {
 			eventType := effectiveOpenAISSEEventType([]byte(data), deliveredEventType)
@@ -2231,15 +2236,24 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		if sawSequenceNumber {
 			sequenceNumber = lastSequenceNumber + 1
 		}
-		payload := buildOpenAIResponseIncompleteSSE(responseID, originalModel, createdAtTracker.Value(), sequenceNumber)
+		payload := buildOpenAIStreamInterruptionSSE(c, responseID, originalModel, createdAtTracker.Value(), sequenceNumber)
 		if payload == "" {
 			return false
 		}
-		if _, err := fmt.Fprint(w, payload); err != nil {
-			clientDisconnected = true
-			return false
+		if deliveredFrameOpen {
+			if _, err := fmt.Fprintln(w); err != nil {
+				clientDisconnected = true
+				return false
+			}
+			deliveredFrameOpen = false
 		}
-		flusher.Flush()
+		if !deferOpenAIInterruptionTerminal(c, payload) {
+			if _, err := fmt.Fprint(w, payload); err != nil {
+				clientDisconnected = true
+				return false
+			}
+			flusher.Flush()
+		}
 		clientOutputStarted = true
 		terminalEventType = "response.incomplete"
 		protocolStatus = "premature_eof"
@@ -2565,6 +2579,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			return resultWithUsage(), fmt.Errorf("stream usage incomplete after disconnect: %w", err)
 		}
 		s.recordOpenAIProxyStreamDisconnect(account, err, upstreamRequestID)
+		if isOpenAICodexStreamClient(c) && synthesizeResponsesStreamTerminatedTerminal() {
+			return resultWithUsage(), fmt.Errorf("stream read error: %w", err)
+		}
 		logger.LegacyPrintf("service.openai_gateway",
 			"[OpenAI passthrough] 流读取异常中断: account=%d request_id=%s err=%v",
 			account.ID,
@@ -2585,6 +2602,11 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			zap.String("component", "service.openai_gateway"),
 			zap.Int64("account_id", account.ID),
 			zap.String("upstream_request_id", upstreamRequestID),
+			zap.Bool("client_output_started", clientOutputStarted),
+			zap.Bool("meaningful_output_delivered", deliveredVisibleOutput),
+			zap.Bool("tool_call_forwarded", toolCallForwarded),
+			zap.Bool("sse_frame_open", deliveredFrameOpen),
+			zap.Bool("codex_retryable_terminal", isOpenAICodexStreamClient(c)),
 		).Info("OpenAI passthrough 上游流在未收到 [DONE] 时结束，疑似断流")
 		if !openAIStreamClientOutputStarted(c, clientOutputStarted) {
 			return resultWithUsage(),

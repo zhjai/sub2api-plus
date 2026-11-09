@@ -515,18 +515,20 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		if sawSequenceNumber {
 			sequenceNumber = lastSequenceNumber + 1
 		}
-		payload := buildOpenAIResponseIncompleteSSE(responseID, originalModel, createdAtStamper.Value(), sequenceNumber)
+		payload := buildOpenAIStreamInterruptionSSE(c, responseID, originalModel, createdAtStamper.Value(), sequenceNumber)
 		if payload == "" {
 			return false
 		}
 		applyAttemptResponseHeaders()
-		if _, err := writePendingString(payload); err != nil {
-			clientDisconnected = true
-			return false
-		}
-		if err := flushBuffered(); err != nil {
-			clientDisconnected = true
-			return false
+		if !deferOpenAIInterruptionTerminal(c, payload) {
+			if _, err := writePendingString(payload); err != nil {
+				clientDisconnected = true
+				return false
+			}
+			if err := flushBuffered(); err != nil {
+				clientDisconnected = true
+				return false
+			}
 		}
 		clientOutputStarted = true
 		lastDownstreamWriteAt = time.Now()
@@ -574,6 +576,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				s.recordOpenAIProxyStreamDisconnect(account, errors.New("stream ended before terminal event"), upstreamRequestID)
 			}
 			if synthesizeResponsesStreamTerminatedTerminal() {
+				if isOpenAICodexStreamClient(c) {
+					return resultWithUsage(), fmt.Errorf("stream usage incomplete: missing terminal event")
+				}
 				return resultWithUsage(), nil
 			}
 			flushPending("Client disconnected during final flush, returning collected usage")
@@ -642,6 +647,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		}
 		s.recordOpenAIProxyStreamDisconnect(account, scanErr, upstreamRequestID)
 		if synthesizeResponsesStreamTerminatedTerminal() {
+			if isOpenAICodexStreamClient(c) {
+				return resultWithUsage(), fmt.Errorf("stream read error: %w", scanErr), true
+			}
 			return resultWithUsage(), nil, true
 		}
 		sendErrorEvent("stream_read_error")
@@ -1184,6 +1192,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				(!toolProtocolGuard.pending() || openAIStreamClientOutputStarted(c, clientOutputStarted)) {
 				if synthesizeResponsesStreamTerminatedTerminal() {
 					_ = resp.Body.Close()
+					if isOpenAICodexStreamClient(c) {
+						return resultWithUsage(), fmt.Errorf("stream data interval timeout")
+					}
 					return resultWithUsage(), nil
 				}
 			}

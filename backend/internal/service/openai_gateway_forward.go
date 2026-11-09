@@ -1300,6 +1300,40 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 					}
 					return s.handleErrorResponse(ctx, compactResp, c, account, body, resolveOpenAIErrorSchedulingModel(billingModel, upstreamModel))
 				}
+				if streamResult != nil && isOpenAICodexStreamClient(c) && streamResult.responsesProtocolStatus == "premature_eof" {
+					partial := &OpenAIForwardResult{
+						RequestID:                     resp.Header.Get("x-request-id"),
+						UpstreamHeaders:               resp.Header,
+						ResponseID:                    streamResult.responseID,
+						Model:                         originalModel,
+						BillingModel:                  billingModel,
+						UpstreamModel:                 upstreamModel,
+						UpstreamResponseModel:         observedUpstreamResponseModel(c),
+						UpstreamResponseModelConflict: observedUpstreamResponseModelConflict(c),
+						UpstreamResponseServiceTier:   observedUpstreamResponseServiceTier(c),
+						ServiceTier:                   resolvedOpenAIUpstreamServiceTier(c, serviceTier),
+						Stream:                        true,
+						Duration:                      time.Since(startTime),
+						FirstTokenMs:                  streamResult.firstTokenMs,
+						ReasoningEffort:               reasoningEffort,
+					}
+					if streamResult.usage != nil {
+						partial.Usage = *streamResult.usage
+					}
+					if streamResult.imageCount > 0 {
+						partial.ImageCount = streamResult.imageCount
+						partial.ImageSize = imageSizeTier
+						partial.ImageInputSize = imageInputSize
+						partial.ImageOutputSizes = streamResult.imageOutputSizes
+						partial.BillingModel = imageBillingModel
+					}
+					if streamResult.searchCount > 0 && account != nil && account.IsGrok() {
+						partial.SearchCount = streamResult.searchCount
+					}
+					streamResult.applyForwardOutcome(partial)
+					stampOpenAIResponsesUpstreamEndpoint(c, partial)
+					return partial, err
+				}
 				return nil, err
 			}
 			usage = streamResult.usage
