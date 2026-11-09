@@ -685,6 +685,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		))
 	}
 	sameAccountRetryCount := make(map[int64]int)
+	var transportRetryAccount *service.Account
 	opaqueEpochRetryCount := make(map[int64]int)
 	opaqueEpochRetryTotal := 0
 	bumpOpaqueRouteEpoch := func(account *service.Account, expectedEpoch int64, signal string, preCommit bool) (service.OpenAIOpaqueRouteEpochState, bool) {
@@ -767,20 +768,54 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		}
 		// Select account supporting the requested model
 		reqLog.Debug("openai.account_selecting", zap.Int("excluded_account_count", len(failedAccountIDs)))
-		selection, scheduleDecision, err := h.gatewayService.SelectAccountWithSchedulerForCapability(
-			c.Request.Context(),
-			apiKey.GroupID,
-			previousResponseID,
-			sessionHash,
-			forwardModel,
-			failedAccountIDs,
-			service.OpenAIUpstreamTransportAny,
-			requiredCapability,
-			requireCompact,
-			previousResponseCanMove,
-			!imageIntent,
-			requestPlatform,
-		)
+		var selection *service.AccountSelectionResult
+		var scheduleDecision service.OpenAIAccountScheduleDecision
+		var err error
+		if transportRetryAccount != nil {
+			retryAccount := transportRetryAccount
+			transportRetryAccount = nil
+			selection, scheduleDecision, err = h.gatewayService.SelectOpenAIAccountForRetry(c.Request.Context(), service.OpenAIAccountScheduleRequest{
+				GroupID: apiKey.GroupID, Platform: requestPlatform, SessionHash: sessionHash,
+				StickyAccountID: retryAccount.ID, PreviousResponseID: previousResponseID,
+				RequestedModel: forwardModel, ClientRequestedModel: reqModel, RequestedReasoningEffort: requestedEffort,
+				RequiredTransport: service.OpenAIUpstreamTransportAny, RequiredCapability: requiredCapability,
+				RequireCompact: requireCompact, ExcludedIDs: failedAccountIDs,
+			})
+			if err != nil || selection == nil || selection.Account == nil {
+				if failoverClientGone(c) {
+					return
+				}
+				// The original account became ineligible. Close its deferred escape before
+				// ordinary selection; never silently reset the retry budget on a new account.
+				if escapeErr := h.gatewayService.EscapeOpenAISessionAccountForRequest(c.Request.Context(), apiKey.GroupID, routeSessionHash, reqModel, requestedEffort, retryAccount.ID, retryAccount.BillingRateMultiplier()); escapeErr != nil {
+					reqLog.Warn("openai.session_account_escape_failed", zap.Int64("account_id", retryAccount.ID), zap.Error(escapeErr))
+				}
+				markOpenAIRouteMigration(c, retryAccount, reqModel)
+				failedAccountIDs[retryAccount.ID] = struct{}{}
+				if switchCount >= maxAccountSwitches {
+					h.handleFailoverExhausted(c, lastFailoverErr, streamStarted)
+					return
+				}
+				switchCount++
+				h.gatewayService.RecordOpenAIAccountSwitch()
+				continue
+			}
+		} else {
+			selection, scheduleDecision, err = h.gatewayService.SelectAccountWithSchedulerForCapability(
+				c.Request.Context(),
+				apiKey.GroupID,
+				previousResponseID,
+				sessionHash,
+				forwardModel,
+				failedAccountIDs,
+				service.OpenAIUpstreamTransportAny,
+				requiredCapability,
+				requireCompact,
+				previousResponseCanMove,
+				!imageIntent,
+				requestPlatform,
+			)
+		}
 		if err != nil {
 			if failoverClientGone(c) {
 				reqLog.Info("openai.account_select_aborted_client_disconnected", zap.Error(err))
@@ -1092,7 +1127,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 							c.Request.Context(), account, failoverErr.IntegritySentModel, failoverErr.IntegrityResponseModel,
 						)
 					}
-					if failoverErr.SessionAccountEscape {
+					if failoverErr.SessionAccountEscape &&
+						(!failoverErr.RetryBeforeSessionEscape || !mayFailover ||
+							!sameAccountRetryAllowed(failoverErr, sameAccountRetryCount[account.ID], effectiveSameAccountRetryLimit(failoverErr, account))) {
 						if escapeErr := h.gatewayService.EscapeOpenAISessionAccountForRequest(c.Request.Context(), apiKey.GroupID, routeSessionHash, reqModel, requestedEffort, account.ID, account.BillingRateMultiplier()); escapeErr != nil {
 							reqLog.Warn("openai.session_account_escape_failed", zap.Int64("account_id", account.ID), zap.Error(escapeErr))
 						}
@@ -1136,6 +1173,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 						retryLimit := effectiveSameAccountRetryLimit(failoverErr, account)
 						if sameAccountRetryAllowed(failoverErr, sameAccountRetryCount[account.ID], retryLimit) {
 							sameAccountRetryCount[account.ID]++
+							if failoverErr.RetryBeforeSessionEscape {
+								transportRetryAccount = account
+								lastFailoverErr = failoverErr
+							}
 							retryDelay := sameAccountRetryDelayFor(failoverErr, sameAccountRetryCount[account.ID])
 							reqLog.Warn("openai.pool_mode_same_account_retry",
 								zap.Int64("account_id", account.ID),
@@ -4462,7 +4503,9 @@ func openAIRequestAllowsFailoverReplay(c *gin.Context) bool {
 }
 
 func openAIFirstOutputFailoverExhausted(failoverErr *service.UpstreamFailoverError, switchCount *int) bool {
-	if failoverErr == nil || !failoverErr.SafeToFailoverAfterWrite || switchCount == nil {
+	// Deferred transport failures use the ordinary retry and account-switch
+	// budgets. SafeToFailoverAfterWrite only describes the commit boundary.
+	if failoverErr == nil || !failoverErr.SafeToFailoverAfterWrite || failoverErr.RetryBeforeSessionEscape || switchCount == nil {
 		return false
 	}
 	if *switchCount >= maxOpenAIFirstOutputTimeoutSwitches {

@@ -17,6 +17,11 @@ type accountRPMHTTPPolicy struct {
 // Carry a fresh admission callback to each actual transport dispatch, including
 // redirects and the Grok fallback below Do. This never reserves a permit.
 func accountRPMDispatchRequest(req *http.Request, cache GatewayCache, repo accountRPMAccountReader, account *Account) (*http.Request, error) {
+	var privacyErr error
+	req, privacyErr = applyCodexPrivacyBeforeSend(req, account)
+	if privacyErr != nil {
+		return nil, privacyErr
+	}
 	req = withCodexOutboundDiagnostics(req, account)
 	if err := req.Context().Err(); err != nil {
 		if req.Body != nil {

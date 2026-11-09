@@ -59,6 +59,19 @@ func startOpenAISSEKeepalive(c *gin.Context, interval time.Duration) func() {
 	if c == nil || c.Writer == nil || interval <= 0 {
 		return func() {}
 	}
+	// A retry may create another keepalive on the same downstream writer. Carry
+	// the old nonsemantic bytes forward before replacing the current tracker,
+	// otherwise a second attempt mistakes the first attempt's comments for output.
+	if previous, ok := c.Get(openAICompactSSEKeepaliveKey); ok {
+		if old, valid := previous.(*openAICompactSSEKeepalive); valid && old != nil {
+			old.mu.Lock()
+			old.markStoppedLocked()
+			previousBytes := old.bytes
+			old.bytes = 0
+			old.mu.Unlock()
+			recordOpenAIStreamKeepaliveBytes(c, previousBytes)
+		}
+	}
 	originalWriter := c.Writer
 	k := &openAICompactSSEKeepalive{
 		writer: originalWriter,

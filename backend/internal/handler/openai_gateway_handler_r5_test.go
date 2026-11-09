@@ -63,7 +63,7 @@ func newOpenAIR5Handler(t *testing.T, accounts []service.Account, cache service.
 	return newOpenAIR7HandlerWithRepo(t, accounts, cache, upstream, nil)
 }
 
-func newOpenAIR7HandlerWithRepo(t *testing.T, accounts []service.Account, cache service.GatewayCache, upstream service.HTTPUpstream, accountRepo service.AccountRepository) (*OpenAIGatewayHandler, *service.OpenAIGatewayService, *service.APIKey, *httptest.Server, *concurrencyCacheMock) {
+func newOpenAIR7HandlerWithRepo(t *testing.T, accounts []service.Account, cache service.GatewayCache, upstream service.HTTPUpstream, accountRepo service.AccountRepository, configure ...func(*config.Config)) (*OpenAIGatewayHandler, *service.OpenAIGatewayService, *service.APIKey, *httptest.Server, *concurrencyCacheMock) {
 	t.Helper()
 	groupID := int64(4935)
 	cfg := &config.Config{RunMode: config.RunModeSimple}
@@ -78,6 +78,9 @@ func newOpenAIR7HandlerWithRepo(t *testing.T, accounts []service.Account, cache 
 	cfg.Gateway.OpenAIWS.ReadTimeoutSeconds = 3
 	cfg.Gateway.OpenAIWS.WriteTimeoutSeconds = 3
 	cfg.Gateway.MaxAccountSwitches = 2
+	for _, apply := range configure {
+		apply(cfg)
+	}
 
 	if accountRepo == nil {
 		accountRepo = &openAIWSFailoverHandlerAccountRepoStub{accounts: accounts}

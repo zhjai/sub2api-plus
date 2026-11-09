@@ -80,12 +80,9 @@ func sameAccountRetryAllowed(failoverErr *service.UpstreamFailoverError, retryCo
 	if failoverErr == nil || !failoverErr.RetryableOnSameAccount {
 		return false
 	}
-	// A session escape is an account-attributable hard signal.  Retrying the
-	// same account would defeat the escape marker and make the next sampling
-	// collide with the account that just failed.  Request-scoped capacity
-	// failures do not set this marker and retain their bounded same-account
-	// retry budget.
-	if failoverErr.SessionAccountEscape {
+	// Integrity failures escape immediately. Uncommitted transport failures may
+	// explicitly defer the escape until the configured retry budget is exhausted.
+	if failoverErr.SessionAccountEscape && !failoverErr.RetryBeforeSessionEscape {
 		return false
 	}
 	if !sameAccountRetryDeadlineAllows(failoverErr) {

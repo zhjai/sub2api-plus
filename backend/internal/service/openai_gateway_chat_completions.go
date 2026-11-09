@@ -86,6 +86,7 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	if _, err := s.prepareCodexAccountIdentitySource(ctx, c, account); err != nil {
 		return nil, err
 	}
+	ctx = withCodexPrivacyHTTPSource(ctx, account, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
 	if err := s.guardCodexIdentityRequest(c, account, nil, "chat_bridge"); err != nil {
 		return nil, err
 	}

@@ -79,6 +79,9 @@ func codexAccountIdentityNamespace(account *Account) string {
 // adding the selected OAuth credential namespace. A scheduler failover therefore
 // cannot send the same session/conversation identity through two upstream accounts.
 func isolateOpenAIUpstreamSessionID(apiKeyID int64, account *Account, raw string) string {
+	if codexPrivacyEnabled(account) {
+		return raw // projected exactly once at the final send boundary
+	}
 	if preserveCodexClientIdentity(account, apiKeyID) {
 		return raw
 	}
@@ -95,6 +98,9 @@ func isolateOpenAIUpstreamSessionID(apiKeyID int64, account *Account, raw string
 }
 
 func scopeCodexAccountIdentityValue(account *Account, apiKeyID int64, kind, raw string) string {
+	if codexPrivacyEnabled(account) {
+		return raw // body and header must start from the same original ID
+	}
 	if preserveCodexClientIdentity(account, apiKeyID) {
 		return raw
 	}

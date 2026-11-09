@@ -90,6 +90,8 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	if _, err := s.prepareCodexAccountIdentitySource(ctx, c, account); err != nil {
 		return err
 	}
+	ctx = withCodexPrivacyHTTPSource(ctx, account, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
+	ctx = withCodexPrivacyWS(ctx, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
 	if err := s.guardCodexIdentityRequest(c, account, firstClientMessage, "ws"); err != nil {
 		return err
 	}
@@ -811,9 +813,10 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		return fmt.Errorf("build ws headers: %w", buildHdrErr)
 	}
 	baseAcquireReq := openAIWSAcquireRequest{
-		Account: account,
-		WSURL:   wsURL,
-		Headers: wsHeaders,
+		CodexPrivacy: codexPrivacyEnabled(codexAccountIdentitySource(c, account)),
+		Account:      account,
+		WSURL:        wsURL,
+		Headers:      wsHeaders,
 		HeadersFactory: func(factoryCtx context.Context, headers http.Header) (http.Header, error) {
 			return s.refreshOpenAIAgentIdentityHeaders(factoryCtx, account, headers)
 		},

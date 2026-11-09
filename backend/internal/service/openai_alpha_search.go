@@ -33,6 +33,7 @@ func (s *OpenAIGatewayService) ForwardAlphaSearch(ctx context.Context, c *gin.Co
 	if _, err := s.prepareCodexAccountIdentitySource(ctx, c, account); err != nil {
 		return nil, err
 	}
+	ctx = withCodexPrivacyHTTPSource(ctx, account, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
 	if err := s.guardCodexIdentityRequest(c, account, body, "alpha_search"); err != nil {
 		return nil, err
 	}

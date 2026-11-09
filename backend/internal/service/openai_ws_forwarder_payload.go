@@ -199,6 +199,13 @@ func (s *OpenAIGatewayService) buildOpenAIWSHeaders(
 		"soft_routing_hint",
 	)
 
+	privacy, privacyErr := newCodexPrivacyProjection(codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
+	if privacyErr != nil {
+		return nil, sessionResolution, privacyErr
+	}
+	if privacy != nil {
+		privacy.headers(headers)
+	}
 	return headers, sessionResolution, nil
 }
 

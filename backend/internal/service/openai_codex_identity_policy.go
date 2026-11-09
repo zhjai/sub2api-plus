@@ -113,6 +113,9 @@ func NormalizeCodexIdentityConfig(a, previous *Account) error {
 	if a == nil {
 		return nil
 	}
+	if err := validateCodexPrivacyConfig(a); err != nil {
+		return err
+	}
 	mode := codexIdentityString(a, CodexIdentityModeKey)
 	if raw, exists := a.Extra[CodexIdentityModeKey]; exists && raw != CodexIdentityIsolated && raw != CodexIdentityPreserveClient {
 		return codexIdentityError("CODEX_IDENTITY_INVALID_MODE", "codex_identity_mode must be isolated or preserve_client")
@@ -195,7 +198,7 @@ func NormalizeCodexIdentityConfig(a, previous *Account) error {
 // Use the full account save API. Server-owned fields are never accepted here.
 func ValidateCodexIdentityExtraPatch(extra map[string]any) error {
 	for key := range extra {
-		if strings.HasPrefix(key, "codex_identity_") {
+		if strings.HasPrefix(key, "codex_identity_") || key == CodexPrivacyModeKey {
 			return codexIdentityError("CODEX_IDENTITY_FULL_SAVE_REQUIRED", "identity configuration requires an individual full account save")
 		}
 	}
@@ -322,7 +325,7 @@ func rejectCodexIdentityRequest(c *gin.Context, code, message string) error {
 // failures that should unschedule an account or authorize a failover replay.
 func respondCodexIdentityRequestError(c *gin.Context, err error) bool {
 	code := infraerrors.Reason(err)
-	if !strings.HasPrefix(code, "CODEX_IDENTITY_") {
+	if !strings.HasPrefix(code, "CODEX_IDENTITY_") && !strings.HasPrefix(code, "CODEX_PRIVACY_") {
 		return false
 	}
 	rejectCodexIdentityRequest(c, code, infraerrors.Message(err))

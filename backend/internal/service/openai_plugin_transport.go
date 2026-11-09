@@ -18,6 +18,11 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL 
 }
 
 func (s *OpenAIGatewayService) doOpenAIUpstreamWithAdmission(request *http.Request, proxyURL string, account *Account) (*http.Response, error) {
+	var privacyErr error
+	request, privacyErr = applyCodexPrivacyBeforeSend(request, account)
+	if privacyErr != nil {
+		return nil, privacyErr
+	}
 	if err := s.validateCodexIdentityBeforeSend(request, account); err != nil {
 		return nil, err
 	}
@@ -38,8 +43,14 @@ func (s *AccountTestService) doOpenAIAccountTestUpstream(
 	account *Account,
 	useTLSFallback bool,
 ) (*http.Response, error) {
+	if account != nil && account.IsShadow() {
+		credential, err := resolveCredentialAccount(request.Context(), s.accountRepo, account)
+		if err != nil {
+			return nil, err
+		}
+		request = stampCodexPrivacySource(request, account, credential)
+	}
 	request = request.WithContext(withCodexDiagnosticSource(request.Context(), "account_probe"))
-	request = withCodexOutboundDiagnostics(request, account)
 	if err := s.checkOpenAIEvalAutomaticAccount(request.Context(), account); err != nil {
 		if request.Body != nil {
 			_ = request.Body.Close()
@@ -56,6 +67,12 @@ func (s *AccountTestService) doOpenAIAccountTestUpstream(
 		// contract, leaving unbound accounts on the guarded HTTP fallback.
 		request = request.WithContext(WithHTTPUpstreamSingleSend(request.Context()))
 	}
+	var privacyErr error
+	request, privacyErr = applyCodexPrivacyBeforeSend(request, account)
+	if privacyErr != nil {
+		return nil, privacyErr
+	}
+	request = withCodexOutboundDiagnostics(request, account)
 	if s.pluginManager != nil {
 		response, handled, err := s.pluginManager.RoundTripOpenAIOAuth(request.Context(), request, proxyURL, account)
 		if handled {

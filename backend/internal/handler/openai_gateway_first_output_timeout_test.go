@@ -37,6 +37,23 @@ func TestOpenAIFirstOutputFailoverStopsAfterOneAccountSwitch(t *testing.T) {
 	require.Equal(t, 1, count)
 }
 
+func TestOpenAIFirstOutputBudgetIgnoresDeferredTransportRetries(t *testing.T) {
+	count := 0
+	transportErr := &service.UpstreamFailoverError{
+		SafeToFailoverAfterWrite: true,
+		RetryBeforeSessionEscape: true,
+	}
+	for attempt := 0; attempt < 4; attempt++ {
+		require.False(t, openAIFirstOutputFailoverExhausted(transportErr, &count))
+	}
+	require.Zero(t, count)
+	guardErr := &service.UpstreamFailoverError{SafeToFailoverAfterWrite: true}
+	require.False(t, openAIFirstOutputFailoverExhausted(guardErr, &count))
+	require.True(t, openAIFirstOutputFailoverExhausted(guardErr, &count))
+	require.False(t, openAIFirstOutputFailoverExhausted(transportErr, &count), "exhausted guard must not block transport recovery")
+	require.Equal(t, 1, count)
+}
+
 func TestOpenAIExecProtocolLeakHasIndependentSwitchBudget(t *testing.T) {
 	firstOutputCount := 1
 	execLeakCount := 0

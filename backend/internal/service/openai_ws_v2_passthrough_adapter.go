@@ -970,6 +970,13 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	if !ok {
 		return errors.New("openai ws passthrough upstream connection does not support frame relay")
 	}
+	privacy, privacyErr := newCodexPrivacyProjection(codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
+	if privacyErr != nil {
+		return privacyErr
+	}
+	if privacy != nil {
+		upstreamFrameConn = &codexPrivacyFrameConn{FrameConn: upstreamFrameConn, projection: privacy}
+	}
 	upstreamFrameConn = &accountRPMFrameConn{FrameConn: upstreamFrameConn, admit: func(admitCtx context.Context) error { return s.admitAccountRPM(admitCtx, account) }}
 	relayUpstreamFrameConn := &openAIWSPassthroughFirstOutputFrameConn{
 		inner:             upstreamFrameConn,

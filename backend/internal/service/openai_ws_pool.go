@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/tidwall/gjson"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -88,9 +89,12 @@ type openAIWSAcquireRequest struct {
 	// RouteEpochAffinity is an internal pool compatibility key. It is never
 	// copied into upstream headers.
 	RouteEpochAffinity string
+	// Resolved credential policy, including routes selected through shadow rows.
+	CodexPrivacy bool
 }
 
 type openAIWSHandshakeCompatibilityKey struct {
+	codexPrivacy        bool
 	betaFeatures        string
 	routeEpochAffinity  string
 	codexInstallationID string
@@ -99,6 +103,10 @@ type openAIWSHandshakeCompatibilityKey struct {
 	threadID            string
 	clientRequestID     string
 	codexWindowID       string
+	conversationID      string
+	metadataSessionID   string
+	metadataThreadID    string
+	metadataDeviceID    string
 }
 
 type openAIWSConnLease struct {
@@ -212,6 +220,10 @@ func (l *openAIWSConnLease) WriteJSON(value any, timeout time.Duration) error {
 
 func (l *openAIWSConnLease) WriteJSONWithContextTimeout(ctx context.Context, value any, timeout time.Duration) error {
 	conn, err := l.activeConn()
+	if err != nil {
+		return err
+	}
+	value, err = codexPrivacyWSValue(ctx, value)
 	if err != nil {
 		return err
 	}
@@ -1169,7 +1181,7 @@ func (p *openAIWSConnPool) acquire(ctx context.Context, req openAIWSAcquireReque
 
 retryAcquire:
 	accountID := req.Account.ID
-	compatibility := normalizeOpenAIWSHandshakeCompatibility(req.Account, req.Headers, req.RouteEpochAffinity)
+	compatibility := normalizeOpenAIWSAcquireCompatibility(req)
 	routingAffinity := normalizeOpenAIWSRoutingAffinity(req.Headers)
 	effectiveMaxConns := p.effectiveMaxConnsByAccount(req.Account)
 	if effectiveMaxConns <= 0 {
@@ -2177,7 +2189,7 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 	accountID := req.Account.ID
 	evict := func() { p.evictConn(accountID, id) }
 	pooledConn.onPeerClosed.Store(&evict)
-	pooledConn.handshakeCompatibility = normalizeOpenAIWSHandshakeCompatibility(req.Account, req.Headers, req.RouteEpochAffinity)
+	pooledConn.handshakeCompatibility = normalizeOpenAIWSAcquireCompatibility(req)
 	pooledConn.routingAffinity = normalizeOpenAIWSRoutingAffinity(req.Headers)
 	return pooledConn, nil
 }
@@ -2359,7 +2371,7 @@ func cloneOpenAIWSAcquireRequestPtr(req *openAIWSAcquireRequest) *openAIWSAcquir
 func sameOpenAIWSPrewarmTarget(a, b openAIWSAcquireRequest) bool {
 	return stringsTrim(a.WSURL) == stringsTrim(b.WSURL) &&
 		stringsTrim(a.ProxyURL) == stringsTrim(b.ProxyURL) &&
-		normalizeOpenAIWSHandshakeCompatibility(a.Account, a.Headers, a.RouteEpochAffinity) == normalizeOpenAIWSHandshakeCompatibility(b.Account, b.Headers, b.RouteEpochAffinity)
+		normalizeOpenAIWSAcquireCompatibility(a) == normalizeOpenAIWSAcquireCompatibility(b)
 }
 
 func normalizeOpenAIWSBetaFeatures(headers http.Header) string {
@@ -2388,18 +2400,27 @@ func normalizeOpenAIWSBetaFeatures(headers http.Header) string {
 }
 
 func normalizeOpenAIWSHandshakeCompatibility(account *Account, headers http.Header, routeEpochAffinity ...string) openAIWSHandshakeCompatibilityKey {
+	return normalizeOpenAIWSHandshakeCompatibilityWithPrivacy(account, headers, codexPrivacyEnabled(account), routeEpochAffinity...)
+}
+
+func normalizeOpenAIWSAcquireCompatibility(req openAIWSAcquireRequest) openAIWSHandshakeCompatibilityKey {
+	return normalizeOpenAIWSHandshakeCompatibilityWithPrivacy(req.Account, req.Headers, req.CodexPrivacy || codexPrivacyEnabled(req.Account), req.RouteEpochAffinity)
+}
+
+func normalizeOpenAIWSHandshakeCompatibilityWithPrivacy(account *Account, headers http.Header, privacy bool, routeEpochAffinity ...string) openAIWSHandshakeCompatibilityKey {
 	key := openAIWSHandshakeCompatibilityKey{
 		betaFeatures: normalizeOpenAIWSBetaFeatures(headers),
+		codexPrivacy: privacy,
 	}
 	if len(routeEpochAffinity) > 0 {
 		key.routeEpochAffinity = stringsTrim(routeEpochAffinity[0])
 	}
 	mode := activeCodexFingerprintMode(account)
-	if mode == codexFingerprintOff {
+	if mode == codexFingerprintOff && !privacy {
 		return key
 	}
 	key.codexInstallationID = normalizeOpenAIWSStableIdentityHeader(headers, "x-codex-installation-id")
-	if mode == codexFingerprintDevice {
+	if mode == codexFingerprintDevice && !privacy {
 		return key
 	}
 	key.sessionIDHyphen = normalizeOpenAIWSStableIdentityHeader(headers, "session-id")
@@ -2407,6 +2428,13 @@ func normalizeOpenAIWSHandshakeCompatibility(account *Account, headers http.Head
 	key.threadID = normalizeOpenAIWSStableIdentityHeader(headers, "thread-id")
 	key.clientRequestID = normalizeOpenAIWSStableIdentityHeader(headers, "x-client-request-id")
 	key.codexWindowID = normalizeOpenAIWSStableIdentityHeader(headers, "x-codex-window-id")
+	if privacy {
+		key.conversationID = normalizeOpenAIWSStableIdentityHeader(headers, "conversation_id")
+		metadata := headers.Get(openAIWSTurnMetadataHeader)
+		key.metadataSessionID = gjson.Get(metadata, "session_id").String()
+		key.metadataThreadID = gjson.Get(metadata, "thread_id").String()
+		key.metadataDeviceID = gjson.Get(metadata, "installation_id").String()
+	}
 	return key
 }
 

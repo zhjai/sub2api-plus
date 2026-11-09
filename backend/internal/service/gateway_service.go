@@ -847,7 +847,11 @@ type UpstreamFailoverError struct {
 	// SessionAccountEscape asks the handler to exclude this account for the
 	// next sampling of the same session. It is set for hard stream failures
 	// such as a watchdog timeout before semantic output.
-	SessionAccountEscape     bool
+	SessionAccountEscape bool
+	// RetryBeforeSessionEscape allows an uncommitted transport interruption to
+	// use the configured same-account retry budget before persisting an escape.
+	// Hard integrity failures leave this false and still escape immediately.
+	RetryBeforeSessionEscape bool
 	Stage                    GatewayFailureStage
 	Scope                    GatewayFailureScope
 	Reason                   GatewayFailureReason

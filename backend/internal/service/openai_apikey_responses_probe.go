@@ -195,6 +195,11 @@ func (s *AccountTestService) ProbeOpenAIAPIKeyResponsesSupport(ctx context.Conte
 		proxyURL = account.Proxy.URL()
 	}
 
+	req, err = applyCodexPrivacyBeforeSend(req, account)
+	if err != nil {
+		logger.LegacyPrintf("service.openai_probe", "probe_privacy_validation_failed: account_id=%d", accountID)
+		return
+	}
 	resp, err := s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
 	if err != nil {
 		// 网络层失败：不写标记，保持 unknown，下次重试或由网关 fallback 处理

@@ -17,6 +17,11 @@ func (s *AccountTestService) doAccountTestUpstreamTLS(req *http.Request, proxy s
 }
 
 func (s *AccountTestService) doAccountTestUpstreamMode(req *http.Request, proxy string, account *Account, profile *tlsfingerprint.Profile, tlsFallback bool) (*http.Response, error) {
+	var privacyErr error
+	req, privacyErr = applyCodexPrivacyBeforeSend(req, account)
+	if privacyErr != nil {
+		return nil, privacyErr
+	}
 	if err := s.checkOpenAIEvalAutomaticAccount(req.Context(), account); err != nil {
 		if req.Body != nil {
 			_ = req.Body.Close()

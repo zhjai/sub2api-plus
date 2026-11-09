@@ -104,6 +104,18 @@ func TestSameAccountRetryAllowedRejectsSessionEscape(t *testing.T) {
 		"request-scoped capacity errors retain bounded same-account retry")
 }
 
+func TestSameAccountRetryAllowedTransportEscapeWaitsForBudget(t *testing.T) {
+	err := &service.UpstreamFailoverError{
+		RetryableOnSameAccount:   true,
+		SessionAccountEscape:     true,
+		RetryBeforeSessionEscape: true,
+	}
+	require.True(t, sameAccountRetryAllowed(err, 0, 3))
+	require.True(t, sameAccountRetryAllowed(err, 2, 3))
+	require.False(t, sameAccountRetryAllowed(err, 3, 3))
+	require.False(t, sameAccountRetryAllowed(err, 0, 0))
+}
+
 func TestHandleFailoverError_SessionEscapeSwitchesWithoutGlobalUnschedule(t *testing.T) {
 	mock := &mockTempUnscheduler{}
 	state := NewFailoverState(2, false)

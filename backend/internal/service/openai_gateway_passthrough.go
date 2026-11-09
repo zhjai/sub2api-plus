@@ -775,6 +775,7 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	setOpenAIExecContract(c, body, true)
 	restoreCodexClientIdentityHeaders(c, account, req.Header, gjson.GetBytes(body, "prompt_cache_key").String())
 	req = stampCodexIdentityRequest(c, req, body)
+	req = stampCodexPrivacySource(req, account, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
 	return req, nil
 }
 
@@ -1868,14 +1869,15 @@ func (s *OpenAIGatewayService) newOpenAIStreamFailoverErrorWithModel(
 		classificationHeaders = nil
 	}
 	failoverErr := s.newOpenAIAccountFailoverErrorWithClassificationHeaders(account, statusCode, headers, classificationHeaders, payload, message, shouldDisable, retryableOnSameAccount)
-	// A native OpenAI Responses transport/EOF failure is attributable to the
-	// selected channel, not to the request's model-capacity demand.  Mark it as
-	// a session escape before the handler considers the bounded same-account
-	// retry budget.  This makes the next sampling leave a failed 0.06 channel
-	// instead of spending all retries on the same account.  Explicit capacity
-	// shedding remains request-scoped and keeps its existing same-account retry.
+	// An uncommitted transport interruption may be a temporary network failure.
+	// Allow bounded same-account retries and persist the session escape only on
+	// exhaustion. Integrity and classified hard failures keep immediate escape.
 	if openAIStreamFailureRequiresSessionEscape(account, payload, message, failoverErr) {
 		failoverErr.SessionAccountEscape = true
+		if len(payload) == 0 && openAIStreamTransportInterruption(message) {
+			failoverErr.RetryBeforeSessionEscape = true
+			failoverErr.RetryableOnSameAccount = true
+		}
 	}
 	if failoverErr.IsCredentialFailure() || failoverErr.RequestScopedTransient {
 		return failoverErr
@@ -1884,6 +1886,16 @@ func (s *OpenAIGatewayService) newOpenAIStreamFailoverErrorWithModel(
 	// only typed access/capacity failures need the original payload downstream.
 	failoverErr.ResponseBody = body
 	return failoverErr
+}
+
+func openAIStreamTransportInterruption(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	for _, marker := range []string{"stream disconnected", "stream ended before", "stream read error", "stream data interval timeout"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // openAIStreamFailureRequiresSessionEscape distinguishes an account/channel
@@ -1923,6 +1935,37 @@ func openAIStreamFailureRequiresSessionEscape(
 		}
 	}
 	return failoverErr.RetryableOnSameAccount && failoverErr.StatusCode >= http.StatusInternalServerError
+}
+
+// An explicit transport termination with no output is safe to retry only while
+// the attempt is still uncommitted. A terminal carrying text or tools must be
+// delivered as-is: replaying it can repeat work already performed upstream.
+func openAIResponsesEmptyStreamTermination(eventType string, payload []byte) bool {
+	if eventType != "response.incomplete" && eventType != "response.done" {
+		return false
+	}
+	protocolStatus, _, reason := classifyOpenAIResponsesOutcome(eventType, payload)
+	if protocolStatus != "incomplete" || reason != "stream_terminated" {
+		return false
+	}
+	response := gjson.GetBytes(payload, "response")
+	if !response.IsObject() {
+		response = gjson.ParseBytes(payload)
+	}
+	output := response.Get("output")
+	return !output.Exists() || (output.IsArray() && len(output.Array()) == 0)
+}
+
+func (s *OpenAIGatewayService) newOpenAIEmptyStreamTerminationFailoverError(
+	c *gin.Context, account *Account, passthrough bool, upstreamRequestID string,
+	payload []byte, mappedModel string, headers http.Header,
+) *UpstreamFailoverError {
+	err := s.newOpenAIStreamFailoverErrorWithModel(c, account, passthrough, upstreamRequestID,
+		payload, "OpenAI stream disconnected before completion (stream_terminated)", mappedModel, headers)
+	err.SessionAccountEscape = true
+	err.RetryBeforeSessionEscape = true
+	err.RetryableOnSameAccount = true
+	return err
 }
 
 // nonStreamingTerminalFailureFailover applies the streaming path's terminal-event
@@ -2255,6 +2298,14 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				}
 			}
 			eventType := effectiveOpenAISSEEventType(dataBytes, rawEventType)
+			if account != nil && account.Platform == PlatformOpenAI && !sawBareError && !sawResponseFailed && openAIResponsesEmptyStreamTermination(eventType, dataBytes) &&
+				!semanticOutputSeen && !openAIStreamClientOutputStarted(c, clientOutputStarted) &&
+				!clientDisconnected && ctx.Err() == nil {
+				s.parseSSEUsageBytesWithType(dataBytes, eventType, usage)
+				_ = resp.Body.Close()
+				return resultWithUsage(), s.newOpenAIEmptyStreamTerminationFailoverError(c, account, true,
+					upstreamRequestID, dataBytes, mappedModel, resp.Header)
+			}
 			observeOpenAIToolCapabilitySSE(c, eventType, dataBytes)
 			if sequence := gjson.GetBytes(dataBytes, "sequence_number"); sequence.Exists() {
 				sawSequenceNumber = true

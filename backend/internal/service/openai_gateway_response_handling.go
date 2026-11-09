@@ -691,6 +691,15 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				_ = resp.Body.Close()
 				return
 			}
+			if account != nil && account.Platform == PlatformOpenAI && !sawBareError && !sawResponseFailed && openAIResponsesEmptyStreamTermination(eventType, dataBytes) &&
+				!responsesSemanticOutputSeen && !openAIStreamClientOutputStarted(c, clientOutputStarted) &&
+				!clientDisconnected && ctx.Err() == nil {
+				s.parseSSEUsageBytesWithType(dataBytes, eventType, usage)
+				streamEarlyErr = s.newOpenAIEmptyStreamTerminationFailoverError(c, account, false,
+					upstreamRequestID, dataBytes, mappedModel, resp.Header)
+				_ = resp.Body.Close()
+				return
+			}
 			// 初始上游 data 的 type 只解析一次：原始值保持终止事件的精确匹配，规范化值供后续分支复用。
 			if openAIStreamEventIsTerminalWithType(data, eventType) {
 				sawTerminalEvent = true

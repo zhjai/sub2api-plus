@@ -39,6 +39,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		return nil, wrapOpenAIWSFallback("invalid_state", errors.New("service or account is nil"))
 	}
 	responseModelObserver := &upstreamResponseModelObserver{}
+	ctx = withCodexPrivacyWS(ctx, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
 
 	wsURL, err := s.buildOpenAIResponsesWSURL(account)
 	if err != nil {
@@ -206,9 +207,10 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	defer acquireCancel()
 
 	acquireReq := openAIWSAcquireRequest{
-		Account: account,
-		WSURL:   wsURL,
-		Headers: wsHeaders,
+		CodexPrivacy: codexPrivacyEnabled(codexAccountIdentitySource(c, account)),
+		Account:      account,
+		WSURL:        wsURL,
+		Headers:      wsHeaders,
 		HeadersFactory: func(factoryCtx context.Context, headers http.Header) (http.Header, error) {
 			return s.refreshOpenAIAgentIdentityHeaders(factoryCtx, account, headers)
 		},

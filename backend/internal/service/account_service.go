@@ -254,6 +254,9 @@ func (s *AccountService) Create(ctx context.Context, req CreateAccountRequest) (
 		account.AutoPauseOnExpired = true
 	}
 
+	if err := validateCodexPrivacyConfig(account); err != nil {
+		return nil, err
+	}
 	if err := s.accountRepo.Create(ctx, account); err != nil {
 		return nil, fmt.Errorf("create account: %w", err)
 	}
@@ -347,6 +350,9 @@ func (s *AccountService) Update(ctx context.Context, id int64, req UpdateAccount
 		account.Extra = prepareCodexFingerprintExtraForUpdate(account, extra)
 	} else {
 		account.Extra = prepareCodexFingerprintExtraForUpdate(account, account.Extra)
+	}
+	if err := validateCodexPrivacyConfig(account); err != nil {
+		return nil, err
 	}
 
 	if req.ProxyID != nil {

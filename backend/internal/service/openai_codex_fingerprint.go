@@ -141,7 +141,8 @@ func codexFingerprintSeed(extra map[string]any) (string, bool) {
 
 func prepareCodexFingerprintExtraForCreate(platform, accountType string, extra map[string]any) map[string]any {
 	prepared := stripCodexFingerprintSeed(extra)
-	if platform != PlatformOpenAI || (accountType != AccountTypeOAuth && accountType != AccountTypeSetupToken) || !codexFingerprintModeRequiresSeed(codexFingerprintModeFromExtra(prepared)) {
+	privacy := prepared[CodexPrivacyModeKey] == CodexPrivacyRandomized
+	if platform != PlatformOpenAI || (accountType != AccountTypeOAuth && accountType != AccountTypeSetupToken && !(accountType == AccountTypeAPIKey && privacy)) || (!privacy && !codexFingerprintModeRequiresSeed(codexFingerprintModeFromExtra(prepared))) {
 		return prepared
 	}
 	if prepared == nil {
@@ -153,8 +154,16 @@ func prepareCodexFingerprintExtraForCreate(platform, accountType string, extra m
 
 func prepareCodexFingerprintExtraForUpdate(account *Account, extra map[string]any) map[string]any {
 	prepared := stripCodexFingerprintSeed(extra)
-	if account == nil || !account.IsOpenAIOAuthLike() {
+	if account == nil || (!account.IsOpenAIOAuthLike() && !(account.Platform == PlatformOpenAI && account.Type == AccountTypeAPIKey)) {
 		return prepared
+	}
+	if _, supplied := extra[CodexPrivacyModeKey]; !supplied {
+		if mode, exists := account.Extra[CodexPrivacyModeKey]; exists {
+			if prepared == nil {
+				prepared = make(map[string]any)
+			}
+			prepared[CodexPrivacyModeKey] = mode
+		}
 	}
 	if seed, ok := codexFingerprintSeed(account.Extra); ok {
 		if prepared == nil {
@@ -163,7 +172,7 @@ func prepareCodexFingerprintExtraForUpdate(account *Account, extra map[string]an
 		prepared[codexFingerprintSeedExtraKey] = seed
 		return prepared
 	}
-	if codexFingerprintModeRequiresSeed(codexFingerprintModeFromExtra(prepared)) {
+	if prepared[CodexPrivacyModeKey] == CodexPrivacyRandomized || (account.IsOpenAIOAuthLike() && codexFingerprintModeRequiresSeed(codexFingerprintModeFromExtra(prepared))) {
 		if prepared == nil {
 			prepared = make(map[string]any, 1)
 		}

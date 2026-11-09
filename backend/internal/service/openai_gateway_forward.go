@@ -40,6 +40,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	if _, err := s.prepareCodexAccountIdentitySource(ctx, c, account); err != nil {
 		return nil, err
 	}
+	ctx = withCodexPrivacyHTTPSource(ctx, account, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
 	identityTransport := "http"
 	if GetOpenAIClientTransport(c) == OpenAIClientTransportWS {
 		identityTransport = "ws"
@@ -1590,6 +1591,7 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 	}
 	restoreCodexClientIdentityHeaders(c, account, req.Header, gjson.GetBytes(body, "prompt_cache_key").String())
 	req = stampCodexIdentityRequest(c, req, body)
+	req = stampCodexPrivacySource(req, account, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
 	return req, nil
 }
 
