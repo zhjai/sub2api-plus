@@ -61,8 +61,9 @@ func TestCodexPostcommitStreamInterruption(t *testing.T) {
 							r.applyForwardOutcome(outcome)
 						}
 						require.True(t, outcome.RequiresSessionAccountEscape())
+						require.False(t, OpenAIResponsesRequiresSessionEscape(c, outcome), "Codex transport retry must not create negative affinity")
 						require.False(t, outcome.SucceededForScheduling())
-						require.NotContains(t, rec.Body.String(), "response.failed", "client must wait for handler escape persistence")
+						require.NotContains(t, rec.Body.String(), "response.failed", "client must wait for handler failure accounting")
 						FlushOpenAIInterruptionTerminal(c)
 						body := rec.Body.String()
 						require.Equal(t, 1, strings.Count(body, "event: response.failed\n"))
@@ -87,6 +88,81 @@ func TestCodexPostcommitStreamInterruption(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestCodexPostcommitStreamInterruptionWithoutResponseID(t *testing.T) {
+	for _, passthrough := range []bool{false, true} {
+		t.Run(fmt.Sprintf("passthrough=%t", passthrough), func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			c.Request.Header.Set("User-Agent", "codex_cli_rs/0.167.0")
+			DeferOpenAIInterruptionTerminal(c)
+			frames := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n"
+			resp := &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(frames))}
+			svc := &OpenAIGatewayService{cfg: &config.Config{}}
+			account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+			outcome := &OpenAIForwardResult{}
+			if passthrough {
+				r, err := svc.handleStreamingResponsePassthrough(c.Request.Context(), resp, c, account, time.Now(), "gpt-6.1-sol", "gpt-6.1-sol")
+				require.Error(t, err)
+				r.outcome().applyForwardOutcome(outcome)
+			} else {
+				r, err := svc.handleStreamingResponse(c.Request.Context(), resp, c, account, time.Now(), "gpt-6.1-sol", "gpt-6.1-sol")
+				require.Error(t, err)
+				r.applyForwardOutcome(outcome)
+			}
+			require.Equal(t, "premature_eof", outcome.ResponsesProtocolStatus)
+			require.False(t, outcome.SucceededForScheduling())
+			require.False(t, OpenAIResponsesRequiresSessionEscape(c, outcome))
+			require.NotContains(t, rec.Body.String(), "response.failed")
+			FlushOpenAIInterruptionTerminal(c)
+			terminals := 0
+			forEachOpenAISSEFrame(rec.Body.String(), func(event string, data []byte) {
+				require.True(t, json.Valid(data))
+				if event == "response.failed" {
+					terminals++
+					require.NotEmpty(t, gjson.GetBytes(data, "response.id").String())
+					require.Equal(t, "server_error", gjson.GetBytes(data, "response.error.code").String())
+				}
+			})
+			require.Equal(t, 1, terminals)
+		})
+	}
+}
+
+func TestOpenAIResponsesEscapePolicyPreservesOtherFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		codex        bool
+		deferred     bool
+		status       string
+		toolFailure  bool
+		protocolLeak bool
+		want         bool
+	}{
+		{name: "codex synthesized interruption", codex: true, deferred: true, status: "premature_eof"},
+		{name: "explicit upstream incomplete", codex: true, deferred: true, status: "incomplete", want: true},
+		{name: "non Codex interruption", deferred: true, status: "premature_eof", want: true},
+		{name: "no synthesized terminal", codex: true, status: "premature_eof", want: true},
+		{name: "tool failure", codex: true, deferred: true, status: "premature_eof", toolFailure: true, want: true},
+		{name: "exec leak", codex: true, deferred: true, status: "premature_eof", protocolLeak: true, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			if tc.codex {
+				c.Request.Header.Set("User-Agent", "codex_cli_rs/0.167.0")
+			}
+			if tc.deferred {
+				DeferOpenAIInterruptionTerminal(c)
+				deferOpenAIInterruptionTerminal(c, "event: response.failed\ndata: {}\n\n")
+			}
+			outcome := &OpenAIForwardResult{ResponsesOutcomeObserved: true, ResponsesMeaningfulOutput: true, ResponsesProtocolStatus: tc.status, ResponsesIncompleteReason: "stream_terminated", ToolCapabilityFailure: tc.toolFailure, PrecommitExecProtocolLeak: tc.protocolLeak}
+			require.Equal(t, tc.want, OpenAIResponsesRequiresSessionEscape(c, outcome))
+		})
+	}
+	require.False(t, OpenAIResponsesRequiresSessionEscape(nil, nil))
 }
 
 func TestCodexInterruptionTerminalRespectsCancellation(t *testing.T) {

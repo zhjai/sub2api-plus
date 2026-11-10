@@ -494,7 +494,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	}
 	synthesizeResponsesStreamTerminatedTerminal := func() bool {
 		if account == nil || account.Platform != PlatformOpenAI || !responsesSemanticOutputSeen ||
-			clientDisconnected || sawTerminalEvent || failureDelivered || strings.TrimSpace(responseID) == "" {
+			clientDisconnected || sawTerminalEvent || failureDelivered || (strings.TrimSpace(responseID) == "" && !isOpenAICodexStreamClient(c)) {
 			return false
 		}
 		if stageFirstOutput && eventInProgress {

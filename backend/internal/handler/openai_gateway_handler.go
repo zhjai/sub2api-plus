@@ -1238,7 +1238,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					zap.Bool("upstream_error_response_already_written", upstreamErrorAlreadyCommunicated),
 					zap.Error(err),
 				}
-				if result != nil && result.RequiresSessionAccountEscape() {
+				if service.OpenAIResponsesRequiresSessionEscape(c, result) {
 					if account.IsOpenAIOpaqueUpstream() {
 						bumpOpaqueRouteEpoch(account, routeEpochState.Epoch, service.OpenAIIntegritySignalStreamEnded, false)
 					} else {
@@ -1267,13 +1267,13 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					opaqueIntegritySignal = service.OpenAIIntegritySignalExecLeak
 				} else if mismatchErr != nil {
 					opaqueIntegritySignal = service.OpenAIIntegritySignalModelMismatch
-				} else if result.RequiresSessionAccountEscape() {
+				} else if service.OpenAIResponsesRequiresSessionEscape(c, result) {
 					opaqueIntegritySignal = service.OpenAIIntegritySignalStreamEnded
 				}
 			}
 			if opaqueIntegritySignal != "" {
 				bumpOpaqueRouteEpoch(account, routeEpochState.Epoch, opaqueIntegritySignal, false)
-			} else if result.RequiresSessionAccountEscape() {
+			} else if service.OpenAIResponsesRequiresSessionEscape(c, result) {
 				if escapeErr := h.gatewayService.EscapeOpenAISessionAccountForRequest(c.Request.Context(), apiKey.GroupID, routeSessionHash, reqModel, requestedEffort, account.ID, account.BillingRateMultiplier()); escapeErr != nil {
 					reqLog.Warn("openai.session_account_escape_failed",
 						zap.Int64("account_id", account.ID), zap.Error(escapeErr))

@@ -14,14 +14,13 @@ const (
 )
 
 // DeferOpenAIInterruptionTerminal keeps a retryable terminal private until the
-// handler has persisted the session escape. Otherwise a fast client may retry
-// before the failed account has been excluded.
+// handler has recorded the failed attempt, as with other retryable stream errors.
 func DeferOpenAIInterruptionTerminal(c *gin.Context) {
 	c.Set(openAIDeferInterruptionTerminalKey, true)
 }
 
 // FlushOpenAIInterruptionTerminal is called on handler exit, after account health
-// and session escape have been recorded. It never starts another upstream call.
+// has been recorded. It never starts another upstream call.
 func FlushOpenAIInterruptionTerminal(c *gin.Context) {
 	value, exists := c.Get(openAIInterruptionTerminalKey)
 	if !exists {
@@ -45,7 +44,7 @@ func isOpenAICodexStreamClient(c *gin.Context) bool {
 // A transport failure is not a valid incomplete generation. Codex treats
 // incomplete/stream_terminated as fatal, whereas a server_error terminal enters
 // its normal client-owned reconnect path. Internal outcome remains premature_eof
-// so account health and session escape still reflect the interruption.
+// so account health still reflects the interruption.
 func buildOpenAIStreamInterruptionSSE(c *gin.Context, responseID, model string, createdAt, sequenceNumber int64) string {
 	if !isOpenAICodexStreamClient(c) {
 		return buildOpenAIResponseIncompleteSSE(responseID, model, createdAt, sequenceNumber)
@@ -63,5 +62,23 @@ func deferOpenAIInterruptionTerminal(c *gin.Context, terminal string) bool {
 		return false
 	}
 	c.Set(openAIInterruptionTerminalKey, terminal)
+	return true
+}
+
+// OpenAIResponsesRequiresSessionEscape preserves integrity/explicit upstream
+// escape policies, but treats a synthesized Codex transport error like an
+// explicit retryable response.failed: report failure without negative affinity.
+// Codex owns the retry; the gateway never replays already delivered output.
+func OpenAIResponsesRequiresSessionEscape(c *gin.Context, result *OpenAIForwardResult) bool {
+	if result == nil || !result.RequiresSessionAccountEscape() {
+		return false
+	}
+	if c != nil && !result.ToolCapabilityFailure && !result.PrecommitExecProtocolLeak && !result.HasUpstreamModelMismatch() &&
+		result.ResponsesProtocolStatus == "premature_eof" && result.ResponsesIncompleteReason == "stream_terminated" {
+		value, _ := c.Get(openAIInterruptionTerminalKey)
+		if terminal, _ := value.(string); terminal != "" {
+			return false
+		}
+	}
 	return true
 }

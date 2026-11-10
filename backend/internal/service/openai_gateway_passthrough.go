@@ -2229,7 +2229,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	}
 	synthesizeResponsesStreamTerminatedTerminal := func() bool {
 		if account == nil || !semanticOutputSeen ||
-			clientDisconnected || sawTerminalEvent || responseID == "" {
+			clientDisconnected || sawTerminalEvent || (responseID == "" && !isOpenAICodexStreamClient(c)) {
 			return false
 		}
 		sequenceNumber := int64(0)
