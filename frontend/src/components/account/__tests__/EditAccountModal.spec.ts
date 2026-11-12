@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent } from 'vue'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import {
   BUILTIN_PLATFORM_CATALOG,
   resetPlatformCatalog,
@@ -65,6 +65,7 @@ vi.mock('vue-i18n', async () => {
 })
 
 import EditAccountModal from '../EditAccountModal.vue'
+import CodexPrivacyModeField from '../CodexPrivacyModeField.vue'
 
 const BaseDialogStub = defineComponent({
   name: 'BaseDialog',
@@ -2030,6 +2031,229 @@ describe('EditAccountModal OpenAI 自动使用重置卡', () => {
       await wrapper.vm.$nextTick()
       expect(wrapper.get('[data-testid="codex-identity-server-error"]').text()).toContain('admin.accounts.openai.codexIdentity.serverRejected')
       expect(showErrorMock).toHaveBeenCalledWith('another account row already binds this credential')
+    })
+  })
+
+  describe('Client fingerprint protection (codex_privacy_mode)', () => {
+    function openaiAccount(type: 'oauth' | 'setup-token' | 'apikey', extra: Record<string, unknown> = {}, id = 31) {
+      const account = buildAccount()
+      account.id = id
+      account.type = type
+      if (type !== 'apikey') account.credentials = { access_token: 'oauth-token' }
+      account.extra = extra
+      return account
+    }
+
+    function prepare(account: any) {
+      updateAccountMock.mockReset()
+      checkMixedChannelRiskMock.mockReset()
+      showErrorMock.mockReset()
+      checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+      updateAccountMock.mockResolvedValue(account)
+      return mountModal(account)
+    }
+
+    const toggle = (wrapper: ReturnType<typeof mountModal>) => wrapper.get('[data-testid="codex-privacy-toggle"]')
+    const isOn = (wrapper: ReturnType<typeof mountModal>) => toggle(wrapper).attributes('aria-checked') === 'true'
+    const submit = async (wrapper: ReturnType<typeof mountModal>) => {
+      await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+      await flushPromises()
+    }
+    const savedExtra = () => updateAccountMock.mock.calls[0]?.[1]?.extra as Record<string, unknown>
+
+    it.each(['oauth', 'setup-token', 'apikey'] as const)('is offered on OpenAI %s accounts and defaults to off', (type) => {
+      const wrapper = prepare(openaiAccount(type))
+      expect(wrapper.get('[data-testid="codex-privacy"]').text()).toContain('admin.accounts.openai.codexPrivacy.title')
+      expect(toggle(wrapper).attributes('role')).toBe('switch')
+      expect(isOn(wrapper)).toBe(false)
+      expect(wrapper.find('[data-testid="codex-privacy-scope"]').exists()).toBe(false)
+      // Continuity conditions and the "change before a new session" advice show even while off.
+      const continuity = wrapper.get('[data-testid="codex-privacy-continuity"]')
+      expect(continuity.text()).toBe('admin.accounts.openai.codexPrivacy.continuity')
+      expect(toggle(wrapper).attributes('aria-describedby')).toContain(continuity.attributes('id'))
+    })
+
+    it('is not offered on other platforms, Spark shadows or Agent Identity accounts', () => {
+      const anthropic = buildAccount()
+      anthropic.platform = 'anthropic'
+      anthropic.credentials = { api_key: 'sk-ant' }
+      const agentIdentity = openaiAccount('oauth')
+      agentIdentity.credentials = { access_token: 'agent', auth_mode: ' AgentIdentity ' }
+
+      for (const account of [anthropic, buildOpenAISparkShadowAccount(), agentIdentity, buildGrokOAuthAccount()]) {
+        const wrapper = prepare(account)
+        expect(wrapper.find('[data-testid="codex-privacy"]').exists()).toBe(false)
+        wrapper.unmount()
+      }
+    })
+
+    it('leaves an existing value untouched on accounts where the switch is hidden', async () => {
+      const shadow = buildOpenAISparkShadowAccount()
+      shadow.extra = { codex_privacy_mode: 'randomized' }
+      const wrapper = prepare(shadow)
+      await submit(wrapper)
+      expect(savedExtra().codex_privacy_mode).toBe('randomized')
+    })
+
+    it('writes nothing on an ordinary save when the switch was never used', async () => {
+      const wrapper = prepare(openaiAccount('apikey'))
+      await submit(wrapper)
+      expect(savedExtra()).not.toHaveProperty('codex_privacy_mode')
+    })
+
+    it('loads a saved randomized value and keeps it on an ordinary save', async () => {
+      const wrapper = prepare(openaiAccount('oauth', { codex_privacy_mode: 'randomized', codex_fingerprint_seed: 'seed' }))
+      expect(isOn(wrapper)).toBe(true)
+      expect(wrapper.get('[data-testid="codex-privacy-scope"]').text()).toContain('admin.accounts.openai.codexPrivacy.limits')
+      expect(wrapper.get('[data-testid="codex-privacy-overrides"]').text()).toBe('admin.accounts.openai.codexPrivacy.overrides')
+      expect(wrapper.get('[data-testid="codex-privacy-continuity"]').exists()).toBe(true)
+      await submit(wrapper)
+      expect(updateAccountMock).toHaveBeenCalledTimes(1)
+      expect(savedExtra().codex_privacy_mode).toBe('randomized')
+    })
+
+    it('saves randomized when the switch is turned on for an API key account', async () => {
+      const wrapper = prepare(openaiAccount('apikey'))
+      await toggle(wrapper).trigger('click')
+      expect(isOn(wrapper)).toBe(true)
+      await submit(wrapper)
+      const extra = savedExtra()
+      expect(extra.codex_privacy_mode).toBe('randomized')
+      // API key accounts never get identity experiment fields written by this switch.
+      expect(Object.keys(extra).filter(key => key.startsWith('codex_identity_'))).toEqual([])
+    })
+
+    it('sends off explicitly when a saved setting is turned off, so the server does not keep the old value', async () => {
+      const wrapper = prepare(openaiAccount('setup-token', { codex_privacy_mode: 'randomized' }))
+      await toggle(wrapper).trigger('click')
+      expect(isOn(wrapper)).toBe(false)
+      await submit(wrapper)
+      expect(savedExtra().codex_privacy_mode).toBe('off')
+    })
+
+    it('blocks saving while fingerprint convergence is on and saves after the explicit fix', async () => {
+      const wrapper = prepare(openaiAccount('oauth', { codex_fingerprint_mode: 'session' }))
+      await toggle(wrapper).trigger('click')
+      expect(wrapper.get('[data-testid="codex-privacy-conflict-fingerprint"]').text())
+        .toContain('admin.accounts.openai.codexPrivacy.conflictFingerprint')
+      expect(wrapper.getComponent(CodexPrivacyModeField).props('fingerprintLabel')).toBe('admin.accounts.openai.codexFingerprintSession')
+
+      await submit(wrapper)
+      expect(updateAccountMock).not.toHaveBeenCalled()
+      expect(showErrorMock).toHaveBeenCalledWith('admin.accounts.openai.codexPrivacy.conflictToast')
+      expect(wrapper.find('[data-testid="codex-privacy-conflict-blocked"]').exists()).toBe(true)
+      // Nothing was changed behind the user's back.
+      expect((wrapper.get('[data-testid="edit-codex-fingerprint-mode-select"]').element as HTMLSelectElement).value).toBe('session')
+
+      await wrapper.get('[data-testid="codex-privacy-resolve"]').trigger('click')
+      expect(wrapper.find('[data-testid="codex-privacy-conflict"]').exists()).toBe(false)
+      expect((wrapper.get('[data-testid="edit-codex-fingerprint-mode-select"]').element as HTMLSelectElement).value).toBe('off')
+      await submit(wrapper)
+      const extra = savedExtra()
+      expect(extra.codex_privacy_mode).toBe('randomized')
+      expect(extra).not.toHaveProperty('codex_fingerprint_mode')
+    })
+
+    it('flags preserve_client as a conflict and returns to account isolation only when asked', async () => {
+      const wrapper = prepare(openaiAccount('oauth', { codex_identity_mode: 'preserve_client', codex_identity_namespace: 'ns', codex_identity_revision: 'rev-1' }))
+      await toggle(wrapper).trigger('click')
+      expect(wrapper.find('[data-testid="codex-privacy-conflict-preserve"]').exists()).toBe(true)
+      expect((wrapper.get('[data-testid="codex-identity-preserve_client"]').element as HTMLInputElement).checked).toBe(true)
+
+      await wrapper.get('[data-testid="codex-privacy-resolve"]').trigger('click')
+      expect((wrapper.get('[data-testid="codex-identity-isolated"]').element as HTMLInputElement).checked).toBe(true)
+      await submit(wrapper)
+      const extra = savedExtra()
+      expect(extra.codex_privacy_mode).toBe('randomized')
+      expect(extra).not.toHaveProperty('codex_identity_mode')
+      expect(extra.codex_identity_revision).toBe('rev-1')
+    })
+
+    it('lets the user keep the conflicting setting by turning protection off instead', async () => {
+      const wrapper = prepare(openaiAccount('oauth', { codex_fingerprint_mode: 'full' }))
+      await toggle(wrapper).trigger('click')
+      await wrapper.get('[data-testid="codex-privacy-turn-off"]').trigger('click')
+      expect(isOn(wrapper)).toBe(false)
+      expect(wrapper.find('[data-testid="codex-privacy-conflict"]').exists()).toBe(false)
+      await submit(wrapper)
+      const extra = savedExtra()
+      expect(extra.codex_fingerprint_mode).toBe('full')
+      expect(extra).not.toHaveProperty('codex_privacy_mode')
+    })
+
+    it('follows the server contract on API key accounts that carry a legacy convergence value', async () => {
+      const wrapper = prepare(openaiAccount('apikey', { codex_fingerprint_mode: 'device' }))
+      await toggle(wrapper).trigger('click')
+      expect(wrapper.find('[data-testid="codex-privacy-conflict-fingerprint"]').exists()).toBe(true)
+      expect(wrapper.get('[data-testid="codex-privacy-conflict"]').text()).toContain('admin.accounts.openai.codexPrivacy.conflictHidden')
+
+      await submit(wrapper)
+      expect(updateAccountMock).not.toHaveBeenCalled()
+
+      await wrapper.get('[data-testid="codex-privacy-resolve"]').trigger('click')
+      expect(wrapper.find('[data-testid="codex-privacy-cleanup-pending"]').exists()).toBe(true)
+      await submit(wrapper)
+      const extra = savedExtra()
+      expect(extra.codex_privacy_mode).toBe('randomized')
+      expect(extra).not.toHaveProperty('codex_fingerprint_mode')
+      expect(Object.keys(extra).filter(key => key.startsWith('codex_identity_'))).toEqual([])
+    })
+
+    it('does not drop a hidden legacy setting when protection ends up off', async () => {
+      const wrapper = prepare(openaiAccount('apikey', { codex_fingerprint_mode: 'device' }))
+      await toggle(wrapper).trigger('click')
+      await wrapper.get('[data-testid="codex-privacy-resolve"]').trigger('click')
+      await toggle(wrapper).trigger('click')
+      await submit(wrapper)
+      expect(savedExtra().codex_fingerprint_mode).toBe('device')
+      expect(savedExtra()).not.toHaveProperty('codex_privacy_mode')
+    })
+
+    it('shows the server reason for a CODEX_PRIVACY_* rejection next to the switch', async () => {
+      const wrapper = prepare(openaiAccount('oauth'))
+      await toggle(wrapper).trigger('click')
+      updateAccountMock.mockRejectedValueOnce({
+        status: 400,
+        code: 400,
+        reason: 'CODEX_PRIVACY_SEED_REQUIRED',
+        message: 'Save the account again to initialize its protected random metadata seed'
+      })
+      await submit(wrapper)
+
+      expect(wrapper.get('[data-testid="codex-privacy-server-error"]').text()).toContain('admin.accounts.openai.codexPrivacy.serverRejected')
+      expect(wrapper.getComponent(CodexPrivacyModeField).props('serverError')).toEqual({
+        code: 'CODEX_PRIVACY_SEED_REQUIRED',
+        message: 'Save the account again to initialize its protected random metadata seed'
+      })
+      expect(showErrorMock).toHaveBeenCalledWith('Save the account again to initialize its protected random metadata seed')
+
+      // Changing the switch clears the stale rejection.
+      await toggle(wrapper).trigger('click')
+      expect(wrapper.find('[data-testid="codex-privacy-server-error"]').exists()).toBe(false)
+    })
+
+    it('resets to the newly selected account and to the saved value when the modal is reopened', async () => {
+      const randomized = openaiAccount('oauth', { codex_privacy_mode: 'randomized' }, 41)
+      const plain = openaiAccount('apikey', { codex_fingerprint_mode: 'session' }, 42)
+      const wrapper = prepare(randomized)
+      expect(isOn(wrapper)).toBe(true)
+
+      await wrapper.setProps({ account: plain })
+      expect(isOn(wrapper)).toBe(false)
+      await toggle(wrapper).trigger('click')
+      await submit(wrapper)
+      expect(wrapper.find('[data-testid="codex-privacy-conflict-blocked"]').exists()).toBe(true)
+
+      await wrapper.setProps({ account: randomized })
+      expect(isOn(wrapper)).toBe(true)
+      expect(wrapper.find('[data-testid="codex-privacy-conflict"]').exists()).toBe(false)
+
+      // Unsaved change, then close and reopen the same account: the saved value wins.
+      await toggle(wrapper).trigger('click')
+      expect(isOn(wrapper)).toBe(false)
+      await wrapper.setProps({ show: false })
+      await wrapper.setProps({ show: true })
+      expect(isOn(wrapper)).toBe(true)
     })
   })
 })

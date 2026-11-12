@@ -738,6 +738,25 @@ export default {
           namespaceMissing: 'The server has not generated a credential namespace for this account yet, so the experiment is not in effect and requests stay isolated.',
           serverRejected: 'The server rejected the session identifier setting: {reason}'
         },
+        codexPrivacy: {
+          title: 'Client fingerprint protection',
+          desc: 'Account-level opt-in, off by default. When on, protocol metadata sent upstream no longer carries local environment details (such as OS, paths or host name), and device, session and similar identifiers are replaced with stable random identifiers that belong to this account.',
+          continuity: "While protection stays on and the account, caller and session don't change, a session and its retries keep the same random identifiers, and continuation identifiers issued by the server are kept as-is. Change this switch before starting a new session; switching modes mid-session can affect continuation.",
+          limits: 'Conversation content and tool arguments are not touched. This is not TLS fingerprint spoofing and does not promise to avoid model downgrades.',
+          overrides: "User-Agent, Originator, Version and Accept-Language are fixed to generic Codex client values and take precedence over this account's custom header overrides.",
+          conflictIntro: "Client fingerprint protection can't be on together with these settings, so the account can't be saved yet:",
+          conflictFingerprint: 'Codex fingerprint convergence is set to "{mode}" and needs to be Off',
+          conflictPreserve: 'Codex session identifiers are set to "Keep client session identifiers (experimental)" and need to go back to account isolation',
+          conflictHidden: 'This account type has no separate control for these settings on this page. Choosing the fix below removes them when you save.',
+          conflictBlocked: 'Choose one of the options below, then save.',
+          conflictToast: 'Client fingerprint protection conflicts with the current Codex fingerprint convergence or session identifier setting. Resolve it below the switch, then save.',
+          resolve: 'Turn off the conflicting settings and keep protection',
+          turnOff: 'Turn off client fingerprint protection',
+          cleanupPending: 'Saving removes the older settings that conflict with client fingerprint protection.',
+          agentIdentityUnsupported: "Client fingerprint protection isn't available for Agent Identity accounts. Go back and turn the switch off, or use another way to add the account.",
+          serverRejected: 'The server rejected the client fingerprint protection setting: {reason}',
+          serverCode: 'Error code: {code}'
+        },
         codexFingerprintMode: 'Codex fingerprint convergence',
         codexFingerprintModeDesc: 'When multiple users share the same OAuth account, converge device/session identifiers to account-level stable values to reduce upstream-visible device and session count. Off by default: nothing is converged, but client session identifiers are still isolated per account (not passed through as-is); opt in explicitly when needed. Some accounts reported quota shrinkage after enabling convergence, so choose based on your own measurements.',
         codexFingerprintOff: 'Off (default, still isolated per account)',
@@ -1364,7 +1383,51 @@ export default {
           validating: 'Validating...',
           validateAndCreate: 'Validate & Create Account',
           pleaseEnterRefreshToken: 'Please enter Refresh Token',
-          pleaseEnterSessionToken: 'Please enter Session Token'
+          pleaseEnterSessionToken: 'Please enter Session Token',
+          // BPS: official Excel login client (ordinary openai/oauth account, identified by client_id)
+          bps: {
+            clientLabel: 'Login client',
+            codexTitle: 'Codex OAuth',
+            codexDesc: 'Codex CLI login with every import method',
+            bpsTitle: 'BPS OAuth',
+            bpsDesc: 'Official Excel login, for BPS only',
+            scopeNote:
+              'BPS accounts handle HTTP Responses requests only (streaming or JSON), including client function and custom tools. Native compact, WebSocket, images, Chat Completions and Messages are not available. Send the full conversation history; previous_response_id is not supported. OpenAI decides which models each workspace can use, so access to any model is not guaranteed.',
+            title: 'BPS authorization (official Excel login)',
+            followSteps: 'Sign in through the official Excel login, then paste the callback URL here:',
+            openUrlDesc: 'Open the link in a new tab, sign in to OpenAI and choose the workspace.',
+            importantNotice:
+              'The login page may say sign-in failed because it expects to run inside Office. The address bar can still hold a callback URL (https://bps.openai.com/…/auth/callback?code=…&state=…). Copy that full URL. Authorization is complete only after the exchange below succeeds.',
+            step3EnterCode: 'Paste the full callback URL',
+            authCodeDesc: 'Copy the whole address bar, including code and state. A code on its own is not accepted.',
+            authCode: 'Callback URL',
+            authCodePlaceholder: 'https://bps.openai.com/basispoints/extension/…/auth/callback?code=…&state=…',
+            authCodeHint: 'The callback contains a one-time credential. Do not share it or paste it anywhere else.',
+            callbackValid: 'Callback matches this authorization link and is ready to exchange.',
+            callbackErrors: {
+              empty: 'Paste the full callback URL.',
+              noSession: 'Generate an authorization link first.',
+              notUrl: 'Paste the full callback URL, not just the code.',
+              wrongOrigin: 'This URL is not from bps.openai.com. Copy the callback from the official login page.',
+              wrongPath: 'This is not the BPS sign-in callback. Copy the URL the login page redirected to.',
+              oauthError: 'The login page returned an error ({error}). Generate a new link and sign in again.',
+              missingCode: 'The callback has no code. Finish signing in, then copy the URL again.',
+              missingState: 'The callback has no state. Copy the complete URL.',
+              stateMismatch: 'This callback belongs to a different authorization link. Use the callback from the current link, or generate a new one.'
+            },
+            clientMismatch: 'OpenAI returned a token for a different login client. Nothing was saved. Generate a new link and try again.',
+            refreshTokenAuth: 'Excel refresh token',
+            refreshTokenDesc:
+              'Enter refresh tokens issued to the Excel login client, one per line. Codex refresh tokens do not work here.',
+            refreshTokenPlaceholder: 'Paste Excel refresh tokens, one per line',
+            reauthNote: 'This account uses the BPS (Excel) login client. Reauthorization stays on that client.',
+            identityTitle: 'BPS account',
+            identityDesc:
+              'Authorized through the official Excel login client. Codex identity, native WebSocket, Codex CLI-only, hosted image tool, passthrough and compact settings do not apply to this account and are hidden.',
+            clientIdLabel: 'Login client',
+            workspaceLabel: 'Workspace',
+            emailLabel: 'Email'
+          }
         },
         grok: {
           title: 'Grok Account Authorization',

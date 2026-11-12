@@ -3661,6 +3661,11 @@ func (s *OpenAIGatewayService) isOpenAIAccountTransportCompatible(account *Accou
 	if s == nil || account == nil {
 		return false
 	}
+	// Excel grants are BPS HTTP-only, including when the WS ingress router
+	// otherwise permits HTTP bridging for ordinary Codex OAuth accounts.
+	if account.IsExcelOAuth() {
+		return false
+	}
 	if requiredTransport == OpenAIUpstreamTransportResponsesWebsocketV2Ingress {
 		if s.cfg == nil || !s.cfg.OpenAIWSModeRouterV2Enabled() {
 			return s.getOpenAIWSProtocolResolver().Resolve(account).Transport == OpenAIUpstreamTransportResponsesWebsocketV2

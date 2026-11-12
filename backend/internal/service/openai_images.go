@@ -609,6 +609,9 @@ func (s *OpenAIGatewayService) ForwardImages(
 	parsed *OpenAIImagesRequest,
 	channelMappedModel string,
 ) (*OpenAIForwardResult, error) {
+	if account.IsExcelOAuth() {
+		return nil, excelBPSUnsupported(c)
+	}
 	if parsed == nil {
 		return nil, fmt.Errorf("parsed images request is required")
 	}

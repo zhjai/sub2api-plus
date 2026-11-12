@@ -54,7 +54,7 @@ func isOpenAIStateProbeTarget(target *OpenAIEvalTarget) bool {
 		return false
 	}
 	account, credential := target.Account, target.Credential
-	return account.IsOpenAIOAuth() && !account.IsShadow() && !account.IsSyntheticUITest() && credential.Type == AccountTypeOAuth && !credential.IsOpenAIAgentIdentity()
+	return account.IsOpenAIOAuth() && !account.IsShadow() && !account.IsSyntheticUITest() && credential.Type == AccountTypeOAuth && !credential.IsOpenAIAgentIdentity() && !credential.IsExcelOAuth()
 }
 
 func (s *AccountTestService) RunOpenAIStateProbe(ctx context.Context, target *OpenAIEvalTarget) *OpenAIStateProbeResult {

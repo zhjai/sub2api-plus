@@ -26,6 +26,38 @@
         <p class="input-hint">{{ t('admin.accounts.notesHint') }}</p>
       </div>
 
+      <!-- BPS account identity (openai/oauth + official Excel client_id). Read-only. -->
+      <section
+        v-if="isOpenAIBPS"
+        data-testid="edit-openai-bps-identity"
+        aria-labelledby="edit-openai-bps-identity-title"
+        class="rounded-lg border border-emerald-200 bg-emerald-50/60 px-4 py-3 dark:border-emerald-900/60 dark:bg-emerald-950/20"
+      >
+        <h3 id="edit-openai-bps-identity-title" class="text-sm font-semibold text-emerald-900 dark:text-emerald-200">
+          {{ t('admin.accounts.oauth.openai.bps.identityTitle') }}
+        </h3>
+        <p class="mt-1 text-xs leading-relaxed text-emerald-900/80 dark:text-emerald-200/80">
+          {{ t('admin.accounts.oauth.openai.bps.identityDesc') }}
+        </p>
+        <dl class="mt-3 grid gap-x-4 gap-y-1 text-xs sm:grid-cols-[auto_minmax(0,1fr)]">
+          <dt class="text-gray-500 dark:text-gray-400">{{ t('admin.accounts.oauth.openai.bps.clientIdLabel') }}</dt>
+          <dd class="break-all font-mono text-gray-900 dark:text-gray-100" data-testid="edit-openai-bps-client-id">
+            {{ OPENAI_EXCEL_OAUTH_CLIENT_ID }}
+          </dd>
+          <template v-if="openaiBPSIdentity.workspace">
+            <dt class="text-gray-500 dark:text-gray-400">{{ t('admin.accounts.oauth.openai.bps.workspaceLabel') }}</dt>
+            <dd class="break-all font-mono text-gray-900 dark:text-gray-100">{{ openaiBPSIdentity.workspace }}</dd>
+          </template>
+          <template v-if="openaiBPSIdentity.email">
+            <dt class="text-gray-500 dark:text-gray-400">{{ t('admin.accounts.oauth.openai.bps.emailLabel') }}</dt>
+            <dd class="break-all text-gray-900 dark:text-gray-100">{{ openaiBPSIdentity.email }}</dd>
+          </template>
+        </dl>
+        <p class="mt-3 border-t border-emerald-200/70 pt-2 text-xs leading-relaxed text-gray-600 dark:border-emerald-900/50 dark:text-gray-300">
+          {{ t('admin.accounts.oauth.openai.bps.scopeNote') }}
+        </p>
+      </section>
+
       <!-- API Key fields (only for apikey type) -->
       <div v-if="account.type === 'apikey'" class="space-y-4">
         <div v-if="!isCNApiKeyAccount || editApiProtocol !== 'adaptive'">
@@ -2031,9 +2063,9 @@
         </p>
       </div>
 
-      <!-- OpenAI 自动透传开关（OAuth/API Key） -->
+      <!-- OpenAI 自动透传开关（OAuth/API Key；BPS 账号不适用） -->
       <div
-        v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey')"
+        v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey') && !isOpenAIBPS"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="flex items-center justify-between">
@@ -2113,9 +2145,9 @@
         </div>
       </div>
 
-      <!-- OpenAI Codex hosted image_generation bridge policy -->
+      <!-- OpenAI Codex hosted image_generation bridge policy（BPS 账号不适用） -->
       <div
-        v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey')"
+        v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey') && !isOpenAIBPS"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="overflow-hidden rounded-lg border border-sky-100 bg-sky-50/60 shadow-sm dark:border-sky-900/50 dark:bg-sky-950/20">
@@ -2173,9 +2205,9 @@
         </div>
       </div>
 
-      <!-- OpenAI WS Mode 三态（off/ctx_pool/passthrough） -->
+      <!-- OpenAI WS Mode 三态（off/ctx_pool/passthrough）；BPS 只走 HTTP /responses -->
       <div
-        v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey')"
+        v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey') && !isOpenAIBPS"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="flex items-center justify-between">
@@ -2595,7 +2627,7 @@
       </div>
 
       <div
-        v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token')"
+        v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token') && !isOpenAIBPS"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="flex items-center justify-between">
@@ -2649,9 +2681,9 @@
         </div>
       </div>
 
-      <!-- Codex 指纹收敛模式（仅 OpenAI OAuth） -->
+      <!-- Codex 指纹收敛模式（仅 OpenAI Codex OAuth；BPS 不使用 Codex 身份） -->
       <div
-        v-if="account?.platform === 'openai' && account?.type === 'oauth'"
+        v-if="account?.platform === 'openai' && account?.type === 'oauth' && !isOpenAIBPS"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="flex items-center justify-between gap-4">
@@ -2669,7 +2701,7 @@
 
       <!-- Codex 会话标识策略（仅 OpenAI OAuth）：账号隔离（默认）或保留客户端会话标识（实验） -->
       <div
-        v-if="account?.platform === 'openai' && account?.type === 'oauth'"
+        v-if="account?.platform === 'openai' && account?.type === 'oauth' && !isOpenAIBPS"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
         data-testid="edit-codex-identity"
       >
@@ -2773,6 +2805,21 @@
         </p>
       </div>
 
+      <!-- 客户端指纹保护（OpenAI OAuth / setup-token / API Key；不含 shadow 与 Agent Identity） -->
+      <CodexPrivacyModeField
+        v-if="codexPrivacyEligible && !isOpenAIBPS"
+        ref="codexPrivacyFieldRef"
+        :enabled="codexPrivacyEnabled"
+        :conflicts="codexPrivacyConflicts"
+        :fingerprint-label="codexPrivacyFingerprintLabel"
+        :hidden-settings="!codexPrivacyHasConflictControls"
+        :cleanup-pending="codexPrivacyCleanupLegacy && !codexPrivacyHasConflictControls"
+        :blocked="codexPrivacySaveBlocked"
+        :server-error="codexPrivacyServerError"
+        @toggle="toggleCodexPrivacy"
+        @resolve="resolveCodexPrivacyConflicts"
+      />
+
       <!-- OpenAI 订阅档位手动覆盖（Plus/Pro/Free），仅 OAuth 非影子账号 -->
       <div
         v-if="account?.platform === 'openai' && account?.type === 'oauth' && !isSparkShadow"
@@ -2792,7 +2839,7 @@
       </div>
 
       <div
-        v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey')"
+        v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey') && !isOpenAIBPS"
         class="border-t border-gray-200 pt-4 dark:border-dark-600 space-y-4"
       >
         <div class="flex items-center justify-between">
@@ -3529,6 +3576,13 @@ import { useAppStore } from '@/stores/app'
 
 import { adminAPI } from '@/api/admin'
 import { useQuotaNotifyState } from '@/composables/useQuotaNotifyState'
+import {
+  effectiveCodexFingerprintMode,
+  isCodexPrivacyEligible,
+  useCodexPrivacyMode
+} from '@/composables/useCodexPrivacyMode'
+import CodexPrivacyModeField from './CodexPrivacyModeField.vue'
+import { OPENAI_EXCEL_OAUTH_CLIENT_ID, isOpenAIBPSAccount } from '@/utils/openaiOAuthClient'
 import type {
   Account,
   Proxy,
@@ -3668,6 +3722,21 @@ const selectableGroups = computed(() => {
 // Spark 影子账号(parent_account_id 非空):代理恒继承母账号,不可独立编辑(外审 B/P1),
 // 故隐藏代理选择器。
 const isSparkShadow = computed(() => props.account?.parent_account_id != null)
+// Ordinary openai/oauth account saved with the official Excel client_id: BPS only.
+// Codex identity, native WebSocket, Codex CLI-only, hosted image tool, passthrough and
+// compact settings do not apply to it and are not shown.
+const isOpenAIBPS = computed(() =>
+  isOpenAIBPSAccount(props.account as { platform?: string; type?: string; credentials?: Record<string, unknown> | null } | null)
+)
+const openaiBPSIdentity = computed(() => {
+  const creds = (props.account?.credentials as Record<string, unknown> | undefined) || {}
+  const extra = (props.account?.extra as Record<string, unknown> | undefined) || {}
+  const text = (value: unknown) => (typeof value === 'string' ? value.trim() : '')
+  return {
+    workspace: text(creds.chatgpt_account_id),
+    email: text(creds.email) || text(extra.email)
+  }
+})
 
 const hideAccountLongContextBilling = computed(() => {
   return allSelectedGroupsEnableLongContextPricing(form.group_ids, props.groups)
@@ -4402,6 +4471,74 @@ const codexFingerprintModeOptions = computed(() => [
   { value: 'full' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintFull') },
 ])
 
+// 客户端指纹保护（extra.codex_privacy_mode）：账号级 opt-in。
+// OAuth 账号的冲突项（指纹收敛 / preserve_client）在本页有控件，直接读控件值；
+// setup-token / API Key 没有这些控件，按已保存的 extra 校验（与后端 validateCodexPrivacyConfig 一致），
+// 用户点击修正后才在保存时移除，绝不静默改动。
+const codexPrivacyEligible = computed(() => isCodexPrivacyEligible(props.account))
+const codexPrivacyHasConflictControls = computed(() => props.account?.type === 'oauth')
+const codexPrivacyHiddenFingerprint = ref<CodexFingerprintMode>('off')
+const codexPrivacyHiddenPreserveClient = ref(false)
+const codexPrivacyCleanupLegacy = ref(false)
+const codexPrivacyFieldRef = ref<InstanceType<typeof CodexPrivacyModeField> | null>(null)
+const {
+  enabled: codexPrivacyEnabled,
+  conflicts: codexPrivacyConflicts,
+  saveBlocked: codexPrivacySaveBlocked,
+  serverError: codexPrivacyServerError,
+  reset: resetCodexPrivacy,
+  load: loadCodexPrivacy,
+  setEnabled: setCodexPrivacyEnabled,
+  toggle: toggleCodexPrivacy,
+  validateBeforeSave: validateCodexPrivacyBeforeSave,
+  writeTo: writeCodexPrivacyTo,
+  captureServerError: captureCodexPrivacyServerError,
+  clearServerError: clearCodexPrivacyServerError
+} = useCodexPrivacyMode(() => {
+  if (codexPrivacyHasConflictControls.value) {
+    return { fingerprintMode: codexFingerprintMode.value, identityMode: codexIdentityMode.value }
+  }
+  if (codexPrivacyCleanupLegacy.value) {
+    return { fingerprintMode: 'off', identityMode: 'isolated' }
+  }
+  return {
+    fingerprintMode: codexPrivacyHiddenFingerprint.value,
+    identityMode: codexPrivacyHiddenPreserveClient.value ? 'preserve_client' : 'isolated'
+  }
+})
+
+const codexPrivacyFingerprintLabel = computed(() => {
+  const mode = codexPrivacyHasConflictControls.value ? codexFingerprintMode.value : codexPrivacyHiddenFingerprint.value
+  return codexFingerprintModeOptions.value.find(option => option.value === mode)?.label ?? mode
+})
+
+function resetCodexPrivacyState() {
+  resetCodexPrivacy()
+  codexPrivacyHiddenFingerprint.value = 'off'
+  codexPrivacyHiddenPreserveClient.value = false
+  codexPrivacyCleanupLegacy.value = false
+}
+
+function loadCodexPrivacyState(account: { type?: string; extra?: unknown }) {
+  const extra = (account.extra as Record<string, unknown> | undefined) || undefined
+  loadCodexPrivacy(extra)
+  if (account.type !== 'oauth') {
+    codexPrivacyHiddenFingerprint.value = effectiveCodexFingerprintMode(extra?.codex_fingerprint_mode)
+    codexPrivacyHiddenPreserveClient.value = extra?.codex_identity_mode === 'preserve_client'
+  }
+}
+
+/** Explicit user action: switch the conflicting settings off and keep protection on. */
+function resolveCodexPrivacyConflicts() {
+  if (codexPrivacyHasConflictControls.value) {
+    codexFingerprintMode.value = 'off'
+    restoreCodexIdentityDefault()
+  } else {
+    codexPrivacyCleanupLegacy.value = true
+  }
+  clearCodexPrivacyServerError()
+}
+
 const openAIWSModeOptions = computed(() => [
   { value: OPENAI_WS_MODE_OFF, label: t('admin.accounts.openai.wsModeOff') },
   { value: OPENAI_WS_MODE_CTX_POOL, label: t('admin.accounts.openai.wsModeCtxPool') },
@@ -4869,6 +5006,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   codexCLIOnlyAppServerEnabled.value = false
   codexFingerprintMode.value = 'off'
   restoreCodexIdentityDefault()
+  resetCodexPrivacyState()
   codexImageToolMode.value = 'inherit'
   anthropicPassthroughEnabled.value = false
   anthropicAPIKeyAuthScheme.value = 'x_api_key'
@@ -4929,10 +5067,29 @@ const syncFormFromAccount = (newAccount: Account | null) => {
         : 'off')
       loadCodexIdentity(extra as Record<string, unknown> | undefined)
     }
+    if (isCodexPrivacyEligible(newAccount)) {
+      loadCodexPrivacyState(newAccount)
+    }
     const credentials = newAccount.credentials as Record<string, unknown> | undefined
     const compactMappings = credentials?.compact_model_mapping as Record<string, string> | undefined
     if (compactMappings && typeof compactMappings === 'object') {
       openAICompactModelMappings.value = Object.entries(compactMappings).map(([from, to]) => ({ from, to }))
+    }
+    // BPS (official Excel login) accounts: Codex-only and native-transport settings are
+    // hidden. Hold them at their defaults so a save applies each key's existing "off"
+    // semantics (WS mode written as off, CLI-only false only if it was on, privacy
+    // written as off only if it was stored, the rest removed) and never re-saves a
+    // stale native option. Compact settings are hidden but kept as stored; other extras
+    // and credentials are untouched.
+    if (isOpenAIBPSAccount(newAccount as { platform?: string; type?: string; credentials?: Record<string, unknown> | null })) {
+      openaiPassthroughEnabled.value = false
+      openaiOAuthResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
+      codexCLIOnlyEnabled.value = false
+      codexCLIOnlyAppServerEnabled.value = false
+      codexImageToolMode.value = 'inherit'
+      codexFingerprintMode.value = 'off'
+      restoreCodexIdentityDefault()
+      setCodexPrivacyEnabled(false)
     }
   }
   if (newAccount.platform === 'anthropic' && newAccount.type === 'apikey') {
@@ -5816,6 +5973,7 @@ const persistGrokMediaEligibility = async (accountID: number, updatedAccount: Ac
 const submitUpdateAccount = async (accountID: number, updatePayload: Record<string, unknown>) => {
   submitting.value = true
   codexIdentityServerError.value = ''
+  clearCodexPrivacyServerError()
   try {
     let updatedAccount = await adminAPI.accounts.update(accountID, withAntigravityConfirmFlag(updatePayload))
     updatedAccount = await persistGrokMediaEligibility(accountID, updatedAccount)
@@ -5835,6 +5993,10 @@ const submitUpdateAccount = async (accountID: number, updatePayload: Record<stri
     }
     if (isCodexIdentityError(error)) {
       codexIdentityServerError.value = extractApiErrorMessage(error, t('admin.accounts.failedToUpdate'))
+    }
+    // CODEX_PRIVACY_* 拒绝同时显示在开关旁，内容是服务端给出的真实原因。
+    if (captureCodexPrivacyServerError(error, t('admin.accounts.failedToUpdate'))) {
+      void codexPrivacyFieldRef.value?.revealConflict()
     }
     appStore.showError(error.message || t('admin.accounts.failedToUpdate'))
   } finally {
@@ -5859,6 +6021,12 @@ const handleSubmit = async () => {
       appStore.showError(t('admin.accounts.openai.codexIdentity.conflict'))
       return
     }
+  }
+  // 客户端指纹保护与指纹收敛 / preserve_client 互斥：保存前就地拦截，避免提交后才收到 400。
+  if (codexPrivacyEligible.value && !validateCodexPrivacyBeforeSave()) {
+    appStore.showError(t('admin.accounts.openai.codexPrivacy.conflictToast'))
+    void codexPrivacyFieldRef.value?.revealConflict()
+    return
   }
 	if (autoResetCreditEnabled.value) {
 		const thresholds = [autoResetCredit5hThreshold.value, autoResetCredit7dThreshold.value]
@@ -6197,6 +6365,10 @@ const handleSubmit = async () => {
       const newCredentials: Record<string, unknown> = { ...currentCredentials }
       if (props.account.platform === 'openai') {
         applyOpenAIModelMappingCredentials(newCredentials)
+        // A BPS account keeps its Excel login client; editing never converts it.
+        if (isOpenAIBPS.value && !isSparkShadow.value) {
+          newCredentials.client_id = OPENAI_EXCEL_OAUTH_CLIENT_ID
+        }
       } else {
         const modelMapping = buildModelRestrictionMapping()
         if (modelMapping) {
@@ -6552,6 +6724,22 @@ const handleSubmit = async () => {
         } else {
           delete newExtra.codex_identity_mode
           delete newExtra.codex_identity_api_key_id
+        }
+      }
+
+      // 客户端指纹保护：开启写 randomized；已保存过该键时关闭显式写 off（后端在缺省时会保留旧值）；
+      // 从未设置且保持关闭则不落键。不支持的账号（shadow / Agent Identity）原样保留已有 extra。
+      if (codexPrivacyEligible.value) {
+        writeCodexPrivacyTo(newExtra)
+        // 仅当用户点击了修正：移除本页没有控件的冲突旧设置（setup-token / API Key）。
+        // 只删除，不为 API Key 写入任何 identity 字段。
+        if (codexPrivacyEnabled.value && codexPrivacyCleanupLegacy.value && !codexPrivacyHasConflictControls.value) {
+          if (effectiveCodexFingerprintMode(newExtra.codex_fingerprint_mode) !== 'off') {
+            delete newExtra.codex_fingerprint_mode
+          }
+          if (newExtra.codex_identity_mode === 'preserve_client') {
+            delete newExtra.codex_identity_mode
+          }
         }
       }
 

@@ -453,6 +453,77 @@
           </button>
 
         </div>
+
+        <!-- OpenAI OAuth login client: Codex CLI (default) or official Excel login for BPS -->
+        <div v-if="accountCategory === 'oauth-based'" class="mt-4" data-testid="openai-oauth-client">
+          <label id="openai-oauth-client-label" class="input-label">{{ t('admin.accounts.oauth.openai.bps.clientLabel') }}</label>
+          <div class="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2" role="radiogroup" aria-labelledby="openai-oauth-client-label">
+            <button
+              type="button"
+              role="radio"
+              data-testid="openai-oauth-client-codex"
+              :aria-checked="openaiOAuthClient === 'codex'"
+              @click="openaiOAuthClient = 'codex'"
+              :class="[
+                'flex items-center gap-3 rounded-lg border-2 p-3 text-left transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500',
+                openaiOAuthClient === 'codex'
+                  ? 'border-green-500 bg-green-50 dark:bg-green-900/20'
+                  : 'border-gray-200 hover:border-green-300 dark:border-dark-600 dark:hover:border-green-700'
+              ]"
+            >
+              <div
+                :class="[
+                  'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg',
+                  openaiOAuthClient === 'codex'
+                    ? 'bg-green-500 text-white'
+                    : 'bg-gray-100 text-gray-500 dark:bg-dark-600 dark:text-gray-400'
+                ]"
+              >
+                <Icon name="terminal" size="sm" />
+              </div>
+              <div class="min-w-0">
+                <span class="block text-sm font-medium text-gray-900 dark:text-white">{{ t('admin.accounts.oauth.openai.bps.codexTitle') }}</span>
+                <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.oauth.openai.bps.codexDesc') }}</span>
+              </div>
+            </button>
+
+            <button
+              type="button"
+              role="radio"
+              data-testid="openai-oauth-client-excel"
+              :aria-checked="openaiOAuthClient === 'excel'"
+              @click="openaiOAuthClient = 'excel'"
+              :class="[
+                'flex items-center gap-3 rounded-lg border-2 p-3 text-left transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500',
+                openaiOAuthClient === 'excel'
+                  ? 'border-emerald-600 bg-emerald-50 dark:bg-emerald-900/20'
+                  : 'border-gray-200 hover:border-emerald-300 dark:border-dark-600 dark:hover:border-emerald-700'
+              ]"
+            >
+              <div
+                :class="[
+                  'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg',
+                  openaiOAuthClient === 'excel'
+                    ? 'bg-emerald-600 text-white'
+                    : 'bg-gray-100 text-gray-500 dark:bg-dark-600 dark:text-gray-400'
+                ]"
+              >
+                <Icon name="grid" size="sm" />
+              </div>
+              <div class="min-w-0">
+                <span class="block text-sm font-medium text-gray-900 dark:text-white">{{ t('admin.accounts.oauth.openai.bps.bpsTitle') }}</span>
+                <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.oauth.openai.bps.bpsDesc') }}</span>
+              </div>
+            </button>
+          </div>
+          <p
+            v-if="isOpenAIBPSOAuth"
+            data-testid="openai-bps-scope-note"
+            class="mt-3 rounded-lg bg-emerald-50 px-3 py-2 text-xs leading-relaxed text-emerald-900 dark:bg-emerald-900/20 dark:text-emerald-200"
+          >
+            {{ t('admin.accounts.oauth.openai.bps.scopeNote') }}
+          </p>
+        </div>
       </div>
 
       <!-- Account Type Selection (Grok) -->
@@ -3302,9 +3373,9 @@
         </p>
       </div>
 
-      <!-- OpenAI 自动透传开关（OAuth/API Key） -->
+      <!-- OpenAI 自动透传开关（OAuth/API Key；BPS 不适用） -->
       <div
-        v-if="form.platform === 'openai'"
+        v-if="form.platform === 'openai' && !isOpenAIBPSOAuth"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="flex items-center justify-between">
@@ -3384,9 +3455,9 @@
         </div>
       </div>
 
-      <!-- OpenAI WS Mode 三态（off/ctx_pool/passthrough） -->
+      <!-- OpenAI WS Mode 三态（off/ctx_pool/passthrough）；BPS 只走 HTTP /responses，不显示 -->
       <div
-        v-if="form.platform === 'openai' && (accountCategory === 'oauth-based' || accountCategory === 'apikey')"
+        v-if="form.platform === 'openai' && (accountCategory === 'oauth-based' || accountCategory === 'apikey') && !isOpenAIBPSOAuth"
         data-testid="create-openai-ws-mode"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
@@ -3508,7 +3579,7 @@
       </div>
 
       <div
-        v-if="form.platform === 'openai' && accountCategory === 'oauth-based'"
+        v-if="form.platform === 'openai' && accountCategory === 'oauth-based' && !isOpenAIBPSOAuth"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="flex items-center justify-between">
@@ -3562,9 +3633,9 @@
         </div>
       </div>
 
-      <!-- Codex 指纹收敛模式（仅 OpenAI OAuth） -->
+      <!-- Codex 指纹收敛模式（仅 OpenAI Codex OAuth；BPS 不使用 Codex 身份） -->
       <div
-        v-if="form.platform === 'openai' && accountCategory === 'oauth-based'"
+        v-if="form.platform === 'openai' && accountCategory === 'oauth-based' && !isOpenAIBPSOAuth"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="flex items-center justify-between gap-4">
@@ -3580,9 +3651,22 @@
         </div>
       </div>
 
-      <!-- OpenAI Compact 能力配置 -->
+      <!-- 客户端指纹保护（OpenAI OAuth / API Key 新建） -->
+      <CodexPrivacyModeField
+        v-if="codexPrivacyEligible"
+        ref="codexPrivacyFieldRef"
+        :enabled="codexPrivacyEnabled"
+        :conflicts="codexPrivacyConflicts"
+        :fingerprint-label="codexPrivacyFingerprintLabel"
+        :blocked="codexPrivacySaveBlocked"
+        :server-error="codexPrivacyServerError"
+        @toggle="toggleCodexPrivacy"
+        @resolve="resolveCodexPrivacyConflicts"
+      />
+
+      <!-- OpenAI Compact 能力配置（原生 compact 不适用于 BPS） -->
       <div
-        v-if="form.platform === 'openai' && (accountCategory === 'oauth-based' || accountCategory === 'apikey')"
+        v-if="form.platform === 'openai' && (accountCategory === 'oauth-based' || accountCategory === 'apikey') && !isOpenAIBPSOAuth"
         class="border-t border-gray-200 pt-4 dark:border-dark-600 space-y-4"
       >
         <div class="flex items-center justify-between">
@@ -3812,12 +3896,13 @@
         :allow-multiple="form.platform === 'anthropic'"
         :show-cookie-option="form.platform === 'anthropic'"
         :show-refresh-token-option="form.platform === 'openai' || form.platform === 'antigravity' || form.platform === 'grok'"
-        :show-mobile-refresh-token-option="form.platform === 'openai'"
+        :show-mobile-refresh-token-option="form.platform === 'openai' && !isOpenAIBPSOAuth"
         :show-session-token-option="false"
         :show-access-token-option="false"
-        :show-codex-session-import-option="form.platform === 'openai'"
-        :show-agent-identity-option="form.platform === 'openai'"
-        :show-codex-pat-option="form.platform === 'openai'"
+        :show-codex-session-import-option="form.platform === 'openai' && !isOpenAIBPSOAuth"
+        :show-agent-identity-option="form.platform === 'openai' && !isOpenAIBPSOAuth"
+        :show-codex-pat-option="form.platform === 'openai' && !isOpenAIBPSOAuth"
+        :oauth-client="isOpenAIBPSOAuth ? 'excel' : 'codex'"
         :show-sso-option="form.platform === 'grok'"
         :show-email-password-option="false"
         :show-manual-option="true"
@@ -4165,12 +4250,21 @@ import {
 } from '@/composables/useModelWhitelist'
 import { adminAPI } from '@/api/admin'
 import { useQuotaNotifyState } from '@/composables/useQuotaNotifyState'
+import { useCodexPrivacyMode } from '@/composables/useCodexPrivacyMode'
+import { extractApiErrorMessage } from '@/utils/apiError'
+import CodexPrivacyModeField from './CodexPrivacyModeField.vue'
 import {
   useAccountOAuth,
   type AddMethod,
   type AuthInputMethod
 } from '@/composables/useAccountOAuth'
 import { useOpenAIOAuth } from '@/composables/useOpenAIOAuth'
+import {
+  OPENAI_EXCEL_OAUTH_CLIENT_ID,
+  openAIExcelCallbackErrorKey,
+  parseOpenAIExcelCallback,
+  type OpenAIOAuthClient
+} from '@/utils/openaiOAuthClient'
 import { useGeminiOAuth } from '@/composables/useGeminiOAuth'
 import { useAntigravityOAuth } from '@/composables/useAntigravityOAuth'
 import { useGrokOAuth } from '@/composables/useGrokOAuth'
@@ -4276,6 +4370,7 @@ const { t } = useI18n()
 const browserTimeZone = getBrowserTimeZone()
 
 const oauthStepTitle = computed(() => {
+  if (isOpenAIBPSOAuth.value) return t('admin.accounts.oauth.openai.bps.title')
   if (form.platform === 'openai') return t('admin.accounts.oauth.openai.title')
   if (form.platform === 'gemini') return t('admin.accounts.oauth.gemini.title')
   if (form.platform === 'antigravity') return t('admin.accounts.oauth.antigravity.title')
@@ -4445,6 +4540,12 @@ interface TempUnschedRuleForm {
 const step = ref(1)
 const submitting = ref(false)
 const accountCategory = ref<'oauth-based' | 'apikey' | 'bedrock' | 'service_account'>('oauth-based') // UI selection for account category
+// OpenAI OAuth login client. 'excel' = official Excel login for BPS; the account is still
+// an ordinary openai/oauth account and is identified as BPS by its saved client_id only.
+const openaiOAuthClient = ref<OpenAIOAuthClient>('codex')
+const isOpenAIBPSOAuth = computed(
+  () => form.platform === 'openai' && accountCategory.value === 'oauth-based' && openaiOAuthClient.value === 'excel'
+)
 const addMethod = ref<AddMethod>('oauth') // For oauth-based: 'oauth' or 'setup-token'
 const apiKeyBaseUrl = ref('https://api.anthropic.com')
 const apiKeyValue = ref('')
@@ -4776,6 +4877,46 @@ const codexFingerprintModeOptions = computed(() => [
   { value: 'session' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintSession') },
   { value: 'full' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintFull') },
 ])
+// 指纹收敛只对 OAuth 类账号有控件和语义；API Key 不写入隐藏的旧选择。
+// BPS（Excel 登录）不使用 Codex 身份：隐藏的收敛选择不落键。
+const effectiveCreateCodexFingerprintMode = computed<CodexFingerprintMode>(() =>
+  accountCategory.value === 'oauth-based' && !isOpenAIBPSOAuth.value ? codexFingerprintMode.value : 'off'
+)
+// 客户端指纹保护（extra.codex_privacy_mode）：OpenAI OAuth 与 API Key 新建均可选，缺省关闭。
+// 新建页没有 preserve_client 控件，冲突只可能来自指纹收敛。BPS 账号不提供（Codex 身份专用）。
+const codexPrivacyEligible = computed(() =>
+  form.platform === 'openai' &&
+  (accountCategory.value === 'oauth-based' || accountCategory.value === 'apikey') &&
+  !isOpenAIBPSOAuth.value
+)
+const codexPrivacyFieldRef = ref<InstanceType<typeof CodexPrivacyModeField> | null>(null)
+const {
+  enabled: codexPrivacyEnabled,
+  conflicts: codexPrivacyConflicts,
+  saveBlocked: codexPrivacySaveBlocked,
+  serverError: codexPrivacyServerError,
+  reset: resetCodexPrivacy,
+  toggle: toggleCodexPrivacy,
+  validateBeforeSave: validateCodexPrivacyBeforeSave,
+  writeTo: writeCodexPrivacyTo,
+  captureServerError: captureCodexPrivacyServerError,
+  clearServerError: clearCodexPrivacyServerError
+} = useCodexPrivacyMode(() => ({
+  fingerprintMode: effectiveCreateCodexFingerprintMode.value,
+  identityMode: 'isolated'
+}))
+const codexPrivacyFingerprintLabel = computed(() =>
+  codexFingerprintModeOptions.value.find(option => option.value === effectiveCreateCodexFingerprintMode.value)?.label ??
+  effectiveCreateCodexFingerprintMode.value
+)
+/** Explicit user action: set fingerprint convergence (the visible select above) to Off. */
+const resolveCodexPrivacyConflicts = () => {
+  codexFingerprintMode.value = 'off'
+  clearCodexPrivacyServerError()
+}
+/** Shows a CODEX_PRIVACY_* rejection next to the switch and returns the server's reason. */
+const reportCodexPrivacyError = (error: unknown): string | null =>
+  captureCodexPrivacyServerError(error, t('admin.accounts.failedToCreate'))
 type AnthropicAPIKeyAuthScheme = 'x_api_key' | 'authorization_bearer'
 const anthropicPassthroughEnabled = ref(false)
 const anthropicAPIKeyAuthScheme = ref<AnthropicAPIKeyAuthScheme>('x_api_key')
@@ -4915,8 +5056,9 @@ function buildAntigravityExtra(): Record<string, unknown> | undefined {
   return Object.keys(extra).length > 0 ? extra : undefined
 }
 
+// 原生 compact 不适用于 BPS 账号：隐藏的 compact 映射不写入。
 const buildOpenAICompactModelMapping = () =>
-  buildModelMappingObject('mapping', [], openAICompactModelMappings.value)
+  isOpenAIBPSOAuth.value ? null : buildModelMappingObject('mapping', [], openAICompactModelMappings.value)
 
 const showMixedChannelWarning = ref(false)
 const mixedChannelWarningDetails = ref<{ groupName: string; currentPlatform: string; otherPlatform: string } | null>(
@@ -4999,8 +5141,17 @@ const openAIWSModeHintKey = computed(() =>
   resolveOpenAIWSModeHintKey(openaiResponsesWebSocketV2Mode.value)
 )
 
+// BPS（Excel 登录）不支持原生透传：隐藏开关，按关闭处理，模型白名单/映射保持可用。
+const effectiveOpenAIPassthroughEnabled = computed(() =>
+  openaiPassthroughEnabled.value && !isOpenAIBPSOAuth.value
+)
+// Codex CLI-only 是 Codex 客户端限制，BPS 账号不提供。
+const effectiveCodexCLIOnlyEnabled = computed(() =>
+  codexCLIOnlyEnabled.value && !isOpenAIBPSOAuth.value
+)
+
 const isOpenAIModelRestrictionDisabled = computed(() =>
-  form.platform === 'openai' && openaiPassthroughEnabled.value
+  form.platform === 'openai' && effectiveOpenAIPassthroughEnabled.value
 )
 
 const openaiOpaqueUpstreamCandidate = computed(() =>
@@ -5123,6 +5274,10 @@ const expiresAtInput = computed({
 const canExchangeCode = computed(() => {
   const authCode = oauthFlowRef.value?.authCode || ''
   if (form.platform === 'openai') {
+    // BPS: only a full official callback whose state matches this session can be exchanged.
+    if (isOpenAIBPSOAuth.value && !parseOpenAIExcelCallback(authCode, openaiOAuth.oauthState.value).ok) {
+      return false
+    }
     return authCode.trim() && openaiOAuth.sessionId.value && !openaiOAuth.loading.value
   }
   if (form.platform === 'gemini') {
@@ -5191,10 +5346,19 @@ watch(
   { immediate: true }
 )
 
+// OpenAI login client: a session generated for one client is never reused for the other.
+watch(openaiOAuthClient, () => {
+  openaiOAuth.resetState()
+})
+watch(accountCategory, (category) => {
+  if (category !== 'oauth-based') openaiOAuthClient.value = 'codex'
+})
+
 // Reset platform-specific settings when platform changes
 watch(
   () => form.platform,
   (newPlatform) => {
+    openaiOAuthClient.value = 'codex'
     // Reset base URL based on platform
     if (isMultiProtocolApiKeyPlatform(newPlatform)) {
       const mode = newPlatform === 'opencode_go' ? openCodeAccountMode.value : accountMode.value
@@ -5616,6 +5780,7 @@ const ensureAntigravityMixedChannelConfirmed = async (onConfirm: () => Promise<v
 
 const submitCreateAccount = async (payload: CreateAccountRequest) => {
   submitting.value = true
+  clearCodexPrivacyServerError()
   try {
     const account = await adminAPI.accounts.create(withAntigravityConfirmFlag(payload))
     const modelMapping = payload.credentials.model_mapping
@@ -5662,7 +5827,16 @@ const submitCreateAccount = async (payload: CreateAccountRequest) => {
       })
       return
     }
-    appStore.showError(error.response?.data?.message || error.response?.data?.detail || t('admin.accounts.failedToCreate'))
+    const privacyReason = reportCodexPrivacyError(error)
+    if (privacyReason) {
+      void codexPrivacyFieldRef.value?.revealConflict()
+    }
+    appStore.showError(
+      privacyReason ||
+      error.response?.data?.message ||
+      error.response?.data?.detail ||
+      extractApiErrorMessage(error, t('admin.accounts.failedToCreate'))
+    )
   } finally {
     submitting.value = false
   }
@@ -5684,6 +5858,7 @@ const resetForm = () => {
   form.group_ids = []
   form.expires_at = null
   accountCategory.value = 'oauth-based'
+  openaiOAuthClient.value = 'codex'
   addMethod.value = 'oauth'
   accountMode.value = 'payg'
   openCodeAccountMode.value = 'zen'
@@ -5742,6 +5917,7 @@ const resetForm = () => {
   codexCLIOnlyEnabled.value = false
   codexCLIOnlyAppServerEnabled.value = false
   codexFingerprintMode.value = 'off'
+  resetCodexPrivacy()
   anthropicPassthroughEnabled.value = false
   anthropicAPIKeyAuthScheme.value = 'x_api_key'
   webSearchEmulationMode.value = 'default'
@@ -5805,8 +5981,10 @@ const buildOpenAIExtra = (base?: Record<string, unknown>): Record<string, unknow
 
   const extra: Record<string, unknown> = { ...(base || {}) }
   if (accountCategory.value === 'oauth-based') {
-    extra.openai_oauth_responses_websockets_v2_mode = openaiOAuthResponsesWebSocketV2Mode.value
-    extra.openai_oauth_responses_websockets_v2_enabled = isOpenAIWSModeEnabled(openaiOAuthResponsesWebSocketV2Mode.value)
+    // BPS 只支持 HTTP /responses：WebSocket 控件隐藏，固定写 off。
+    const oauthWSMode = isOpenAIBPSOAuth.value ? OPENAI_WS_MODE_OFF : openaiOAuthResponsesWebSocketV2Mode.value
+    extra.openai_oauth_responses_websockets_v2_mode = oauthWSMode
+    extra.openai_oauth_responses_websockets_v2_enabled = isOpenAIWSModeEnabled(oauthWSMode)
   } else if (accountCategory.value === 'apikey') {
     extra.openai_apikey_responses_websockets_v2_mode = openaiAPIKeyResponsesWebSocketV2Mode.value
     extra.openai_apikey_responses_websockets_v2_enabled = isOpenAIWSModeEnabled(openaiAPIKeyResponsesWebSocketV2Mode.value)
@@ -5814,7 +5992,7 @@ const buildOpenAIExtra = (base?: Record<string, unknown>): Record<string, unknow
   // 清理兼容旧键，统一改用分类型开关。
   delete extra.responses_websockets_v2_enabled
   delete extra.openai_ws_enabled
-  if (openaiPassthroughEnabled.value) {
+  if (effectiveOpenAIPassthroughEnabled.value) {
     extra.openai_passthrough = true
   } else {
     delete extra.openai_passthrough
@@ -5833,7 +6011,7 @@ const buildOpenAIExtra = (base?: Record<string, unknown>): Record<string, unknow
   }
   extra.openai_long_context_billing_enabled = openAILongContextBillingEnabled.value
 
-  if (accountCategory.value === 'oauth-based' && codexCLIOnlyEnabled.value) {
+  if (accountCategory.value === 'oauth-based' && effectiveCodexCLIOnlyEnabled.value) {
     extra.codex_cli_only = true
   } else {
     delete extra.codex_cli_only
@@ -5841,7 +6019,7 @@ const buildOpenAIExtra = (base?: Record<string, unknown>): Record<string, unknow
   delete extra.codex_cli_only_allowed_clients
   if (
     accountCategory.value === 'oauth-based' &&
-    codexCLIOnlyEnabled.value &&
+    effectiveCodexCLIOnlyEnabled.value &&
     codexCLIOnlyAppServerEnabled.value
   ) {
     extra.codex_cli_only_allow_app_server = true
@@ -5850,12 +6028,18 @@ const buildOpenAIExtra = (base?: Record<string, unknown>): Record<string, unknow
   }
   // 收敛是显式 opt-in：off 即默认值，不落键；device/session/full 必须显式写入，
   // 否则管理员的选择会被当成默认而丢失（#5610）。
-  if (codexFingerprintMode.value !== 'off') {
-    extra.codex_fingerprint_mode = codexFingerprintMode.value
+  if (effectiveCreateCodexFingerprintMode.value !== 'off') {
+    extra.codex_fingerprint_mode = effectiveCreateCodexFingerprintMode.value
   } else {
     delete extra.codex_fingerprint_mode
   }
-  if (openAICompactMode.value !== 'auto') {
+  // 客户端指纹保护：开启写 randomized；缺省关闭不落键。所有 OpenAI 新建路径都经过这里。
+  if (codexPrivacyEligible.value) {
+    writeCodexPrivacyTo(extra)
+  } else {
+    delete extra.codex_privacy_mode
+  }
+  if (openAICompactMode.value !== 'auto' && !isOpenAIBPSOAuth.value) {
     extra.openai_compact_mode = openAICompactMode.value
   } else {
     delete extra.openai_compact_mode
@@ -6009,6 +6193,12 @@ const handleVertexServiceAccountDrop = async (event: DragEvent) => {
 const handleSubmit = async () => {
   if (rpmLimitInvalid.value) {
     appStore.showError(t('admin.accounts.rpmLimitInvalid', { max: RPM_LIMIT_MAX }))
+    return
+  }
+  // 客户端指纹保护与指纹收敛互斥：在进入授权步骤或提交前就地拦截，避免创建时才收到 400。
+  if (codexPrivacyEligible.value && !validateCodexPrivacyBeforeSave()) {
+    appStore.showError(t('admin.accounts.openai.codexPrivacy.conflictToast'))
+    void codexPrivacyFieldRef.value?.revealConflict()
     return
   }
   // For OAuth-based type, handle OAuth flow (goes to step 2)
@@ -6311,7 +6501,11 @@ const goBackToBasicInfo = () => {
 
 const handleGenerateUrl = async () => {
   if (form.platform === 'openai') {
-    await openaiOAuth.generateAuthUrl(form.proxy_id)
+    if (isOpenAIBPSOAuth.value) {
+      await openaiOAuth.generateAuthUrl(form.proxy_id, undefined, 'excel')
+    } else {
+      await openaiOAuth.generateAuthUrl(form.proxy_id)
+    }
   } else if (form.platform === 'gemini') {
     await geminiOAuth.generateAuthUrl(
       form.proxy_id,
@@ -6710,9 +6904,22 @@ const handleOpenAIExchange = async (authCode: string) => {
 
   oauthClient.loading.value = true
   oauthClient.error.value = ''
+  clearCodexPrivacyServerError()
 
   try {
-    const stateToUse = (oauthFlowRef.value?.oauthState || oauthClient.oauthState.value || '').trim()
+    let codeToUse = authCode.trim()
+    let stateToUse = (oauthFlowRef.value?.oauthState || oauthClient.oauthState.value || '').trim()
+    if (isOpenAIBPSOAuth.value) {
+      // BPS: never exchange a callback that is not the official one for this session.
+      const callback = parseOpenAIExcelCallback(authCode, oauthClient.oauthState.value)
+      if (!callback.ok) {
+        oauthClient.error.value = t(openAIExcelCallbackErrorKey(callback.error), { error: callback.detail || '' })
+        appStore.showError(oauthClient.error.value)
+        return
+      }
+      codeToUse = callback.code
+      stateToUse = callback.state
+    }
     if (!stateToUse) {
       oauthClient.error.value = t('admin.accounts.oauth.authFailed')
       appStore.showError(oauthClient.error.value)
@@ -6720,13 +6927,14 @@ const handleOpenAIExchange = async (authCode: string) => {
     }
 
     const tokenInfo = await oauthClient.exchangeAuthCode(
-      authCode.trim(),
+      codeToUse,
       oauthClient.sessionId.value,
       stateToUse,
       form.proxy_id
     )
     if (!tokenInfo) return
 
+    // Excel credentials keep the Excel client_id returned with the token pair.
     const credentials = oauthClient.buildCredentials(tokenInfo)
     const oauthExtra = oauthClient.buildExtraInfo(tokenInfo) as Record<string, unknown> | undefined
     const extra = buildOpenAIExtra(oauthExtra)
@@ -6774,7 +6982,8 @@ const handleOpenAIExchange = async (authCode: string) => {
     emit('created')
     handleClose()
   } catch (error: any) {
-    oauthClient.error.value = error.response?.data?.detail || t('admin.accounts.oauth.authFailed')
+    oauthClient.error.value =
+      reportCodexPrivacyError(error) || error.response?.data?.detail || t('admin.accounts.oauth.authFailed')
     appStore.showError(oauthClient.error.value)
   } finally {
     oauthClient.loading.value = false
@@ -6839,6 +7048,8 @@ const isAgentIdentityImportContent = (content: string) => {
 }
 
 const handleOpenAIImportCodexSession = async (content: string) => {
+  // Codex-only import; never reachable from the BPS (Excel) entry.
+  if (isOpenAIBPSOAuth.value) return
   const oauthClient = openaiOAuth
   const trimmed = content.trim()
   if (!trimmed) {
@@ -6849,6 +7060,14 @@ const handleOpenAIImportCodexSession = async (content: string) => {
     oauthClient.error.value = t('admin.accounts.oauth.openai.agentIdentityInvalid')
     return
   }
+  // 后端不支持 Agent Identity 开启客户端指纹保护：明确告知，不悄悄丢弃用户的选择。
+  if (
+    codexPrivacyEnabled.value &&
+    (oauthFlowRef.value?.inputMethod === 'agent_identity' || isAgentIdentityImportContent(trimmed))
+  ) {
+    oauthClient.error.value = t('admin.accounts.openai.codexPrivacy.agentIdentityUnsupported')
+    return
+  }
 
   const credentialExtras = buildOpenAICodexImportCredentialExtras()
   if (credentialExtras === null) {
@@ -6857,6 +7076,7 @@ const handleOpenAIImportCodexSession = async (content: string) => {
 
   oauthClient.loading.value = true
   oauthClient.error.value = ''
+  clearCodexPrivacyServerError()
 
   try {
     const extra = buildOpenAICodexImportExtra()
@@ -6910,6 +7130,7 @@ const handleOpenAIImportCodexSession = async (content: string) => {
     appStore.showError(t('admin.accounts.oauth.openai.codexSessionImportFailed'))
   } catch (error: any) {
     oauthClient.error.value =
+      reportCodexPrivacyError(error) ||
       error.response?.data?.detail ||
       error.response?.data?.message ||
       error.message ||
@@ -6921,6 +7142,8 @@ const handleOpenAIImportCodexSession = async (content: string) => {
 }
 
 const handleOpenAIImportCodexPAT = async (accessToken: string) => {
+  // Codex-only import; never reachable from the BPS (Excel) entry.
+  if (isOpenAIBPSOAuth.value) return
   const oauthClient = openaiOAuth
   const trimmed = accessToken.trim()
   if (!trimmed) {
@@ -6935,6 +7158,7 @@ const handleOpenAIImportCodexPAT = async (accessToken: string) => {
 
   oauthClient.loading.value = true
   oauthClient.error.value = ''
+  clearCodexPrivacyServerError()
 
   try {
     const extra = buildOpenAICodexImportExtra()
@@ -6959,6 +7183,7 @@ const handleOpenAIImportCodexPAT = async (accessToken: string) => {
     handleClose()
   } catch (error: any) {
     oauthClient.error.value =
+      reportCodexPrivacyError(error) ||
       error.response?.data?.detail ||
       error.response?.data?.message ||
       error.message ||
@@ -6991,6 +7216,7 @@ const handleOpenAIBatchRT = async (refreshTokenInput: string, clientId?: string)
   let failedCount = 0
   const errors: string[] = []
   const shouldCreateOpenAI = form.platform === 'openai'
+  clearCodexPrivacyServerError()
 
   try {
     for (let i = 0; i < refreshTokens.length; i++) {
@@ -7054,7 +7280,7 @@ const handleOpenAIBatchRT = async (refreshTokenInput: string, clientId?: string)
         successCount++
       } catch (error: any) {
         failedCount++
-        const errMsg = error.response?.data?.detail || error.message || 'Unknown error'
+        const errMsg = reportCodexPrivacyError(error) || error.response?.data?.detail || error.message || 'Unknown error'
         errors.push(`#${i + 1}: ${errMsg}`)
       }
     }
@@ -7083,11 +7309,15 @@ const handleOpenAIBatchRT = async (refreshTokenInput: string, clientId?: string)
   }
 }
 
-// 手动输入 RT（Codex CLI client_id，默认）
-const handleOpenAIValidateRT = (rt: string) => handleOpenAIBatchRT(rt)
+// 手动输入 RT（Codex CLI client_id，默认；BPS 入口使用 Excel client_id，两类 RT 不混用）
+const handleOpenAIValidateRT = (rt: string) =>
+  isOpenAIBPSOAuth.value ? handleOpenAIBatchRT(rt, OPENAI_EXCEL_OAUTH_CLIENT_ID) : handleOpenAIBatchRT(rt)
 
-// 手动输入 Mobile RT
-const handleOpenAIValidateMobileRT = (rt: string) => handleOpenAIBatchRT(rt, OPENAI_MOBILE_RT_CLIENT_ID)
+// 手动输入 Mobile RT（Codex 专用，BPS 入口不提供）
+const handleOpenAIValidateMobileRT = (rt: string) => {
+  if (isOpenAIBPSOAuth.value) return
+  return handleOpenAIBatchRT(rt, OPENAI_MOBILE_RT_CLIENT_ID)
+}
 
 // Antigravity 手动 RT 批量验证和创建
 const handleAntigravityValidateRT = async (refreshTokenInput: string) => {

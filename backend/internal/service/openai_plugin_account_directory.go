@@ -130,7 +130,7 @@ func (s *OpenAIGatewayService) ResolvePluginOutboundIdentity(ctx context.Context
 	if err != nil {
 		return nil, err
 	}
-	if account == nil || account.IsShadow() {
+	if account == nil || account.IsShadow() || account.IsExcelOAuth() {
 		return nil, nil
 	}
 	// Scope is the authoritative permission boundary: refuse any account the

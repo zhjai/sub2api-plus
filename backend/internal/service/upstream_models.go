@@ -287,6 +287,7 @@ func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, accou
 	// omit context windows in public registries. Keep them out of completeness checks
 	// so they do not mask successful agent-model capability sync.
 	capabilityIDs := capabilitySyncModelIDs(enrichIDs)
+	s.syncCodexCollaborationMetadata(ctx, account, catalog.Metadata, capabilityIDs)
 
 	source := "upstream"
 	if upstreamCatalogNeedsRegistry(capabilityIDs, catalog.Metadata) {
@@ -309,6 +310,22 @@ func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, accou
 	}
 
 	completeMetadata := completeUpstreamModelMetadataSubset(capabilityIDs, catalog.Metadata)
+	// Nullable protocol declarations are useful independently of display,
+	// context-window and reasoning metadata. Never lose an explicit restriction
+	// merely because generic registry enrichment was unavailable.
+	for _, id := range capabilityIDs {
+		entry := catalog.Metadata[id]
+		if len(entry.CodexToolCapabilities) == 0 {
+			continue
+		}
+		if _, complete := completeMetadata[id]; complete {
+			continue
+		}
+		if completeMetadata == nil {
+			completeMetadata = make(map[string]UpstreamModelMetadata)
+		}
+		completeMetadata[id] = UpstreamModelMetadata{ID: id, CodexToolCapabilities: entry.CodexToolCapabilities}
+	}
 	persistedCapabilities := false
 	if len(completeMetadata) > 0 && account != nil && account.ID > 0 && s.accountRepo != nil {
 		// Retain known metadata only for models still listed or explicitly mapped.
@@ -326,6 +343,7 @@ func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, accou
 					continue
 				}
 				if entry, ok := completeMetadata[modelID]; ok {
+					entry, _ = mergeUpstreamModelMetadata(entry, old)
 					if entry.CodexToolCapabilities == nil {
 						entry.CodexToolCapabilities = make(map[string]json.RawMessage)
 					}

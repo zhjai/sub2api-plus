@@ -43,6 +43,22 @@ type OpenAIAuthURLResult struct {
 
 // GenerateAuthURL generates an OpenAI OAuth authorization URL
 func (s *OpenAIOAuthService) GenerateAuthURL(ctx context.Context, proxyID *int64, redirectURI, platform string) (*OpenAIAuthURLResult, error) {
+	return s.GenerateAuthURLWithClient(ctx, proxyID, redirectURI, platform, "codex")
+}
+
+// GenerateAuthURLWithClient selects a registered OAuth profile, not an
+// arbitrary caller-provided OAuth client or redirect endpoint.
+func (s *OpenAIOAuthService) GenerateAuthURLWithClient(ctx context.Context, proxyID *int64, redirectURI, platform, profile string) (*OpenAIAuthURLResult, error) {
+	profile = strings.ToLower(strings.TrimSpace(profile))
+	if profile == "" {
+		profile = "codex"
+	}
+	if profile != "codex" && profile != "excel" {
+		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_INVALID_CLIENT", "unsupported OAuth client profile")
+	}
+	if profile == "excel" && redirectURI != "" && redirectURI != openai.ExcelRedirectURI {
+		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_INVALID_REDIRECT", "BPS OAuth requires the official Excel callback URI")
+	}
 	// Generate PKCE values
 	state, err := openai.GenerateState()
 	if err != nil {
@@ -80,6 +96,10 @@ func (s *OpenAIOAuthService) GenerateAuthURL(ctx context.Context, proxyID *int64
 	}
 	normalizedPlatform := normalizeOpenAIOAuthPlatform(platform)
 	clientID, _ := openai.OAuthClientConfigByPlatform(normalizedPlatform)
+	if profile == "excel" {
+		clientID = openai.ExcelClientID
+		redirectURI = openai.ExcelRedirectURI
+	}
 
 	// Store session
 	session := &openai.OAuthSession{
@@ -94,6 +114,9 @@ func (s *OpenAIOAuthService) GenerateAuthURL(ctx context.Context, proxyID *int64
 
 	// Build authorization URL
 	authURL := openai.BuildAuthorizationURLForPlatform(state, codeChallenge, redirectURI, normalizedPlatform)
+	if profile == "excel" {
+		authURL = openai.BuildExcelAuthorizationURL(state, codeChallenge)
+	}
 
 	return &OpenAIAuthURLResult{
 		AuthURL:   authURL,
@@ -158,17 +181,33 @@ func (s *OpenAIOAuthService) ExchangeCode(ctx context.Context, input *OpenAIExch
 	// Use redirect URI from session or input
 	redirectURI := session.RedirectURI
 	if input.RedirectURI != "" {
+		if session.ClientID == openai.ExcelClientID && input.RedirectURI != redirectURI {
+			return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_INVALID_REDIRECT", "BPS OAuth callback must match the authorization session")
+		}
 		redirectURI = input.RedirectURI
 	}
 	clientID := strings.TrimSpace(session.ClientID)
 	if clientID == "" {
 		clientID = openai.ClientID
 	}
+	if clientID == openai.ExcelClientID {
+		if _, ok := s.sessionStore.Take(input.SessionID); !ok {
+			return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_SESSION_NOT_FOUND", "OAuth session already consumed or expired; generate a new authorization URL")
+		}
+	}
 
 	// Exchange code for token
 	tokenResp, err := s.oauthClient.ExchangeCode(ctx, input.Code, session.CodeVerifier, redirectURI, proxyURL, clientID)
 	if err != nil {
 		return nil, err
+	}
+	if clientID == openai.ExcelClientID {
+		if err := validateExcelOAuthTokenResponse(tokenResp); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(tokenResp.RefreshToken) == "" {
+			return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_EXCEL_OAUTH_INVALID_GRANT", "BPS OAuth did not return a refresh token; authorize a complete Excel session")
+		}
 	}
 
 	// Parse ID token to get user info
@@ -218,6 +257,14 @@ func (s *OpenAIOAuthService) RefreshTokenWithClientID(ctx context.Context, refre
 	if err != nil {
 		return nil, err
 	}
+	if strings.TrimSpace(clientID) == openai.ExcelClientID {
+		if err := validateExcelOAuthTokenResponse(tokenResp); err != nil {
+			return nil, err
+		}
+		if tokenResp.RefreshToken == "" {
+			tokenResp.RefreshToken = refreshToken
+		}
+	}
 
 	// Parse ID token to get user info
 	var userInfo *openai.UserInfo
@@ -258,6 +305,10 @@ func (s *OpenAIOAuthService) RefreshTokenWithClientID(ctx context.Context, refre
 // 从 accounts/check 获取最新 plan_type、subscription_expires_at、email，
 // 然后尝试关闭训练数据共享。适用于所有获取/刷新 token 的路径。
 func (s *OpenAIOAuthService) enrichTokenInfo(ctx context.Context, tokenInfo *OpenAITokenInfo, proxyURL string) {
+	if tokenInfo.ClientID == openai.ExcelClientID {
+		populateExcelOAuthTokenInfo(tokenInfo)
+		return // Excel tokens never visit Codex-specific account/privacy endpoints.
+	}
 	if tokenInfo.AccessToken == "" || s.privacyClientFactory == nil {
 		return
 	}
@@ -386,7 +437,11 @@ func (s *OpenAIOAuthService) RefreshAccountToken(ctx context.Context, account *A
 	}
 
 	clientID := account.GetCredential("client_id")
-	return s.RefreshTokenWithClientID(ctx, refreshToken, proxyURL, clientID)
+	info, err := s.RefreshTokenWithClientID(ctx, refreshToken, proxyURL, clientID)
+	if err == nil && account.IsExcelOAuth() {
+		err = validateExcelOAuthAccount(account, info.AccessToken)
+	}
+	return info, err
 }
 
 // BuildAccountCredentials builds credentials map from token info

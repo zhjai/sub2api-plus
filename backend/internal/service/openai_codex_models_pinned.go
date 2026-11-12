@@ -39,6 +39,7 @@ func isPinnedCodexModelsAccountUsable(account *Account) bool {
 // mergeCodexModelsManifestBodies merges manifest bodies from the pinned
 // accounts: the first body's top-level envelope is the base, and the models
 // arrays are unioned by slug with first-seen (config-order) entries winning.
+// Nullable collaboration capabilities intersect across duplicate models.
 // Entries without a usable slug are kept once in order of appearance.
 func mergeCodexModelsManifestBodies(bodies [][]byte) ([]byte, error) {
 	if len(bodies) == 0 {
@@ -53,7 +54,7 @@ func mergeCodexModelsManifestBodies(bodies [][]byte) ([]byte, error) {
 	}
 
 	mergedModels := make([]json.RawMessage, 0, len(bodies)*8)
-	seenSlug := make(map[string]struct{})
+	seenSlug := make(map[string]int)
 	seenSlugLess := make(map[string]struct{})
 	for _, body := range bodies {
 		var envelope map[string]json.RawMessage
@@ -77,10 +78,15 @@ func mergeCodexModelsManifestBodies(bodies [][]byte) ([]byte, error) {
 				slug = strings.TrimSpace(model.Slug)
 			}
 			if slug != "" {
-				if _, exists := seenSlug[slug]; exists {
+				if index, exists := seenSlug[slug]; exists {
+					combined, err := intersectPinnedCodexCollaboration(mergedModels[index], raw)
+					if err != nil {
+						return nil, err
+					}
+					mergedModels[index] = combined
 					continue
 				}
-				seenSlug[slug] = struct{}{}
+				seenSlug[slug] = len(mergedModels)
 			} else {
 				fingerprint := string(bytes.TrimSpace(raw))
 				if _, exists := seenSlugLess[fingerprint]; exists {
@@ -124,17 +130,7 @@ func mergeCodexModelsManifestBodies(bodies [][]byte) ([]byte, error) {
 //     naming the failed account IDs is logged.
 func (s *OpenAIGatewayService) FetchPinnedCodexModelsManifest(ctx context.Context, group *Group, clientVersion string) (*OpenAIModelsResponse, *Account, error) {
 	results, err := s.fetchPinnedOpenAIModels(ctx, group, func(ctx context.Context, account *Account) (*OpenAIModelsResponse, error) {
-		manifest, err := s.FetchCodexModelsManifest(ctx, account, clientVersion, "")
-		if err != nil {
-			return nil, err
-		}
-		if err := s.CompleteAPIKeyCodexModelsManifestForClient(manifest, account); err != nil {
-			return nil, err
-		}
-		if err := ApplyPinnedCodexModelsMapping(manifest, account, group); err != nil {
-			return nil, err
-		}
-		return manifest, nil
+		return s.FetchGroupAccountCodexModelsManifest(ctx, account, group, clientVersion)
 	})
 	if err != nil {
 		return nil, nil, err
@@ -233,4 +229,31 @@ func (s *OpenAIGatewayService) fetchPinnedOpenAIModels(ctx context.Context, grou
 		slog.Warn("openai_models_pinned_partial_failure", "group_id", group.ID, "failed_account_ids", failedIDs)
 	}
 	return successes, nil
+}
+
+// Keep config-order display metadata, but never let the first provider grant
+// encrypted collaboration to a second provider that did not declare it.
+func intersectPinnedCodexCollaboration(first, second json.RawMessage) (json.RawMessage, error) {
+	var a, b map[string]json.RawMessage
+	if err := json.Unmarshal(first, &a); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(second, &b); err != nil {
+		return nil, err
+	}
+	changed := false
+	for _, field := range codexCollaborationCapabilityFields {
+		left, right := bytes.TrimSpace(a[field]), bytes.TrimSpace(b[field])
+		if len(left) == 0 && len(right) == 0 || bytes.Equal(left, right) {
+			continue
+		}
+		if !bytes.Equal(left, []byte("null")) {
+			a[field] = json.RawMessage("null")
+			changed = true
+		}
+	}
+	if !changed {
+		return first, nil
+	}
+	return json.Marshal(a)
 }

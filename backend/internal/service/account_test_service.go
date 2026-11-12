@@ -190,7 +190,12 @@ func (s *AccountTestService) ResolveOpenAIEvalTarget(ctx context.Context, accoun
 	if credential.Type != AccountTypeAPIKey && !credential.IsOpenAIOAuthLike() {
 		return nil, fmt.Errorf("unsupported OpenAI evaluation credential type %q", credential.Type)
 	}
-	models, err := s.openaiGatewayService.FetchOpenAIModelsList(ctx, account)
+	var models *OpenAIModelsResponse
+	if credential.IsExcelOAuth() {
+		models, err = buildExcelBPSModelsList(account, nil)
+	} else {
+		models, err = s.openaiGatewayService.FetchOpenAIModelsList(ctx, account)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("discover account models: %w", err)
 	}
@@ -510,6 +515,18 @@ func (s *AccountTestService) doOpenAIEvalUpstream(req *http.Request, proxyURL st
 		return openAIEvalBeforeSend(ctx)
 	}
 	req = req.WithContext(context.WithValue(req.Context(), accountRPMRetryAdmissionKey{}, policy))
+	if credential.IsExcelOAuth() {
+		if transport, ok := s.httpUpstream.(HTTPUpstreamSingleSend); !ok || !transport.SupportsSingleSend() {
+			_ = req.Body.Close()
+			return nil, &HTTPUpstreamSingleSendUnsupportedError{}
+		}
+		converted, bridge, convertErr := convertExcelBPSTestRequest(req, credential)
+		if convertErr != nil {
+			return nil, convertErr
+		}
+		resp, sendErr := accountRPMSendHTTP(s.httpUpstream, account, converted, proxyURL, nil)
+		return bridgeExcelBPSTestResponse(converted.Context(), resp, bridge), sendErr
+	}
 	if credential.IsOpenAIOAuthLike() && s.pluginManager != nil {
 		if err := s.checkOpenAIEvalAutomaticAccount(req.Context(), account); err != nil {
 			return nil, err
@@ -575,14 +592,25 @@ func (s *AccountTestService) FetchOpenAIAccountModels(ctx context.Context, accou
 	if s == nil || s.openaiGatewayService == nil {
 		return nil, errors.New("OpenAI model discovery service is unavailable")
 	}
-	response, err := s.openaiGatewayService.FetchOpenAIModelsList(ctx, account)
-	if err != nil {
-		return nil, err
-	}
 	// The shared discovery response is the raw upstream catalog. Project it
 	// through the account mapping before exposing it in the admin picker so
 	// configured aliases remain public names and unconfigured models stay out.
-	projectedBody, err := projectAccountModelsBody(response.Body, account, nil, false)
+	// A BPS local catalog is already public; projecting it again drops aliases.
+	var projectedBody []byte
+	var err error
+	if account.IsExcelOAuth() {
+		response, buildErr := buildExcelBPSModelsList(account, nil)
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		projectedBody = response.Body
+	} else {
+		response, fetchErr := s.openaiGatewayService.FetchOpenAIModelsList(ctx, account)
+		if fetchErr != nil {
+			return nil, fetchErr
+		}
+		projectedBody, err = projectAccountModelsBody(response.Body, account, nil, false)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("project OpenAI account models: %w", err)
 	}
@@ -608,7 +636,7 @@ func (s *AccountTestService) FetchOpenAIAccountModels(ctx context.Context, accou
 	// Codex discovery lists Responses drivers, not image_generation tool models.
 	// Add locally supported image choices only to the OAuth test picker; keep the
 	// shared upstream catalog and API-key discovery authoritative.
-	if account != nil && account.IsOpenAIOAuthLike() {
+	if account != nil && account.IsOpenAIOAuthLike() && !account.IsExcelOAuth() {
 		passthrough := account.IsOpenAIPassthroughEnabled()
 		seen := make(map[string]bool, len(payload.Data))
 		for _, model := range payload.Data {
@@ -1366,6 +1394,9 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		body = redactAgentIdentitySensitiveBodyForAccount(ctx, s.accountRepo, credentialAccount, body)
+		if credentialAccount.IsExcelOAuth() {
+			body = redactExcelBPSCredentialBody(body, credentialAccount, authToken)
+		}
 		if !agentIdentityTaskRecoveryWasTried(ctx) && credentialAccount.IsOpenAIAgentIdentity() && isAgentIdentityTaskInvalidHTTPResponse(resp.StatusCode, body) {
 			expectedTaskID := credentialAccount.GetCredential("task_id")
 			if err := ensureAgentIdentityTaskForAccount(ctx, s.accountRepo, s.agentIdentityWS, &s.agentIdentityTaskMu, credentialAccount, expectedTaskID); err != nil {

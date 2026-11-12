@@ -71,6 +71,12 @@ func TestCodexPrivacyFinalHTTPWire(t *testing.T) {
 		for _, passthrough := range []bool{false, true} {
 			t.Run(kind+"/"+map[bool]string{true: "passthrough", false: "native"}[passthrough], func(t *testing.T) {
 				a := privacyTestAccount(kind)
+				a.Credentials[credKeyHeaderOverrideEnabled] = true
+				a.Credentials[credKeyHeaderOverrides] = map[string]any{
+					"originator": "private-originator",
+					"version":    "private-version",
+					"user-agent": "private-agent",
+				}
 				body := privacyTestBody(t, "client-session")
 				c := identityPolicyContext(77, body)
 				c.Request.Header.Set("session-id", "client-session")
@@ -112,9 +118,64 @@ func TestCodexPrivacyFinalHTTPWire(t *testing.T) {
 				_ = replay.Close()
 				require.Equal(t, upstream.lastBody, replayBytes)
 				require.Equal(t, int64(len(replayBytes)), upstream.lastReq.ContentLength)
+				// Inspect serialized HTTP, since Header.Get hides noncanonical keys.
+				wireRequest := upstream.lastReq.Clone(upstream.lastReq.Context())
+				wireRequest.Body = io.NopCloser(bytes.NewReader(replayBytes))
+				var wire bytes.Buffer
+				require.NoError(t, wireRequest.Write(&wire))
+				for _, raw := range []string{"private-originator", "private-version", "private-agent"} {
+					require.NotContains(t, wire.String(), raw)
+				}
 				require.Contains(t, string(body), privacyTestUUID, "caller body snapshot remains raw")
 			})
 		}
+	}
+}
+
+func TestCodexPrivacyIdentityAliasesMatchMetadata(t *testing.T) {
+	p, err := newCodexPrivacyProjection(privacyTestAccount(AccountTypeAPIKey), 77)
+	require.NoError(t, err)
+	for _, raw := range []string{privacyTestUUID, "client-local-identity"} {
+		for _, name := range []string{"x-codex-session-id", "x-codex-thread-id", "x-codex-conversation-id", "x-codex-turn-id"} {
+			t.Run(name+"/"+raw, func(t *testing.T) {
+				h := http.Header{name: []string{raw}}
+				p.headers(h)
+				metadata := p.metadata(map[string]any{name: raw})
+				require.NotEqual(t, raw, h[name][0])
+				require.Equal(t, p.id(codexPrivacyIDKind(name), raw), h[name][0])
+				require.Equal(t, metadata[name], h[name][0], "header and body aliases share a mapping")
+			})
+		}
+	}
+}
+
+func TestCodexPrivacySessionUpdateFinalWrites(t *testing.T) {
+	for _, kind := range []string{AccountTypeOAuth, AccountTypeSetupToken, AccountTypeAPIKey} {
+		t.Run(kind, func(t *testing.T) {
+			a := privacyTestAccount(kind)
+			p, err := newCodexPrivacyProjection(a, 77)
+			require.NoError(t, err)
+			body := json.RawMessage(`{"type":"session.update","session":{"client_metadata":{"installation_id":"raw-device","cwd":"/private/cwd","session_id":"raw-session"},"session_id":"raw-session","x-codex-turn-metadata":"{\"thread_id\":\"raw-thread\",\"hostname\":\"private-host\"}","previous_response_id":"resp_opaque","input":[{"text":"/private/cwd raw-device"}],"tools":[{"name":"exec"}]}}`)
+			ctx := withCodexPrivacyWS(context.Background(), a, 77)
+			pooled, err := codexPrivacyWSValue(ctx, body)
+			require.NoError(t, err)
+			wire, err := json.Marshal(pooled)
+			require.NoError(t, err)
+			session := gjson.GetBytes(wire, "session")
+			require.Equal(t, p.id("device", "raw-device"), session.Get("client_metadata.installation_id").String())
+			require.Equal(t, p.id("session", "raw-session"), session.Get("session_id").String())
+			require.Equal(t, session.Get("session_id").String(), session.Get("client_metadata.session_id").String())
+			require.False(t, session.Get("client_metadata.cwd").Exists())
+			require.NotContains(t, session.Get(openAIWSTurnMetadataHeader).String(), "private-host")
+			require.NotContains(t, session.Get(openAIWSTurnMetadataHeader).String(), "raw-thread")
+			for _, field := range []string{"input", "tools", "previous_response_id"} {
+				require.Equal(t, gjson.GetBytes(body, "session."+field).Raw, session.Get(field).Raw, field)
+			}
+			capture := &privacyCaptureWS{}
+			conn := &codexPrivacyFrameConn{FrameConn: capture, projection: p}
+			require.NoError(t, conn.WriteFrame(ctx, coderws.MessageText, body))
+			require.JSONEq(t, string(wire), string(capture.wire[0]), "pooled and passthrough writers agree")
+		})
 	}
 }
 
@@ -290,6 +351,44 @@ func TestCodexPrivacyEditPreservesModeUntilExplicitlyDisabled(t *testing.T) {
 	require.Equal(t, a.Extra[codexFingerprintSeedExtraKey], updated[codexFingerprintSeedExtraKey])
 	disabled := prepareCodexFingerprintExtraForUpdate(a, map[string]any{CodexPrivacyModeKey: "off"})
 	require.Equal(t, "off", disabled[CodexPrivacyModeKey])
+}
+
+func TestCodexPrivacyTogglePreservesSeedAndContinuation(t *testing.T) {
+	for _, kind := range []string{AccountTypeOAuth, AccountTypeSetupToken, AccountTypeAPIKey} {
+		t.Run(kind, func(t *testing.T) {
+			a := privacyTestAccount(kind)
+			body := privacyTestBody(t, "switch-session")
+			project := func() (*http.Request, []byte) {
+				req, err := http.NewRequest(http.MethodPost, "https://example.test/responses", bytes.NewReader(body))
+				require.NoError(t, err)
+				req.Header.Set("Session-Id", "switch-session")
+				req.Header.Set(openAIWSTurnStateHeader, "server-ticket")
+				req = stampCodexPrivacySource(req, a, a, 77)
+				clean, err := applyCodexPrivacyBeforeSend(req, a)
+				require.NoError(t, err)
+				raw, err := io.ReadAll(clean.Body)
+				require.NoError(t, err)
+				_ = clean.Body.Close()
+				require.Equal(t, "server-ticket", clean.Header.Get(openAIWSTurnStateHeader))
+				require.Equal(t, "resp_continue", gjson.GetBytes(raw, "previous_response_id").String())
+				for _, field := range []string{"input", "instructions", "tools"} {
+					require.Equal(t, gjson.GetBytes(body, field).Raw, gjson.GetBytes(raw, field).Raw, field)
+				}
+				return clean, raw
+			}
+			first, firstBody := project()
+			a.Extra = prepareCodexFingerprintExtraForUpdate(a, map[string]any{CodexPrivacyModeKey: "off"})
+			disabled, disabledBody := project()
+
+			require.Equal(t, body, disabledBody)
+			require.Equal(t, "switch-session", disabled.Header.Get("Session-Id"))
+			a.Extra = prepareCodexFingerprintExtraForUpdate(a, map[string]any{CodexPrivacyModeKey: CodexPrivacyRandomized})
+			require.NoError(t, validateCodexPrivacyConfig(a))
+			reenabled, reenabledBody := project()
+			require.Equal(t, first.Header.Get("Session-Id"), reenabled.Header.Get("Session-Id"))
+			require.Equal(t, firstBody, reenabledBody)
+		})
+	}
 }
 
 func TestCodexPrivacyHTTPShadowUsesCredentialPolicyAndResetsBetweenAttempts(t *testing.T) {

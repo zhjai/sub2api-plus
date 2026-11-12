@@ -25,6 +25,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	beginUpstreamResponseModelObservation(c)
 	setOpenAIExecContract(c, body, false)
 	ClearActualOpenAIUpstreamEndpoint(c)
+	if account.IsExcelOAuth() {
+		return s.forwardExcelBPS(ctx, c, account, body, time.Now())
+	}
 	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
 		SetActualOpenAIUpstreamEndpoint(c, "/v1/chat/completions")
 	}

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"regexp"
 	"strings"
 
@@ -48,9 +49,18 @@ func validateCodexPrivacyConfig(a *Account) error {
 	return nil
 }
 
+type codexPrivacyIDValue struct {
+	kind  string
+	value string
+}
+
 type codexPrivacyProjection struct {
 	seed        string
 	principalID int64
+	// Only HTTP finalization uses these request-local sets. Stored context state
+	// is immutable; every repeated finalization gets its own writable copy.
+	knownIDs     map[codexPrivacyIDValue]struct{}
+	projectedIDs map[codexPrivacyIDValue]struct{}
 }
 
 func newCodexPrivacyProjection(a *Account, principalIDs ...int64) (*codexPrivacyProjection, error) {
@@ -75,13 +85,13 @@ func codexPrivacyIDKind(name string) string {
 	switch strings.ToLower(name) {
 	case "installation_id", "installation-id", "x-codex-installation-id", "device_id", "device-id", "x-device-id", "x-oai-device-id":
 		return "device"
-	case "session_id", "session-id", "x-session-id", "x-session-affinity", "x-opencode-session", "prompt_cache_key":
+	case "session_id", "session-id", "x-session-id", "x-codex-session-id", "x-session-affinity", "x-opencode-session", "prompt_cache_key":
 		return "session"
-	case "thread_id", "thread-id", "parent_thread_id", "parent-thread-id":
+	case "thread_id", "thread-id", "x-codex-thread-id", "parent_thread_id", "parent-thread-id":
 		return "thread"
-	case "conversation_id", "conversation-id", "x-conversation-id":
+	case "conversation_id", "conversation-id", "x-conversation-id", "x-codex-conversation-id":
 		return "session"
-	case "turn_id", "turn-id", "root_turn_id", "root-turn-id":
+	case "turn_id", "turn-id", "x-codex-turn-id", "root_turn_id", "root-turn-id":
 		return "turn"
 	case "context_window_id", "context-window-id":
 		return "context_window"
@@ -97,6 +107,9 @@ func (p *codexPrivacyProjection) id(kind, raw string) string {
 	if raw == "" {
 		return ""
 	}
+	if _, known := p.knownIDs[codexPrivacyIDValue{kind, raw}]; known {
+		return raw
+	}
 	if kind == "device" {
 		raw = "account-device" // never reuse an imported real device_id
 	}
@@ -105,7 +118,11 @@ func (p *codexPrivacyProjection) id(kind, raw string) string {
 		_, _ = fmt.Fprintf(mac, "principal:%d\x00", p.principalID)
 	}
 	_, _ = mac.Write([]byte("codex-protocol-privacy:v1\x00" + kind + "\x00" + raw))
-	return deriveStableUUIDv4(hex.EncodeToString(mac.Sum(nil)))
+	projected := deriveStableUUIDv4(hex.EncodeToString(mac.Sum(nil)))
+	if p.projectedIDs != nil {
+		p.projectedIDs[codexPrivacyIDValue{kind, projected}] = struct{}{}
+	}
+	return projected
 }
 
 // Only protocol fields are accepted here. Free-form client environment objects
@@ -201,6 +218,11 @@ func (p *codexPrivacyProjection) headers(h http.Header) {
 	}
 	// Fixed generic public client identity, independent of the local OS, custom
 	// UA, original locale and administrator header overrides.
+	// Overrides may retain raw wire casing. Header.Set alone leaves those map
+	// entries intact and would serialize conflicting identities on the wire.
+	for _, name := range []string{"User-Agent", "Originator", "Version"} {
+		deleteOpenAIHeaderEqualFold(h, name)
+	}
 	h.Set("User-Agent", buildCodexCLIUserAgent(CodexCanonicalClientVersion()))
 	h.Set("Originator", "codex_cli_rs")
 	h.Set("Version", CodexCanonicalClientVersion())
@@ -228,6 +250,9 @@ func codexPrivacyPrivateHeader(name string) bool {
 		}
 	}
 	switch name {
+	case "x-client-platform", "x-client-architecture", "x-client-cwd", "x-client-working-directory",
+		"x-codex-workdir", "x-codex-working-directory", "x-opencode-cwd", "x-opencode-hostname", "x-opencode-os", "x-opencode-arch":
+		return true
 	case "forwarded", "via", "x-real-ip", "traceparent", "tracestate", "baggage", "sentry-trace", "referer", "x-codex-environment", "x-codex-home", "x-codex-platform", "x-codex-architecture":
 		return true
 	}
@@ -250,8 +275,8 @@ func (p *codexPrivacyProjection) body(body []byte) ([]byte, error) {
 		return nil, fmt.Errorf("Codex metadata privacy requires a JSON object")
 	}
 	// Rewrite only small protocol subobjects, never decode or walk input/tools.
-	for _, prefix := range []string{"", "response."} {
-		if prefix != "" && !gjson.GetBytes(body, "response").IsObject() {
+	for _, prefix := range []string{"", "response.", "session."} {
+		if prefix != "" && !gjson.GetBytes(body, strings.TrimSuffix(prefix, ".")).IsObject() {
 			continue
 		}
 		for _, name := range []string{"client_metadata", openAIWSTurnMetadataHeader} {
@@ -302,6 +327,10 @@ func codexPrivacyPrincipal(ctx context.Context) int64 {
 }
 
 type codexPrivacyAppliedKey struct{}
+type codexPrivacyAppliedState struct {
+	marker       string
+	projectedIDs map[codexPrivacyIDValue]struct{}
+}
 type codexPrivacyWSKey struct{}
 type codexPrivacyHTTPSourceKey struct{}
 type codexPrivacyHTTPSource struct {
@@ -332,9 +361,17 @@ func applyCodexPrivacyBeforeSend(req *http.Request, a *Account) (*http.Request, 
 		return req, err
 	}
 	marker := fmt.Sprintf("%s:%d", p.seed, p.principalID)
-	if applied, _ := req.Context().Value(codexPrivacyAppliedKey{}).(string); applied == marker {
-		return req, nil
+	applied, _ := req.Context().Value(codexPrivacyAppliedKey{}).(*codexPrivacyAppliedState)
+	p.projectedIDs = make(map[codexPrivacyIDValue]struct{})
+	if applied != nil && applied.marker == marker {
+		p.knownIDs = applied.projectedIDs
+		for value := range applied.projectedIDs {
+			p.projectedIDs[value] = struct{}{}
+		}
 	}
+	// Recheck even a previously projected request: a later component may have
+	// appended protocol metadata. Known outputs are accepted only for this request
+	// and identity kind, never trusted from arbitrary client UUIDs or global state.
 	var raw []byte
 	if req.Body != nil && req.Body != http.NoBody {
 		if req.GetBody == nil {
@@ -354,8 +391,13 @@ func applyCodexPrivacyBeforeSend(req *http.Request, a *Account) (*http.Request, 
 	if err != nil {
 		return nil, err
 	}
-	next := req.Clone(context.WithValue(req.Context(), codexPrivacyAppliedKey{}, marker))
+	next := req.Clone(context.WithValue(req.Context(), codexPrivacyAppliedKey{}, &codexPrivacyAppliedState{
+		marker: marker, projectedIDs: p.projectedIDs,
+	}))
 	p.headers(next.Header)
+	if applied != nil && applied.marker == marker && bytes.Equal(raw, clean) && reflect.DeepEqual(req.Header, next.Header) {
+		return req, nil
+	}
 	if req.Body != nil {
 		_ = req.Body.Close()
 		next.Body = io.NopCloser(bytes.NewReader(clean))
@@ -396,7 +438,10 @@ type codexPrivacyFrameConn struct {
 }
 
 func (c *codexPrivacyFrameConn) WriteFrame(ctx context.Context, kind coderws.MessageType, raw []byte) error {
-	if kind != coderws.MessageText || (gjson.ValidBytes(raw) && !gjson.ParseBytes(raw).IsObject()) {
+	if kind != coderws.MessageText && (kind != coderws.MessageBinary || !gjson.ValidBytes(raw) || !gjson.ParseBytes(raw).IsObject()) {
+		return c.FrameConn.WriteFrame(ctx, kind, raw)
+	}
+	if gjson.ValidBytes(raw) && !gjson.ParseBytes(raw).IsObject() {
 		return c.FrameConn.WriteFrame(ctx, kind, raw)
 	}
 	clean, err := c.projection.body(raw)

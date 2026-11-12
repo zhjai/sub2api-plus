@@ -46,11 +46,11 @@ func (s *openaiOAuthService) ExchangeCode(ctx context.Context, code, codeVerifie
 
 	var tokenResp openai.TokenResponse
 
-	resp, err := newOpenAICodexAuthRequest(client).
+	resp, err := openAIOAuthRequest(client, clientID).
 		SetContext(ctx).
 		SetFormDataFromValues(formData).
 		SetSuccessResult(&tokenResp).
-		Post(s.tokenURL)
+		Post(s.tokenURLForClient(clientID))
 
 	if err != nil {
 		if shouldReturnOpenAINoProxyHint(ctx, proxyURL, err) {
@@ -60,7 +60,11 @@ func (s *openaiOAuthService) ExchangeCode(ctx context.Context, code, codeVerifie
 	}
 
 	if !resp.IsSuccessState() {
-		return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_OAUTH_TOKEN_EXCHANGE_FAILED", "token exchange failed: status %d, body: %s", resp.StatusCode, resp.String())
+		body := resp.String()
+		if clientID == openai.ExcelClientID {
+			body = redactExcelOAuthError(body, code, codeVerifier)
+		}
+		return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_OAUTH_TOKEN_EXCHANGE_FAILED", "token exchange failed: status %d, body: %s", resp.StatusCode, body)
 	}
 
 	return &tokenResp, nil
@@ -89,15 +93,17 @@ func (s *openaiOAuthService) refreshTokenWithClientID(ctx context.Context, refre
 	formData.Set("grant_type", "refresh_token")
 	formData.Set("refresh_token", refreshToken)
 	formData.Set("client_id", clientID)
-	formData.Set("scope", openai.RefreshScopes)
+	if clientID != openai.ExcelClientID {
+		formData.Set("scope", openai.RefreshScopes)
+	}
 
 	var tokenResp openai.TokenResponse
 
-	resp, err := newOpenAICodexAuthRequest(client).
+	resp, err := openAIOAuthRequest(client, clientID).
 		SetContext(ctx).
 		SetFormDataFromValues(formData).
 		SetSuccessResult(&tokenResp).
-		Post(s.tokenURL)
+		Post(s.tokenURLForClient(clientID))
 
 	if err != nil {
 		if shouldReturnOpenAINoProxyHint(ctx, proxyURL, err) {
@@ -107,7 +113,11 @@ func (s *openaiOAuthService) refreshTokenWithClientID(ctx context.Context, refre
 	}
 
 	if !resp.IsSuccessState() {
-		return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_OAUTH_TOKEN_REFRESH_FAILED", "token refresh failed: status %d, body: %s", resp.StatusCode, resp.String())
+		body := resp.String()
+		if clientID == openai.ExcelClientID {
+			body = redactExcelOAuthError(body, refreshToken)
+		}
+		return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_OAUTH_TOKEN_REFRESH_FAILED", "token refresh failed: status %d, body: %s", resp.StatusCode, body)
 	}
 
 	return &tokenResp, nil
@@ -121,6 +131,36 @@ func newOpenAICodexAuthRequest(client *req.Client) *req.Request {
 		request.SetHeader(name, strings.Join(values, ", "))
 	}
 	return request
+}
+
+func (s *openaiOAuthService) tokenURLForClient(clientID string) string {
+	if clientID != openai.ExcelClientID {
+		return s.tokenURL
+	}
+	u, err := url.Parse(s.tokenURL)
+	if err != nil {
+		return s.tokenURL
+	}
+	q := u.Query()
+	q.Set("unified", "true")
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+func openAIOAuthRequest(client *req.Client, clientID string) *req.Request {
+	if clientID == openai.ExcelClientID {
+		return client.R().SetHeader("Accept-Language", "en-US,en;q=0.9")
+	}
+	return newOpenAICodexAuthRequest(client)
+}
+
+func redactExcelOAuthError(body string, secrets ...string) string {
+	for _, secret := range secrets {
+		if secret != "" {
+			body = strings.ReplaceAll(body, secret, "[REDACTED]")
+		}
+	}
+	return body
 }
 
 func createOpenAIReqClient(proxyURL string) (*req.Client, error) {

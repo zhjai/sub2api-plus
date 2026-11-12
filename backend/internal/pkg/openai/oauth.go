@@ -22,6 +22,12 @@ const (
 	AuthorizeURL = "https://auth.openai.com/oauth/authorize"
 	TokenURL     = "https://auth.openai.com/oauth/token"
 
+	// Excel's registered OAuth grant is distinct from the Codex grant. Never
+	// change a Codex refresh token's client_id to manufacture an Excel grant.
+	ExcelClientID     = "app_fnr0pYvVwwFDocDumLG3H2Bp"
+	ExcelAuthorizeURL = "https://auth.openai.com/api/accounts/authorize"
+	ExcelRedirectURI  = "https://bps.openai.com/basispoints/extension/360590d7-f8f9-4d88-bf75-0edfe0a4b9f3/auth/callback"
+
 	// Default redirect URI (can be customized)
 	DefaultRedirectURI = "http://localhost:1455/auth/callback"
 
@@ -95,6 +101,33 @@ func (s *SessionStore) Delete(sessionID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.sessions, sessionID)
+}
+
+// Take atomically consumes a session, preventing concurrent code exchanges.
+// Callers must validate the state before consuming it.
+func (s *SessionStore) Take(sessionID string) (*OAuthSession, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, ok := s.sessions[sessionID]
+	if !ok {
+		return nil, false
+	}
+	delete(s.sessions, sessionID)
+	if time.Since(session.CreatedAt) > SessionTTL {
+		return nil, false
+	}
+	return session, true
+}
+
+// BuildExcelAuthorizationURL uses the official add-in's browser PKCE flow.
+func BuildExcelAuthorizationURL(state, codeChallenge string) string {
+	params := url.Values{
+		"client_id": {ExcelClientID}, "response_type": {"code"},
+		"redirect_uri": {ExcelRedirectURI}, "scope": {"openid offline_access email profile organization.read"},
+		"state": {state}, "code_challenge_method": {"S256"}, "code_challenge": {codeChallenge},
+		"audience": {"https://api.openai.com/v1"}, "platform": {"PC"},
+	}
+	return ExcelAuthorizeURL + "?" + params.Encode()
 }
 
 // Stop stops the cleanup goroutine

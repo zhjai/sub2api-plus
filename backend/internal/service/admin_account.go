@@ -485,6 +485,11 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 }
 
 func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccountInput) (*Account, error) {
+	if a := (&Account{Platform: input.Platform, Type: input.Type, Credentials: input.Credentials}); a.IsExcelOAuth() {
+		if err := validateExcelOAuthAccount(a, a.GetOpenAIAccessToken()); err != nil {
+			return nil, err
+		}
+	}
 	if input.Platform == PlatformPrism {
 		return nil, infraerrors.BadRequest("CHANNEL_REMOVED", "Prism channel has been removed")
 	}
@@ -600,6 +605,30 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		return nil, err
 	}
 	previousCodexIdentity := *account
+	if account.IsExcelOAuth() && input.Type != "" && input.Type != AccountTypeOAuth {
+		return nil, infraerrors.BadRequest("OPENAI_EXCEL_OAUTH_INVALID_GRANT", "BPS login profile cannot be changed; create a separate account for another login client")
+	}
+	if len(input.Credentials) > 0 {
+		candidate := *account
+		candidate.Credentials = MergePreservingSensitiveCreds(account.Credentials, input.Credentials)
+		if account.IsExcelOAuth() {
+			if _, supplied := input.Credentials["client_id"]; !supplied {
+				candidate.Credentials["client_id"] = account.GetCredential("client_id")
+			}
+		}
+		if input.Type != "" {
+			candidate.Type = input.Type
+		}
+		if account.IsExcelOAuth() && !candidate.IsExcelOAuth() {
+			return nil, infraerrors.BadRequest("OPENAI_EXCEL_OAUTH_INVALID_GRANT", "BPS login profile cannot be changed; create a separate account for another login client")
+		}
+		if candidate.IsExcelOAuth() {
+			if err := validateExcelOAuthAccount(&candidate, candidate.GetOpenAIAccessToken()); err != nil {
+				return nil, err
+			}
+			input.Credentials = candidate.Credentials
+		}
+	}
 	if account.Platform == PlatformTypeSafe && input.Type != "" && input.Type != AccountTypeAPIKey {
 		return nil, errors.New("typesafe accounts only support apikey credentials")
 	}
@@ -1428,6 +1457,9 @@ func (s *adminServiceImpl) CreateShadow(ctx context.Context, parentID int64, opt
 		return nil, infraerrors.New(http.StatusBadRequest, "SPARK_SHADOW_INVALID_PARENT",
 			"spark shadow requires an OpenAI OAuth parent account")
 	}
+	if parent.IsExcelOAuth() {
+		return nil, excelBPSUnsupported(nil)
+	}
 	// G6:母账号本身不能是影子,否则会建出二级影子——resolveCredentialAccount 只解一层,
 	// 会解析到无凭据的一级影子,进入坏调度/上游失败。
 	if parent.IsCredentialShadow() {
@@ -1720,6 +1752,9 @@ func (s *adminServiceImpl) ResetAccountQuota(ctx context.Context, id int64) erro
 // EnsureOpenAIPrivacy 检查 OpenAI OAuth 账号是否已设置 privacy_mode，
 // 未设置则调用 disableOpenAITraining 并持久化到 Extra，返回设置的 mode 值。
 func (s *adminServiceImpl) EnsureOpenAIPrivacy(ctx context.Context, account *Account) string {
+	if account.IsExcelOAuth() {
+		return ""
+	}
 	// 影子账号不持凭据，隐私设置由母账号管理，直接跳过。
 	if account.IsCredentialShadow() {
 		return ""
@@ -1757,6 +1792,9 @@ func (s *adminServiceImpl) EnsureOpenAIPrivacy(ctx context.Context, account *Acc
 
 // ForceOpenAIPrivacy 强制重新设置 OpenAI OAuth 账号隐私，无论当前状态。
 func (s *adminServiceImpl) ForceOpenAIPrivacy(ctx context.Context, account *Account) string {
+	if account.IsExcelOAuth() {
+		return ""
+	}
 	// 影子账号不持凭据,隐私由母账号管理,直接跳过(与 EnsureOpenAIPrivacy 一致——外审第4轮)。
 	if account.IsCredentialShadow() {
 		return ""

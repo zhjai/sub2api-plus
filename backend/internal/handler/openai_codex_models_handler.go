@@ -117,7 +117,7 @@ func (h *OpenAIGatewayHandler) CodexModels(c *gin.Context) {
 
 		// The client ETag represents the final group-specific body, so fetch the
 		// source manifest before applying local filtering and alias metadata.
-		manifest, err := h.gatewayService.FetchCodexModelsManifest(c.Request.Context(), account, c.Query("client_version"), "")
+		manifest, err := h.gatewayService.FetchGroupAccountCodexModelsManifest(c.Request.Context(), account, apiKey.Group, c.Query("client_version"))
 		if err != nil {
 			if c.Request.Context().Err() != nil {
 				return
@@ -131,16 +131,12 @@ func (h *OpenAIGatewayHandler) CodexModels(c *gin.Context) {
 			h.errorResponse(c, infraerrors.Code(err), "upstream_error", infraerrors.Message(err))
 			return
 		}
-		if err := h.gatewayService.CompleteAPIKeyCodexModelsManifestForClient(manifest, account); err != nil {
-			h.errorResponse(c, http.StatusInternalServerError, "api_error", "Failed to complete Codex models manifest")
-			return
-		}
-		if err := service.ApplyPinnedCodexModelsMapping(manifest, account, apiKey.Group); err != nil {
-			h.errorResponse(c, http.StatusInternalServerError, "api_error", "Failed to apply model mappings")
-			return
-		}
 		if err := h.gatewayService.MergeGroupConfiguredCodexModels(c.Request.Context(), apiKey.Group, manifest, ifNoneMatch); err != nil {
 			h.errorResponse(c, http.StatusInternalServerError, "api_error", "Failed to build Codex models manifest")
+			return
+		}
+		if err := h.gatewayService.RestrictCompositeBPSModelsManifest(c.Request.Context(), apiKey.Group, manifest, h.compositeResolver, ifNoneMatch); err != nil {
+			h.errorResponse(c, http.StatusInternalServerError, "api_error", "Failed to apply composite Codex capabilities")
 			return
 		}
 		if c.Request.Context().Err() != nil {

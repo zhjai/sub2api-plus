@@ -1308,6 +1308,9 @@ func (s *OpenAIGatewayService) GetAccessToken(ctx context.Context, account *Acco
 			return "", "", err
 		}
 		account = credAccount
+		if account.IsExcelOAuth() {
+			return "", "", excelBPSUnsupported(nil)
+		}
 	}
 	switch account.Type {
 	case AccountTypeOAuth:

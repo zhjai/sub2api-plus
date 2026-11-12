@@ -120,9 +120,19 @@
         </div>
       </div>
 
+      <!-- BPS (Excel) accounts reauthorize on the same login client -->
+      <p
+        v-if="isOpenAIBPS"
+        data-testid="reauth-bps-note"
+        class="rounded-lg bg-emerald-50 px-3 py-2 text-xs leading-relaxed text-emerald-900 dark:bg-emerald-900/20 dark:text-emerald-200"
+      >
+        {{ t('admin.accounts.oauth.openai.bps.reauthNote') }}
+      </p>
+
       <OAuthAuthorizationFlow
         ref="oauthFlowRef"
         :add-method="addMethod"
+        :oauth-client="openaiProfile"
         :auth-url="currentAuthUrl"
         :session-id="currentSessionId"
         :loading="currentLoading"
@@ -200,6 +210,13 @@ import {
   type AuthInputMethod
 } from '@/composables/useAccountOAuth'
 import { useOpenAIOAuth } from '@/composables/useOpenAIOAuth'
+import {
+  OPENAI_EXCEL_OAUTH_CLIENT_ID,
+  openAIExcelCallbackErrorKey,
+  parseOpenAIExcelCallback,
+  resolveOpenAIOAuthClient,
+  type OpenAIOAuthClient
+} from '@/utils/openaiOAuthClient'
 import { useGeminiOAuth } from '@/composables/useGeminiOAuth'
 import { useAntigravityOAuth } from '@/composables/useAntigravityOAuth'
 import { useGrokOAuth } from '@/composables/useGrokOAuth'
@@ -254,6 +271,15 @@ const isGemini = computed(() => props.account?.platform === 'gemini')
 const isAnthropic = computed(() => props.account?.platform === 'anthropic')
 const isAntigravity = computed(() => props.account?.platform === 'antigravity')
 const isGrok = computed(() => props.account?.platform === 'grok')
+
+// OpenAI login profile comes from the saved client_id and never changes during reauth:
+// a BPS (Excel) account stays on Excel, everything else stays on Codex.
+const openaiProfile = computed<OpenAIOAuthClient>(() =>
+  isOpenAI.value
+    ? resolveOpenAIOAuthClient(props.account?.credentials as Record<string, unknown> | undefined)
+    : 'codex'
+)
+const isOpenAIBPS = computed(() => isOpenAI.value && openaiProfile.value === 'excel')
 
 /**
  * Grok reauth default tab (password auth is hidden):
@@ -320,6 +346,9 @@ const canExchangeCode = computed(() => {
   const authCode = oauthFlowRef.value?.authCode || ''
   const sessionId = currentSessionId.value
   const loading = currentLoading.value
+  if (isOpenAIBPS.value && !parseOpenAIExcelCallback(authCode, openaiOAuth.oauthState.value).ok) {
+    return false
+  }
   return authCode.trim() && sessionId && !loading
 })
 
@@ -370,7 +399,11 @@ const handleGenerateUrl = async () => {
   if (!props.account) return
 
   if (isOpenAILike.value) {
-    await openaiOAuth.generateAuthUrl(props.account.proxy_id)
+    if (isOpenAIBPS.value) {
+      await openaiOAuth.generateAuthUrl(props.account.proxy_id, undefined, 'excel')
+    } else {
+      await openaiOAuth.generateAuthUrl(props.account.proxy_id)
+    }
   } else if (isGemini.value) {
     const creds = (props.account.credentials || {}) as Record<string, unknown>
     const tierId = typeof creds.tier_id === 'string' ? creds.tier_id : undefined
@@ -396,7 +429,24 @@ const handleExchangeCode = async () => {
     const oauthClient = openaiOAuth
     const sessionId = oauthClient.sessionId.value
     if (!sessionId) return
-    const stateToUse = (oauthFlowRef.value?.oauthState || oauthClient.oauthState.value || '').trim()
+    // The session must have been generated for this account's saved login client.
+    if (oauthClient.authClient.value !== openaiProfile.value) {
+      oauthClient.error.value = t('admin.accounts.oauth.openai.bps.clientMismatch')
+      appStore.showError(oauthClient.error.value)
+      return
+    }
+    let codeToUse = authCode.trim()
+    let stateToUse = (oauthFlowRef.value?.oauthState || oauthClient.oauthState.value || '').trim()
+    if (isOpenAIBPS.value) {
+      const callback = parseOpenAIExcelCallback(authCode, oauthClient.oauthState.value)
+      if (!callback.ok) {
+        oauthClient.error.value = t(openAIExcelCallbackErrorKey(callback.error), { error: callback.detail || '' })
+        appStore.showError(oauthClient.error.value)
+        return
+      }
+      codeToUse = callback.code
+      stateToUse = callback.state
+    }
     if (!stateToUse) {
       oauthClient.error.value = t('admin.accounts.oauth.authFailed')
       appStore.showError(oauthClient.error.value)
@@ -404,7 +454,7 @@ const handleExchangeCode = async () => {
     }
 
     const tokenInfo = await oauthClient.exchangeAuthCode(
-      authCode.trim(),
+      codeToUse,
       sessionId,
       stateToUse,
       props.account.proxy_id
@@ -644,12 +694,14 @@ const handleValidateRefreshToken = async (refreshTokenInput: string) => {
     openaiOAuth.loading.value = true
     openaiOAuth.error.value = ''
     try {
-      const tokenInfo = await openaiOAuth.validateRefreshToken(refreshToken, props.account.proxy_id)
+      // BPS accounts refresh against the Excel client; Codex accounts keep the default client.
+      const excelClientId = isOpenAIBPS.value ? OPENAI_EXCEL_OAUTH_CLIENT_ID : undefined
+      const tokenInfo = await openaiOAuth.validateRefreshToken(refreshToken, props.account.proxy_id, excelClientId)
       if (!tokenInfo) return
 
       const updatedAccount = await adminAPI.accounts.applyOAuthCredentials(props.account.id, {
         type: 'oauth',
-        credentials: openaiOAuth.buildCredentials(tokenInfo),
+        credentials: openaiOAuth.buildCredentials(tokenInfo, excelClientId),
         extra: openaiOAuth.buildExtraInfo(tokenInfo)
       })
       appStore.showSuccess(t('admin.accounts.reAuthorizedSuccess'))

@@ -17,6 +17,22 @@ type ValidationOptions struct {
 	AllowPrivate     bool
 }
 
+// ValidateHTTPSOrigin validates a public HTTPS origin without resolving DNS.
+// This is used for an optional image relay's public callback origin, not an
+// outbound destination; outbound fetches still use ValidateHTTPSURL.
+func ValidateHTTPSOrigin(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u == nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil ||
+		u.Opaque != "" || (u.EscapedPath() != "" && u.EscapedPath() != "/") ||
+		u.RawQuery != "" || u.ForceQuery || strings.Contains(raw, "#") || IsBlockedHost(u.Hostname()) {
+		return errors.New("expected a public HTTPS origin without credentials, path, query or fragment")
+	}
+	if _, err := ValidateURLFormat(raw, false); err != nil {
+		return err
+	}
+	return nil
+}
+
 // ValidateHTTPURL validates an outbound HTTP/HTTPS URL.
 //
 // It provides a single validation entry point that supports:

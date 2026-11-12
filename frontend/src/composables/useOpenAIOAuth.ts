@@ -3,6 +3,15 @@ import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { adminAPI } from '@/api/admin'
 import { extractApiErrorMessage, extractI18nErrorMessage } from '@/utils/apiError'
+import {
+  isOpenAIExcelClientId,
+  readOAuthStateFromAuthUrl,
+  tokenMatchesOpenAIOAuthClient,
+  type OpenAIOAuthClient
+} from '@/utils/openaiOAuthClient'
+
+export { OPENAI_EXCEL_OAUTH_CLIENT_ID, isOpenAIExcelClientId } from '@/utils/openaiOAuthClient'
+export type { OpenAIOAuthClient } from '@/utils/openaiOAuthClient'
 
 export interface OpenAITokenInfo {
   access_token?: string
@@ -38,25 +47,32 @@ export function useOpenAIOAuth() {
   const oauthState = ref('')
   const loading = ref(false)
   const error = ref('')
+  // Login client the current authorization session was generated for.
+  const authClient = ref<OpenAIOAuthClient>('codex')
 
   // Reset state
   const resetState = () => {
     authUrl.value = ''
     sessionId.value = ''
     oauthState.value = ''
+    authClient.value = 'codex'
     loading.value = false
     error.value = ''
   }
 
-  // Generate auth URL for OpenAI OAuth
+  // Generate auth URL for OpenAI OAuth.
+  // oauthClient 'excel' requests the official Excel (BPS) login; the server uses the
+  // fixed official redirect and PKCE, so redirectUri is not sent for it.
   const generateAuthUrl = async (
     proxyId?: number | null,
-    redirectUri?: string
+    redirectUri?: string,
+    oauthClient: OpenAIOAuthClient = 'codex'
   ): Promise<boolean> => {
     loading.value = true
     authUrl.value = ''
     sessionId.value = ''
     oauthState.value = ''
+    authClient.value = 'codex'
     error.value = ''
 
     try {
@@ -64,7 +80,9 @@ export function useOpenAIOAuth() {
       if (proxyId) {
         payload.proxy_id = proxyId
       }
-      if (redirectUri) {
+      if (oauthClient === 'excel') {
+        payload.oauth_client = 'excel'
+      } else if (redirectUri) {
         payload.redirect_uri = redirectUri
       }
 
@@ -74,12 +92,8 @@ export function useOpenAIOAuth() {
       )
       authUrl.value = response.auth_url
       sessionId.value = response.session_id
-      try {
-        const parsed = new URL(response.auth_url)
-        oauthState.value = parsed.searchParams.get('state') || ''
-      } catch {
-        oauthState.value = ''
-      }
+      oauthState.value = readOAuthStateFromAuthUrl(response.auth_url)
+      authClient.value = oauthClient
       return true
     } catch (err: any) {
       error.value = extractApiErrorMessage(err, t('admin.accounts.oauth.openai.failedToGenerateUrl'))
@@ -115,8 +129,17 @@ export function useOpenAIOAuth() {
         payload.proxy_id = proxyId
       }
 
-      const tokenInfo = await adminAPI.accounts.exchangeCode(`${endpointPrefix}/exchange-code`, payload)
-      return tokenInfo as OpenAITokenInfo
+      const tokenInfo = (await adminAPI.accounts.exchangeCode(
+        `${endpointPrefix}/exchange-code`,
+        payload
+      )) as OpenAITokenInfo
+      // Never save a grant under a different login client than the session asked for.
+      if (!tokenMatchesOpenAIOAuthClient(tokenInfo?.client_id, authClient.value)) {
+        error.value = t('admin.accounts.oauth.openai.bps.clientMismatch')
+        appStore.showError(error.value)
+        return null
+      }
+      return tokenInfo
     } catch (err: any) {
       error.value = extractI18nErrorMessage(
         err,
@@ -154,7 +177,14 @@ export function useOpenAIOAuth() {
         `${endpointPrefix}/refresh-token`,
         clientId
       )
-      return tokenInfo as OpenAITokenInfo
+      const info = tokenInfo as OpenAITokenInfo
+      // An Excel refresh must stay on the Excel client.
+      if (isOpenAIExcelClientId(clientId) && info?.client_id && !isOpenAIExcelClientId(info.client_id)) {
+        error.value = t('admin.accounts.oauth.openai.bps.clientMismatch')
+        appStore.showError(error.value)
+        return null
+      }
+      return info
     } catch (err: any) {
       error.value = extractI18nErrorMessage(
         err,
@@ -170,7 +200,12 @@ export function useOpenAIOAuth() {
   }
 
   // Build credentials for OpenAI OAuth account (aligned with backend BuildAccountCredentials)
-  const buildCredentials = (tokenInfo: OpenAITokenInfo): Record<string, unknown> => {
+  // fallbackClientId is used only when the token response omits client_id
+  // (e.g. a refresh validated against an explicit client).
+  const buildCredentials = (
+    tokenInfo: OpenAITokenInfo,
+    fallbackClientId?: string
+  ): Record<string, unknown> => {
     const creds: Record<string, unknown> = {
       access_token: tokenInfo.access_token,
       expires_at: tokenInfo.expires_at
@@ -203,6 +238,8 @@ export function useOpenAIOAuth() {
     }
     if (tokenInfo.client_id) {
       creds.client_id = tokenInfo.client_id
+    } else if (fallbackClientId) {
+      creds.client_id = fallbackClientId
     }
 
     return creds
@@ -228,6 +265,7 @@ export function useOpenAIOAuth() {
     authUrl,
     sessionId,
     oauthState,
+    authClient,
     loading,
     error,
     // Methods

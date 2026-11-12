@@ -1151,7 +1151,7 @@ func TestBuildCodexModelsManifestForGroupUsesFallbackWhenTextOnlyPlatformHasNoSn
 	require.Equal(t, []any{"text"}, models[0]["input_modalities"])
 }
 
-func TestBuildCodexModelsManifestForGroupFallsBackWhenCapabilityLookupFails(t *testing.T) {
+func TestBuildCodexModelsManifestForGroupRejectsUnavailableCompositeCatalog(t *testing.T) {
 	t.Parallel()
 
 	repo := &countingCodexModelsAccountRepo{err: errors.New("account repository unavailable")}
@@ -1162,13 +1162,10 @@ func TestBuildCodexModelsManifestForGroupFallsBackWhenCapabilityLookupFails(t *t
 		"",
 		[]string{"gpt-5.6-sol", "grok-4.5"},
 	)
-	require.NoError(t, err)
+	require.Error(t, err)
 	require.Equal(t, int32(1), repo.calls.Load())
 
-	models := decodeCodexManifestModels(t, body)
-	require.Len(t, models, 2)
-	require.Equal(t, []any{"text"}, models[0]["input_modalities"])
-	require.Equal(t, []any{"text"}, models[1]["input_modalities"])
+	require.Empty(t, body)
 }
 
 func TestMergeGroupConfiguredCodexModelsInjectsCurrentGroupAliases(t *testing.T) {

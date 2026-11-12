@@ -60,6 +60,15 @@ func accountCodexToolCapabilities(account *Account, modelID string) map[string]j
 	if metadata, ok := account.GetUpstreamModelMetadata(modelID); ok {
 		applyCodexToolCapabilities(capabilities, metadata.CodexToolCapabilities, true)
 	}
+	if account.IsExcelOAuth() {
+		// This owned adapter implements the v2 client tool protocol using
+		// explicit plaintext argument markers. It does not decrypt private
+		// agent state or inherit a native upstream's forced reasoning tier.
+		applyCodexToolCapabilities(capabilities, map[string]json.RawMessage{
+			"multi_agent_version":          json.RawMessage("\"v2\""),
+			"multi_agent_reasoning_effort": json.RawMessage("null"),
+		}, true)
+	}
 	if account.IsOpenAI() && shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
 		// This bridge implements client-side tool discovery, even without a native manifest.
 		applyCodexToolCapabilities(capabilities, map[string]json.RawMessage{"supports_search_tool": json.RawMessage("true")}, false)
@@ -88,6 +97,16 @@ func accountCodexToolCapabilities(account *Account, modelID string) map[string]j
 		applyCodexToolCapabilities(capabilities, defaults, false)
 	}
 	if account.IsOpenAIApiKey() {
+		// A third-party Responses endpoint may itself be a BPS bridge. Model
+		// names and bundled Codex metadata do not establish support for native
+		// encrypted collaboration. Preserve explicit upstream declarations,
+		// including null, and require evidence before advertising v2.
+		if !official {
+			applyCodexToolCapabilities(capabilities, map[string]json.RawMessage{
+				"multi_agent_version":          json.RawMessage("null"),
+				"multi_agent_reasoning_effort": json.RawMessage("null"),
+			}, false)
+		}
 		target := modelID
 		if isOpenAIGPT6AstraModel(target) {
 			target = "gpt-6-astra"

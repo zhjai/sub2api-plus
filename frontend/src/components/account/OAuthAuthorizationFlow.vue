@@ -70,7 +70,7 @@
                 t(getOAuthKey('emailPasswordAuth'))
               }}</span>
             </label>
-            <label v-if="showMobileRefreshTokenOption" class="flex cursor-pointer items-center gap-2">
+            <label v-if="mobileRefreshTokenOptionEnabled" class="flex cursor-pointer items-center gap-2">
               <input
                 v-model="inputMethod"
                 type="radio"
@@ -81,7 +81,7 @@
                 t('admin.accounts.oauth.openai.mobileRefreshTokenAuth')
               }}</span>
             </label>
-            <label v-if="showSessionTokenOption" class="flex cursor-pointer items-center gap-2">
+            <label v-if="sessionTokenOptionEnabled" class="flex cursor-pointer items-center gap-2">
               <input
                 v-model="inputMethod"
                 type="radio"
@@ -92,7 +92,7 @@
                 t(getOAuthKey('sessionTokenAuth'))
               }}</span>
             </label>
-            <label v-if="showAccessTokenOption" class="flex cursor-pointer items-center gap-2">
+            <label v-if="accessTokenOptionEnabled" class="flex cursor-pointer items-center gap-2">
               <input
                 v-model="inputMethod"
                 type="radio"
@@ -103,7 +103,7 @@
                 t('admin.accounts.oauth.openai.accessTokenAuth')
               }}</span>
             </label>
-            <label v-if="showCodexSessionImportOption" class="flex cursor-pointer items-center gap-2">
+            <label v-if="codexSessionImportOptionEnabled" class="flex cursor-pointer items-center gap-2">
               <input
                 v-model="inputMethod"
                 type="radio"
@@ -114,7 +114,7 @@
                 t('admin.accounts.oauth.openai.codexSessionAuth')
               }}</span>
             </label>
-            <label v-if="showAgentIdentityOption" class="flex cursor-pointer items-center gap-2">
+            <label v-if="agentIdentityOptionEnabled" class="flex cursor-pointer items-center gap-2">
               <input
                 v-model="inputMethod"
                 type="radio"
@@ -125,7 +125,7 @@
                 t('admin.accounts.oauth.openai.agentIdentityAuth')
               }}</span>
             </label>
-            <label v-if="showCodexPatOption" class="flex cursor-pointer items-center gap-2">
+            <label v-if="codexPatOptionEnabled" class="flex cursor-pointer items-center gap-2">
               <input
                 v-model="inputMethod"
                 type="radio"
@@ -848,8 +848,33 @@
                     v-model="authCodeInput"
                     rows="3"
                     class="input w-full resize-none font-mono text-sm"
+                    data-testid="oauth-auth-code-input"
                     :placeholder="oauthAuthCodePlaceholder"
+                    :spellcheck="isExcelOAuth ? false : undefined"
+                    :autocomplete="isExcelOAuth ? 'off' : undefined"
+                    :aria-invalid="isExcelOAuth && !!excelCallbackMessage ? 'true' : undefined"
+                    :aria-describedby="isExcelOAuth ? 'bps-callback-status' : undefined"
                   ></textarea>
+                  <!-- BPS (Excel): the full callback is checked against this session before exchange -->
+                  <p
+                    v-if="isExcelOAuth && excelCallback?.ok"
+                    id="bps-callback-status"
+                    data-testid="bps-callback-status"
+                    role="status"
+                    class="mt-2 flex items-center gap-1 text-xs text-green-700 dark:text-green-400"
+                  >
+                    <Icon name="check" size="xs" :stroke-width="2" />
+                    {{ t('admin.accounts.oauth.openai.bps.callbackValid') }}
+                  </p>
+                  <p
+                    v-else-if="isExcelOAuth && excelCallbackMessage"
+                    id="bps-callback-status"
+                    data-testid="bps-callback-status"
+                    role="alert"
+                    class="mt-2 text-xs text-red-600 dark:text-red-400"
+                  >
+                    {{ excelCallbackMessage }}
+                  </p>
                   <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
                     <Icon name="infoCircle" size="xs" class="mr-1 inline" />
                     {{ oauthAuthCodeHint }}
@@ -901,6 +926,12 @@ import Icon from '@/components/icons/Icon.vue'
 import type { AddMethod, AuthInputMethod } from '@/composables/useAccountOAuth'
 import type { AccountPlatform } from '@/types'
 import { adminAPI } from '@/api/admin'
+import {
+  openAIExcelCallbackErrorKey,
+  parseOpenAIExcelCallback,
+  readOAuthStateFromAuthUrl,
+  type OpenAIOAuthClient
+} from '@/utils/openaiOAuthClient'
 
 interface Props {
   addMethod: AddMethod
@@ -932,6 +963,12 @@ interface Props {
   initialEmailPassword?: string
   platform?: AccountPlatform // Platform type for different UI/text
   showProjectId?: boolean // New prop to control project ID visibility
+  /**
+   * OpenAI login client. 'excel' is the official Excel (BPS) login: manual browser
+   * authorization with the full official callback URL, or Excel refresh tokens.
+   * Codex-only import methods are never offered for it.
+   */
+  oauthClient?: OpenAIOAuthClient
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -957,7 +994,8 @@ const props = withDefaults(defineProps<Props>(), {
   initialInputMethod: 'manual',
   initialEmailPassword: '',
   platform: 'anthropic',
-  showProjectId: true
+  showProjectId: true,
+  oauthClient: 'codex'
 })
 
 const emit = defineEmits<{
@@ -983,8 +1021,36 @@ const emailPasswordOptionEnabled = computed(
 
 const showLocalCallbackNotice = computed(() => props.platform === 'openai' || props.platform === 'grok')
 
+// BPS (official Excel login) for OpenAI. Codex-only entries are hidden here even if a
+// parent asks for them, so an Excel session can never fall into a Codex import path.
+const isExcelOAuth = computed(() => props.platform === 'openai' && props.oauthClient === 'excel')
+const mobileRefreshTokenOptionEnabled = computed(() => props.showMobileRefreshTokenOption && !isExcelOAuth.value)
+const sessionTokenOptionEnabled = computed(() => props.showSessionTokenOption && !isExcelOAuth.value)
+const accessTokenOptionEnabled = computed(() => props.showAccessTokenOption && !isExcelOAuth.value)
+const codexSessionImportOptionEnabled = computed(() => props.showCodexSessionImportOption && !isExcelOAuth.value)
+const agentIdentityOptionEnabled = computed(() => props.showAgentIdentityOption && !isExcelOAuth.value)
+const codexPatOptionEnabled = computed(() => props.showCodexPatOption && !isExcelOAuth.value)
+const EXCEL_ALLOWED_METHODS: AuthInputMethod[] = ['manual', 'refresh_token']
+
+// Copy that differs for the Excel login lives under admin.accounts.oauth.openai.bps.
+const BPS_TEXT_KEYS = new Set([
+  'title',
+  'followSteps',
+  'openUrlDesc',
+  'importantNotice',
+  'step3EnterCode',
+  'authCodeDesc',
+  'authCode',
+  'authCodePlaceholder',
+  'authCodeHint',
+  'refreshTokenAuth',
+  'refreshTokenDesc',
+  'refreshTokenPlaceholder'
+])
+
 // Get translation key based on platform
 const getOAuthKey = (key: string) => {
+  if (isExcelOAuth.value && BPS_TEXT_KEYS.has(key)) return `admin.accounts.oauth.openai.bps.${key}`
   if (props.platform === 'openai') return `admin.accounts.oauth.openai.${key}`
   if (props.platform === 'gemini') return `admin.accounts.oauth.gemini.${key}`
   if (props.platform === 'antigravity') return `admin.accounts.oauth.antigravity.${key}`
@@ -1005,6 +1071,7 @@ const oauthAuthCode = computed(() => t(getOAuthKey('authCode')))
 const oauthAuthCodePlaceholder = computed(() => t(getOAuthKey('authCodePlaceholder')))
 const oauthAuthCodeHint = computed(() => t(getOAuthKey('authCodeHint')))
 const oauthImportantNotice = computed(() => {
+  if (isExcelOAuth.value) return t('admin.accounts.oauth.openai.bps.importantNotice')
   if (props.platform === 'openai') return t('admin.accounts.oauth.openai.importantNotice')
   if (props.platform === 'antigravity') return t('admin.accounts.oauth.antigravity.importantNotice')
   if (props.platform === 'grok') return t('admin.accounts.oauth.grok.importantNotice')
@@ -1025,6 +1092,29 @@ const emailPasswordInput = ref(props.initialEmailPassword || '')
 const showHelpDialog = ref(false)
 const oauthState = ref('')
 const projectId = ref('')
+
+// Excel callback check. The expected state is the opaque one the server put in the
+// generated authorization URL; nothing about its format is assumed.
+const excelCallback = computed(() =>
+  isExcelOAuth.value
+    ? parseOpenAIExcelCallback(authCodeInput.value, readOAuthStateFromAuthUrl(props.authUrl))
+    : null
+)
+const excelCallbackMessage = computed(() => {
+  const result = excelCallback.value
+  if (!result || result.ok || result.error === 'empty') return ''
+  return t(openAIExcelCallbackErrorKey(result.error), { error: result.detail || '' })
+})
+
+watch(isExcelOAuth, () => {
+  // Switching login client starts over: nothing typed for one client carries to the other.
+  authCodeInput.value = ''
+  oauthState.value = ''
+  refreshTokenInput.value = ''
+  if (!EXCEL_ALLOWED_METHODS.includes(inputMethod.value) && isExcelOAuth.value) {
+    inputMethod.value = 'manual'
+  }
+})
 
 watch(
   () => [props.platform, props.showEmailPasswordOption] as const,
@@ -1050,12 +1140,12 @@ const methodOptionCount = computed(() => [
   props.showManualOption,
   props.showCookieOption,
   props.showRefreshTokenOption,
-  props.showMobileRefreshTokenOption,
-  props.showSessionTokenOption,
-  props.showAccessTokenOption,
-  props.showCodexSessionImportOption,
-  props.showAgentIdentityOption,
-  props.showCodexPatOption,
+  mobileRefreshTokenOptionEnabled.value,
+  sessionTokenOptionEnabled.value,
+  accessTokenOptionEnabled.value,
+  codexSessionImportOptionEnabled.value,
+  agentIdentityOptionEnabled.value,
+  codexPatOptionEnabled.value,
   props.showSsoOption,
   emailPasswordOptionEnabled.value
 ].filter(Boolean).length)
@@ -1133,6 +1223,8 @@ watch(inputMethod, (newVal) => {
 // e.g., http://localhost:8085/callback?code=xxx...&state=...
 watch(authCodeInput, (newVal) => {
   if (props.platform !== 'openai' && props.platform !== 'gemini' && props.platform !== 'antigravity' && props.platform !== 'grok') return
+  // Excel keeps the full callback URL so its origin, path and state can be checked.
+  if (isExcelOAuth.value) return
 
   const trimmed = newVal.trim()
   // Check if it looks like a URL with code parameter

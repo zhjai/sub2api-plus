@@ -31,6 +31,45 @@ vi.mock('@/api/admin', () => ({
 
 import { useOpenAIOAuth } from '@/composables/useOpenAIOAuth'
 import { adminAPI } from '@/api/admin'
+import { OPENAI_EXCEL_OAUTH_CLIENT_ID } from '@/utils/openaiOAuthClient'
+
+describe('useOpenAIOAuth Excel profile', () => {
+  it('requests the Excel profile without a custom redirect and keeps the generated state', async () => {
+    vi.mocked(adminAPI.accounts.generateAuthUrl).mockResolvedValueOnce({
+      auth_url: 'https://auth.openai.com/api/accounts/authorize?state=opaque',
+      session_id: 'excel-session',
+    })
+    const oauth = useOpenAIOAuth()
+    expect(await oauth.generateAuthUrl(12, 'https://ignored.invalid', 'excel')).toBe(true)
+    expect(adminAPI.accounts.generateAuthUrl).toHaveBeenLastCalledWith(
+      '/admin/openai/generate-auth-url', { proxy_id: 12, oauth_client: 'excel' }
+    )
+    expect(oauth.oauthState.value).toBe('opaque')
+    expect(oauth.authClient.value).toBe('excel')
+
+    vi.mocked(adminAPI.accounts.exchangeCode).mockResolvedValueOnce({
+      client_id: 'codex-client', access_token: 'wrong-client-token',
+    })
+    expect(await oauth.exchangeAuthCode('code', 'excel-session', 'opaque')).toBeNull()
+    expect(oauth.error.value).toBe('admin.accounts.oauth.openai.bps.clientMismatch')
+  })
+
+  it('preserves the Excel client across refresh and account credential save', async () => {
+    vi.mocked(adminAPI.accounts.refreshOpenAIToken).mockResolvedValueOnce({
+      access_token: 'excel-at', refresh_token: 'excel-rt', client_id: OPENAI_EXCEL_OAUTH_CLIENT_ID,
+    })
+    const oauth = useOpenAIOAuth()
+    const result = await oauth.validateRefreshToken('excel-rt', 12, OPENAI_EXCEL_OAUTH_CLIENT_ID)
+    expect(result).not.toBeNull()
+    expect(adminAPI.accounts.refreshOpenAIToken).toHaveBeenLastCalledWith(
+      'excel-rt', 12, '/admin/openai/refresh-token', OPENAI_EXCEL_OAUTH_CLIENT_ID
+    )
+    expect(oauth.buildCredentials(result!).client_id).toBe(OPENAI_EXCEL_OAUTH_CLIENT_ID)
+    oauth.resetState()
+    expect(oauth.authClient.value).toBe('codex')
+    expect(oauth.sessionId.value).toBe('')
+  })
+})
 
 describe('useOpenAIOAuth.buildCredentials', () => {
   it('should keep client_id when token response contains it', () => {

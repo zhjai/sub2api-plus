@@ -216,7 +216,15 @@ func (s *OpenAIGatewayService) MergeGroupConfiguredCodexModels(
 		return fmt.Errorf("filter retired Codex models: %w", err)
 	}
 	body = filtered
-	if changed || retired {
+	body, bpsRestricted, err := restrictExcelBPSModels(body, PlatformOpenAI, accounts, group, nil, true)
+	if err != nil {
+		return fmt.Errorf("restrict BPS Codex capabilities: %w", err)
+	}
+	body, collaborationRestricted, err := restrictCodexCollaborationToGroup(body, manifest.Body, accounts, group)
+	if err != nil {
+		return fmt.Errorf("restrict group collaboration capabilities: %w", err)
+	}
+	if changed || retired || bpsRestricted || collaborationRestricted {
 		manifest.Body = body
 		manifest.ETag = codexModelsManifestBodyETag(body)
 	}
@@ -864,8 +872,7 @@ func (s *GatewayService) BuildCodexModelsManifestForGroup(
 	platformOverride string,
 	modelIDs []string,
 ) ([]byte, error) {
-	if s == nil || s.accountRepo == nil || group == nil {
-
+	if group == nil {
 		return BuildCodexModelsManifest(modelIDs)
 	}
 	effectivePlatform := strings.TrimSpace(platformOverride)
@@ -875,17 +882,35 @@ func (s *GatewayService) BuildCodexModelsManifestForGroup(
 	if effectivePlatform != PlatformComposite && !isConcreteRequestPlatform(effectivePlatform) {
 		return BuildCodexModelsManifest(modelIDs)
 	}
+	if s == nil || s.accountRepo == nil {
+		if effectivePlatform == PlatformComposite {
+			return nil, infraerrors.New(http.StatusServiceUnavailable, "CODEX_CATALOG_UNAVAILABLE", "Composite account catalog is unavailable")
+		}
+		return BuildCodexModelsManifest(modelIDs)
+	}
 
 	_, catalog, err := loadCodexGroupCatalogAccounts(ctx, s.accountRepo, group.ID)
 	if err != nil {
-
+		if effectivePlatform == PlatformComposite {
+			return nil, infraerrors.New(http.StatusServiceUnavailable, "CODEX_CATALOG_UNAVAILABLE", "Composite account catalog is unavailable")
+		}
 		return BuildCodexModelsManifest(modelIDs)
+	}
+	hasBPS := false
+	for i := range catalog {
+		hasBPS = hasBPS || catalog[i].IsExcelOAuth()
 	}
 	var compositeRoutes []CompositeModelRoute
 	compositeRoutesAvailable := true
+	if effectivePlatform == PlatformComposite && hasBPS && (s.compositeResolver == nil || s.compositeResolver.repo == nil) {
+		return nil, infraerrors.New(http.StatusServiceUnavailable, "CODEX_ROUTES_UNAVAILABLE", "Composite BPS route resolver is unavailable")
+	}
 	if effectivePlatform == PlatformComposite && s.compositeResolver != nil && s.compositeResolver.repo != nil {
 		compositeRoutes, err = s.compositeResolver.repo.ListByGroup(ctx, group.ID, false)
 		if err != nil {
+			if hasBPS {
+				return nil, infraerrors.New(http.StatusServiceUnavailable, "CODEX_ROUTES_UNAVAILABLE", "Composite BPS routes are unavailable")
+			}
 			compositeRoutesAvailable = false
 		}
 	}
@@ -961,7 +986,12 @@ func buildCodexModelsManifestForAccounts(
 			modelMetadata[modelID] = metadata
 		}
 	}
-	return buildCodexModelsManifest(modelIDs, imageInputModels, searchToolModels, metadataModels, modelMetadata)
+	body, err := buildCodexModelsManifest(modelIDs, imageInputModels, searchToolModels, metadataModels, modelMetadata)
+	if err != nil {
+		return nil, err
+	}
+	body, _, err = restrictExcelBPSModels(body, effectivePlatform, accounts, group, compositeRoutes, compositeRoutesAvailable)
+	return body, err
 }
 
 func buildCodexModelsManifest(
@@ -1329,7 +1359,7 @@ func accountCodexModelSupportsImageInput(account *Account, upstreamModel string)
 }
 
 func isOfficialOpenAICodexAccount(account *Account) bool {
-	if account == nil || account.Platform != PlatformOpenAI {
+	if account == nil || account.Platform != PlatformOpenAI || account.IsExcelOAuth() {
 		return false
 	}
 	if account.IsOpenAIOAuth() {
@@ -1706,6 +1736,9 @@ func (s *OpenAIGatewayService) FetchCodexModelsManifest(ctx context.Context, acc
 	credAccount, err := resolveCredentialAccount(ctx, s.accountRepo, account)
 	if err != nil {
 		return nil, infraerrors.Newf(http.StatusInternalServerError, "OPENAI_CODEX_MODELS_CREDENTIALS_FAILED", "resolve credential account: %v", err)
+	}
+	if credAccount.IsExcelOAuth() {
+		return nil, excelBPSUnsupported(nil)
 	}
 
 	clientVersion = strings.TrimSpace(clientVersion)

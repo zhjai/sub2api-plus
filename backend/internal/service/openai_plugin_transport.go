@@ -18,6 +18,9 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL 
 }
 
 func (s *OpenAIGatewayService) doOpenAIUpstreamWithAdmission(request *http.Request, proxyURL string, account *Account) (*http.Response, error) {
+	if account.IsExcelOAuth() {
+		return nil, excelBPSUnsupported(nil) // Excel inference has its own minimal transport.
+	}
 	var privacyErr error
 	request, privacyErr = applyCodexPrivacyBeforeSend(request, account)
 	if privacyErr != nil {
@@ -43,6 +46,21 @@ func (s *AccountTestService) doOpenAIAccountTestUpstream(
 	account *Account,
 	useTLSFallback bool,
 ) (*http.Response, error) {
+	if account.IsExcelOAuth() {
+		if err := s.checkOpenAIEvalAutomaticAccount(request.Context(), account); err != nil {
+			_ = request.Body.Close()
+			return nil, err
+		}
+		if automatic, _ := request.Context().Value(openAIEvalAutomaticKey{}).(bool); automatic {
+			request = request.WithContext(WithHTTPUpstreamSingleSend(request.Context()))
+		}
+		converted, bridge, err := convertExcelBPSTestRequest(request, account)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := s.doAccountTestUpstream(converted, proxyURL, account, nil)
+		return bridgeExcelBPSTestResponse(converted.Context(), resp, bridge), err
+	}
 	if account != nil && account.IsShadow() {
 		credential, err := resolveCredentialAccount(request.Context(), s.accountRepo, account)
 		if err != nil {

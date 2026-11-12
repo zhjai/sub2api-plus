@@ -74,6 +74,7 @@ vi.mock('vue-i18n', async () => {
 })
 
 import CreateAccountModal from '../CreateAccountModal.vue'
+import CodexPrivacyModeField from '../CodexPrivacyModeField.vue'
 
 const BaseDialogStub = defineComponent({
   name: 'BaseDialog',
@@ -200,6 +201,44 @@ async function openCodexImportStep(toggleClicks = 0) {
 }
 
 describe('CreateAccountModal OpenAI long-context billing', () => {
+  it('offers BPS login while hiding Codex-only imports and WebSocket controls', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    await wrapper.get('[data-testid="openai-oauth-client-excel"]').trigger('click')
+    expect(wrapper.find('[data-testid="openai-bps-scope-note"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="create-openai-ws-mode"]').exists()).toBe(false)
+    expect(wrapper.findComponent(CodexPrivacyModeField).exists()).toBe(false)
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('BPS login')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    const flow = wrapper.findComponent(OAuthAuthorizationFlowStub)
+    expect(flow.props('showCodexSessionImportOption')).toBe(false)
+    expect(flow.props('showAgentIdentityOption')).toBe(false)
+    expect(flow.props('showCodexPatOption')).toBe(false)
+    expect(flow.attributes('oauth-client')).toBe('excel')
+    wrapper.unmount()
+  })
+
+  it('hides passthrough, Codex CLI-only and compact for BPS and restores them for Codex OAuth', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    const codexOnlyLabels = [
+      'admin.accounts.openai.oauthPassthrough',
+      'admin.accounts.openai.codexCLIOnly',
+      'admin.accounts.openai.compactMode',
+      'admin.accounts.openai.codexFingerprintMode'
+    ]
+    for (const label of codexOnlyLabels) expect(wrapper.text()).toContain(label)
+
+    await wrapper.get('[data-testid="openai-oauth-client-excel"]').trigger('click')
+    for (const label of codexOnlyLabels) expect(wrapper.text()).not.toContain(label)
+    // Generic model restriction stays available for BPS.
+    expect(wrapper.find('[data-testid="model-whitelist-selector"]').exists()).toBe(true)
+
+    await wrapper.get('[data-testid="openai-oauth-client-codex"]').trigger('click')
+    for (const label of codexOnlyLabels) expect(wrapper.text()).toContain(label)
+    wrapper.unmount()
+  })
+
   beforeEach(() => {
     authIsSimpleMode.value = true
     createAccountMock.mockReset().mockResolvedValue({ id: 42, platform: 'openai', type: 'apikey' })
@@ -915,6 +954,174 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     await flushPromises()
 
     expect(createOpenAICodexPATMock.mock.calls[0]?.[0]?.extra?.openai_long_context_billing_enabled).toBe(false)
+  })
+})
+
+describe('CreateAccountModal client fingerprint protection', () => {
+  beforeEach(() => {
+    authIsSimpleMode.value = true
+    createAccountMock.mockReset().mockResolvedValue({ id: 42, platform: 'openai', type: 'apikey' })
+    probeUpstreamBillingMock.mockReset().mockResolvedValue({})
+    syncUpstreamModelsMock.mockReset().mockResolvedValue({ models: [], metadata: {} })
+    importCodexSessionMock.mockReset().mockResolvedValue({
+      created: 1,
+      updated: 0,
+      skipped: 0,
+      failed: 0,
+      errors: [],
+      warnings: [],
+    })
+    createOpenAICodexPATMock.mockReset().mockResolvedValue({})
+  })
+
+  const toggle = (wrapper: ReturnType<typeof mountModal>) => wrapper.get('[data-testid="codex-privacy-toggle"]')
+  const isOn = (wrapper: ReturnType<typeof mountModal>) => toggle(wrapper).attributes('aria-checked') === 'true'
+
+  async function openOpenAI(category: 'oauth' | 'apikey') {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    if (category === 'apikey') {
+      await selectButtonByText(wrapper, 'API Key')
+    }
+    return wrapper
+  }
+
+  async function submitStepOne(wrapper: ReturnType<typeof mountModal>, apiKey = false) {
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('Privacy account')
+    if (apiKey) {
+      await wrapper.get('form#create-account-form input[type="password"]').setValue('sk-test')
+    }
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+  }
+
+  async function chooseFingerprintMode(wrapper: ReturnType<typeof mountModal>, mode: string) {
+    const select = wrapper.findComponent('[data-testid="create-codex-fingerprint-mode-select"]')
+    expect(select.exists()).toBe(true)
+    select.vm.$emit('update:modelValue', mode)
+    await flushPromises()
+  }
+
+  it.each(['oauth', 'apikey'] as const)('is offered for new OpenAI %s accounts and is off by default', async (category) => {
+    const wrapper = await openOpenAI(category)
+    expect(wrapper.get('[data-testid="codex-privacy"]').text()).toContain('admin.accounts.openai.codexPrivacy.title')
+    expect(isOn(wrapper)).toBe(false)
+    // The timing advice is visible before the switch is used.
+    expect(wrapper.get('[data-testid="codex-privacy-continuity"]').text()).toBe('admin.accounts.openai.codexPrivacy.continuity')
+  })
+
+  it('is not offered for other platforms', async () => {
+    const wrapper = mountModal()
+    expect(wrapper.find('[data-testid="codex-privacy"]').exists()).toBe(false)
+    await selectButtonByText(wrapper, 'admin.accounts.claudeConsole')
+    expect(wrapper.find('[data-testid="codex-privacy"]').exists()).toBe(false)
+  })
+
+  it('omits the key by default and sends randomized when turned on (API key)', async () => {
+    const off = await openOpenAI('apikey')
+    await submitStepOne(off, true)
+    expect(createAccountMock.mock.calls[0]?.[0]?.extra).not.toHaveProperty('codex_privacy_mode')
+
+    createAccountMock.mockClear()
+    const on = await openOpenAI('apikey')
+    await toggle(on).trigger('click')
+    expect(on.get('[data-testid="codex-privacy-overrides"]').text()).toContain('admin.accounts.openai.codexPrivacy.overrides')
+    await submitStepOne(on, true)
+    const extra = createAccountMock.mock.calls[0]?.[0]?.extra
+    expect(extra?.codex_privacy_mode).toBe('randomized')
+    expect(Object.keys(extra ?? {}).filter((key) => key.startsWith('codex_identity_'))).toEqual([])
+  })
+
+  it.each([
+    ['Codex session import', 'import-codex-session', () => importCodexSessionMock],
+    ['Codex PAT', 'import-codex-pat', () => createOpenAICodexPATMock],
+  ])('carries the choice through the %s OAuth path', async (_name, testId, mock) => {
+    const wrapper = await openOpenAI('oauth')
+    await toggle(wrapper).trigger('click')
+    await submitStepOne(wrapper)
+    await wrapper.get(`[data-testid="${testId}"]`).trigger('click')
+    await flushPromises()
+
+    expect(mock()).toHaveBeenCalledTimes(1)
+    expect(mock().mock.calls[0]?.[0]?.extra?.codex_privacy_mode).toBe('randomized')
+  })
+
+  it('blocks the next step while fingerprint convergence is on and continues after the explicit fix', async () => {
+    const wrapper = await openOpenAI('oauth')
+    await chooseFingerprintMode(wrapper, 'session')
+    await toggle(wrapper).trigger('click')
+    expect(wrapper.find('[data-testid="codex-privacy-conflict-fingerprint"]').exists()).toBe(true)
+
+    await submitStepOne(wrapper)
+    // Still on step 1: the authorization step was not opened and nothing was sent.
+    expect(wrapper.findComponent(OAuthAuthorizationFlowStub).exists()).toBe(false)
+    expect(wrapper.find('[data-testid="codex-privacy-conflict-blocked"]').exists()).toBe(true)
+
+    await wrapper.get('[data-testid="codex-privacy-resolve"]').trigger('click')
+    expect(wrapper.find('[data-testid="codex-privacy-conflict"]').exists()).toBe(false)
+    expect(wrapper.findComponent('[data-testid="create-codex-fingerprint-mode-select"]').props('modelValue')).toBe('off')
+
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+    await wrapper.get('[data-testid="import-codex-session"]').trigger('click')
+    await flushPromises()
+    const extra = importCodexSessionMock.mock.calls[0]?.[0]?.extra
+    expect(extra?.codex_privacy_mode).toBe('randomized')
+    expect(extra).not.toHaveProperty('codex_fingerprint_mode')
+  })
+
+  it('does not carry a hidden OAuth convergence choice into an API key account', async () => {
+    const wrapper = await openOpenAI('oauth')
+    await chooseFingerprintMode(wrapper, 'full')
+    await selectButtonByText(wrapper, 'API Key')
+    await toggle(wrapper).trigger('click')
+    expect(wrapper.find('[data-testid="codex-privacy-conflict"]').exists()).toBe(false)
+    await submitStepOne(wrapper, true)
+    const extra = createAccountMock.mock.calls[0]?.[0]?.extra
+    expect(extra?.codex_privacy_mode).toBe('randomized')
+    expect(extra).not.toHaveProperty('codex_fingerprint_mode')
+  })
+
+  it('refuses an Agent Identity import with protection on instead of dropping the choice', async () => {
+    const wrapper = await openOpenAI('oauth')
+    await toggle(wrapper).trigger('click')
+    await submitStepOne(wrapper)
+    const flow = wrapper.getComponent(OAuthAuthorizationFlowStub)
+    flow.vm.inputMethod = 'agent_identity'
+    flow.vm.$emit('import-codex-session', JSON.stringify({ auth_mode: 'agentIdentity', agent_identity: { agent_runtime_id: 'runtime' } }))
+    await flushPromises()
+
+    expect(importCodexSessionMock).not.toHaveBeenCalled()
+  })
+
+  it('shows the server reason for a CODEX_PRIVACY_* rejection next to the switch', async () => {
+    createAccountMock.mockRejectedValueOnce({
+      status: 400,
+      code: 400,
+      reason: 'CODEX_PRIVACY_IDENTITY_CONFLICT',
+      message: 'randomized metadata conflicts with preserve_client and device/session/full convergence',
+    })
+    const wrapper = await openOpenAI('apikey')
+    await toggle(wrapper).trigger('click')
+    await submitStepOne(wrapper, true)
+
+    expect(wrapper.get('[data-testid="codex-privacy-server-error"]').text()).toContain('admin.accounts.openai.codexPrivacy.serverRejected')
+    expect(wrapper.getComponent(CodexPrivacyModeField).props('serverError')).toEqual({
+      code: 'CODEX_PRIVACY_IDENTITY_CONFLICT',
+      message: 'randomized metadata conflicts with preserve_client and device/session/full convergence',
+    })
+  })
+
+  it('starts from off again after the modal is closed and reopened', async () => {
+    const wrapper = await openOpenAI('apikey')
+    await toggle(wrapper).trigger('click')
+    expect(isOn(wrapper)).toBe(true)
+
+    await wrapper.setProps({ show: false })
+    await wrapper.setProps({ show: true })
+    await selectButtonByText(wrapper, 'OpenAI')
+    await selectButtonByText(wrapper, 'API Key')
+    expect(isOn(wrapper)).toBe(false)
   })
 })
 

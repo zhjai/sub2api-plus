@@ -1266,7 +1266,7 @@ func (h *GatewayHandler) CodexModels(c *gin.Context) {
 		modelIDs,
 	)
 	if err != nil {
-		h.errorResponse(c, http.StatusInternalServerError, "api_error", "Failed to build Codex models manifest")
+		h.errorResponse(c, pkgerrors.Code(err), "api_error", pkgerrors.Message(err))
 		return
 	}
 	etag := service.CodexModelsManifestETag(body)

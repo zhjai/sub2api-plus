@@ -847,6 +847,25 @@ export default {
           namespaceMissing: '服务端尚未为该账号生成凭据命名空间，实验暂不生效，请求仍按账号隔离。',
           serverRejected: '服务端拒绝了会话标识设置：{reason}'
         },
+        codexPrivacy: {
+          title: '客户端指纹保护',
+          desc: '账号级可选项，默认关闭。开启后，发往上游的协议元数据会隐藏本地环境信息（如系统、路径、主机名），设备、会话等标识改为该账号专属的稳定随机标识。',
+          continuity: '保护持续开启，且账号、调用方和会话都不变时，同一会话及其重试使用相同的随机标识，服务端下发的续接标识原样保留。建议在新会话开始前调整此开关，进行中的会话切换模式可能影响续接。',
+          limits: '不会处理对话正文或工具参数。这不是 TLS 指纹伪装，也不保证避免降智。',
+          overrides: 'User-Agent、Originator、Version 和 Accept-Language 固定为通用的 Codex 客户端值，优先于账号自定义的请求头覆写。',
+          conflictIntro: '客户端指纹保护不能与以下设置同时开启，当前无法保存：',
+          conflictFingerprint: 'Codex 指纹收敛当前为「{mode}」，需要设为关闭',
+          conflictPreserve: 'Codex 会话标识当前为「保留客户端会话标识（实验）」，需要改回账号隔离',
+          conflictHidden: '此账号类型在本页没有这些设置的单独控件。点击下方修正后，会在本次保存时移除它们。',
+          conflictBlocked: '请先选择下方一种处理方式，再保存。',
+          conflictToast: '客户端指纹保护与当前的 Codex 指纹收敛或会话标识设置冲突，请在该开关下方处理后再保存。',
+          resolve: '关闭冲突设置，保留指纹保护',
+          turnOff: '关闭客户端指纹保护',
+          cleanupPending: '保存时会移除与客户端指纹保护冲突的旧设置。',
+          agentIdentityUnsupported: '客户端指纹保护不适用于 Agent Identity 账号。请返回上一步关闭该开关，或改用其他添加方式。',
+          serverRejected: '服务端拒绝了客户端指纹保护设置：{reason}',
+          serverCode: '错误代码：{code}'
+        },
         codexFingerprintMode: 'Codex 指纹收敛',
         codexFingerprintModeDesc: '多人共享同一 OAuth 账号时，将各用户的设备/会话标识收敛为账号级恒定值，减少上游可见的设备数和会话数。默认关闭：不做收敛，但客户端会话标识仍按账号隔离（不是原样透传）；需要时再显式开启；部分账号开启收敛后出现过额度缩水，请按自己的实测结果选择。',
         codexFingerprintOff: '关闭（默认，仍按账号隔离）',
@@ -1460,7 +1479,51 @@ export default {
           validating: '验证中...',
           validateAndCreate: '验证并创建账号',
           pleaseEnterRefreshToken: '请输入 Refresh Token',
-          pleaseEnterSessionToken: '请输入 Session Token'
+          pleaseEnterSessionToken: '请输入 Session Token',
+          // BPS：官方 Excel 登录客户端（普通 openai/oauth 账号，按 client_id 识别）
+          bps: {
+            clientLabel: '登录客户端',
+            codexTitle: 'Codex OAuth',
+            codexDesc: 'Codex CLI 登录，支持全部导入方式',
+            bpsTitle: 'BPS OAuth',
+            bpsDesc: '官方 Excel 登录，仅用于 BPS',
+            scopeNote:
+              'BPS 账号仅处理 HTTP Responses 请求（流式或 JSON），支持客户端 function/custom 工具；不支持原生 compact、WebSocket、图片、Chat Completions 和 Messages。请发送完整对话历史，不支持 previous_response_id。各工作区可用的模型由 OpenAI 决定，不保证任何模型可用。',
+            title: 'BPS 授权（官方 Excel 登录）',
+            followSteps: '通过官方 Excel 登录完成授权，然后把回调 URL 粘贴回来：',
+            openUrlDesc: '在新标签页打开链接，登录 OpenAI 并选择工作区。',
+            importantNotice:
+              '登录页可能提示“无法登录”，因为它预期在 Office 中运行，但地址栏仍可能包含回调 URL（https://bps.openai.com/…/auth/callback?code=…&state=…）。请复制完整 URL；只有下方兑换成功后授权才算完成。',
+            step3EnterCode: '粘贴完整回调 URL',
+            authCodeDesc: '复制整个地址栏内容，包括 code 和 state。不接受单独的 code。',
+            authCode: '回调 URL',
+            authCodePlaceholder: 'https://bps.openai.com/basispoints/extension/…/auth/callback?code=…&state=…',
+            authCodeHint: '回调 URL 含一次性凭据，不要分享或粘贴到其他地方。',
+            callbackValid: '回调与当前授权链接匹配，可以兑换。',
+            callbackErrors: {
+              empty: '请粘贴完整回调 URL。',
+              noSession: '请先生成授权链接。',
+              notUrl: '请粘贴完整回调 URL，而不是单独的 code。',
+              wrongOrigin: '该 URL 不是来自 bps.openai.com，请从官方登录页复制回调。',
+              wrongPath: '这不是 BPS 登录回调地址，请复制登录页跳转后的 URL。',
+              oauthError: '登录页返回错误（{error}）。请生成新链接后重新登录。',
+              missingCode: '回调中没有 code。请完成登录后重新复制 URL。',
+              missingState: '回调中没有 state。请复制完整 URL。',
+              stateMismatch: '该回调属于其他授权链接。请使用当前链接的回调，或重新生成链接。'
+            },
+            clientMismatch: 'OpenAI 返回的 Token 属于其他登录客户端，未保存任何内容。请重新生成链接后重试。',
+            refreshTokenAuth: 'Excel Refresh Token',
+            refreshTokenDesc:
+              '输入由 Excel 登录客户端签发的 Refresh Token，每行一个。Codex 的 Refresh Token 不能在这里使用。',
+            refreshTokenPlaceholder: '粘贴 Excel Refresh Token，每行一个',
+            reauthNote: '该账号使用 BPS（Excel）登录客户端，重新授权仍使用该客户端。',
+            identityTitle: 'BPS 账号',
+            identityDesc:
+              '通过官方 Excel 登录客户端授权。Codex 身份、原生 WebSocket、Codex CLI 限制、托管图片工具、自动透传和 compact 设置不适用于该账号，已隐藏。',
+            clientIdLabel: '登录客户端',
+            workspaceLabel: '工作区',
+            emailLabel: '邮箱'
+          }
         },
         grok: {
           title: 'Grok 账号授权',
