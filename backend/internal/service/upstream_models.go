@@ -223,6 +223,9 @@ func (s *AccountTestService) FetchUpstreamSupportedModels(ctx context.Context, a
 // snapshot. When no model is complete, the existing account snapshot is left
 // untouched.
 func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, account *Account) (*UpstreamModelCatalog, error) {
+	if account.IsExcelOAuth() {
+		return nil, newUpstreamModelSyncUnsupportedError("BPS model synchronization is unavailable; configure explicit BPS model mappings", nil)
+	}
 	fetched, err := s.fetchUpstreamModelListWithObservation(ctx, account)
 	var (
 		models          []string
@@ -1268,9 +1271,15 @@ func buildOpenAIAPIKeyModelsRequest(ctx context.Context, account *Account, valid
 // OAuth subscriptions do not expose the public Platform API /v1/models endpoint,
 // so treating them like API-key accounts makes the admin sync button fail locally.
 func (s *AccountTestService) buildOpenAIOAuthUpstreamModelsRequest(ctx context.Context, account *Account) (*http.Request, error) {
+	if account.IsExcelOAuth() {
+		return nil, newUpstreamModelSyncUnsupportedError("Excel OAuth cannot query the Codex model catalog", nil)
+	}
 	credentialAccount, err := resolveCredentialAccount(ctx, s.accountRepo, account)
 	if err != nil {
 		return nil, newUpstreamModelSyncConfigError("Failed to resolve OpenAI account credentials", err)
+	}
+	if credentialAccount.IsExcelOAuth() {
+		return nil, newUpstreamModelSyncUnsupportedError("Excel OAuth cannot query the Codex model catalog", nil)
 	}
 	if !credentialAccount.IsOpenAIOAuth() {
 		return nil, newUpstreamModelSyncUnsupportedError(

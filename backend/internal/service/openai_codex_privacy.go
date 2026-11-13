@@ -360,6 +360,16 @@ func applyCodexPrivacyBeforeSend(req *http.Request, a *Account) (*http.Request, 
 	if err != nil || p == nil {
 		return req, err
 	}
+	// This trusted attachment body is produced from validated image bytes by
+	// our BPS uploader. It carries no client protocol metadata or filenames;
+	// preserve pixels and framing, while applying the same header projection.
+	if trusted, _ := req.Context().Value(excelBPSAttachmentRequestKey{}).(bool); trusted && a.IsExcelOAuth() &&
+		req.URL != nil && req.URL.Scheme == "https" && req.URL.Host == "bps.openai.com" && req.URL.Path == "/basispoints/api/attachments" &&
+		strings.HasPrefix(req.Header.Get("Content-Type"), "multipart/form-data;") {
+		next := req.Clone(req.Context())
+		p.headers(next.Header)
+		return next, nil
+	}
 	marker := fmt.Sprintf("%s:%d", p.seed, p.principalID)
 	applied, _ := req.Context().Value(codexPrivacyAppliedKey{}).(*codexPrivacyAppliedState)
 	p.projectedIDs = make(map[codexPrivacyIDValue]struct{})

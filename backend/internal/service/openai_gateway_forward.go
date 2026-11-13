@@ -28,6 +28,11 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	if account.IsExcelOAuth() {
 		return s.forwardExcelBPS(ctx, c, account, body, time.Now())
 	}
+	var timezoneErr error
+	body, timezoneErr = ApplyUpstreamClientTimezone(ctx, account, body, upstreamTimezoneAccountProxy(account))
+	if timezoneErr != nil {
+		return nil, timezoneErr
+	}
 	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
 		SetActualOpenAIUpstreamEndpoint(c, "/v1/chat/completions")
 	}

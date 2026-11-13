@@ -192,6 +192,7 @@ import {
 } from '@/api/admin/accounts'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import OpenAIReferralCell from '@/components/account/OpenAIReferralCell.vue'
+import { isOpenAIBPSAccount } from '@/utils/openaiOAuthClient'
 
 const props = defineProps<{
   account: Account
@@ -203,8 +204,13 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 
-// Visible only for OpenAI OAuth accounts.
-const visible = computed(() => props.account.platform === 'openai' && props.account.type === 'oauth')
+// Visible only for native OpenAI Codex OAuth accounts (never BPS / Excel OAuth).
+const visible = computed(
+  () =>
+    props.account.platform === 'openai' &&
+    props.account.type === 'oauth' &&
+    !isOpenAIBPSAccount(props.account)
+)
 
 const loading = ref(false)
 const resetting = ref(false)

@@ -1415,6 +1415,19 @@ export interface Account {
   parent_chatgpt_account_id?: string
 
   grok_model_diagnostics?: GrokModelDiagnostics
+  upstream_client_timezone?: UpstreamClientTimezoneRuntime | null
+}
+
+export type UpstreamClientTimezoneSource = 'manual' | 'proxy_exit' | 'server_exit'
+export type UpstreamClientTimezoneStatus = 'off' | 'pending' | 'ready' | 'stale' | 'error'
+
+export interface UpstreamClientTimezoneRuntime {
+  mode: 'off' | 'manual' | 'auto'
+  status: UpstreamClientTimezoneStatus
+  timezone?: string
+  source?: UpstreamClientTimezoneSource
+  updated_at?: string
+  error?: string
 }
 
 // The admin account list may return this compact shape when lite=1. Detail
@@ -1506,9 +1519,20 @@ export interface GrokBillingSummary {
   failed_windows?: string[]
 }
 
+/**
+ * Local request statistics recorded by this gateway for a BPS (Excel login)
+ * account. They are not upstream quota: no utilization, credits or remaining
+ * amounts are implied.
+ */
+export interface OpenAIBPSLocalUsage {
+  five_hour?: WindowStats | null
+  seven_day?: WindowStats | null
+}
+
 export interface AccountUsageInfo {
-  source?: 'passive' | 'active'
+  source?: 'passive' | 'active' | 'bps_local'
   updated_at: string | null
+  bps_local_usage?: OpenAIBPSLocalUsage | null
   five_hour: UsageProgress | null
   seven_day: UsageProgress | null
   seven_day_sonnet: UsageProgress | null

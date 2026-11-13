@@ -745,3 +745,16 @@ func TestDeriveQuotaCheckResult_StatusMatrix(t *testing.T) {
 	res = deriveQuotaCheckResult(nil, "quota", now)
 	require.Equal(t, MonitorStatusError, res.Status)
 }
+
+func TestQuotaFetcher_ExcelBPSDoesNotReportLocalStatsAsQuotaHealth(t *testing.T) {
+	fetcher, usage, _, _, accounts := newQuotaFetcherTestSetup(t)
+	account := excelBPSAccount(t)
+	accounts.accounts[account.ID] = account
+	snapshot := fetcher.Fetch(context.Background(), account.ID)
+	require.False(t, snapshot.Success)
+	require.False(t, snapshot.CredentialInvalid)
+	require.Equal(t, "bps_local", snapshot.Source)
+	require.Contains(t, snapshot.Error, "do not provide upstream quota")
+	require.Empty(t, snapshot.Tiers)
+	require.Zero(t, usage.getCalls())
+}

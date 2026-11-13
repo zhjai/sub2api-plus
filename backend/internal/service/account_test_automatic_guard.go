@@ -17,6 +17,11 @@ func (s *AccountTestService) doAccountTestUpstreamTLS(req *http.Request, proxy s
 }
 
 func (s *AccountTestService) doAccountTestUpstreamMode(req *http.Request, proxy string, account *Account, profile *tlsfingerprint.Profile, tlsFallback bool) (*http.Response, error) {
+	var timezoneErr error
+	req, timezoneErr = applyUpstreamClientTimezoneHTTP(req, account, proxy)
+	if timezoneErr != nil {
+		return nil, timezoneErr
+	}
 	var privacyErr error
 	req, privacyErr = applyCodexPrivacyBeforeSend(req, account)
 	if privacyErr != nil {

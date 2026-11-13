@@ -96,9 +96,13 @@ const openAILongContextBillingEnabledKey = "openai_long_context_billing_enabled"
 
 const (
 	OpenAIEndpointCapabilityChatCompletions OpenAIEndpointCapability = "chat_completions"
-	OpenAIEndpointCapabilityEmbeddings      OpenAIEndpointCapability = "embeddings"
-	OpenAIEndpointCapabilityAlphaSearch     OpenAIEndpointCapability = "alpha_search"
-	OpenAIEndpointCapabilityLive            OpenAIEndpointCapability = "live"
+	// ResponsesCompatible is internal admission for ordinary text Responses:
+	// either a native Responses transport or the existing chat adapter can serve it.
+	// It does not grant Chat Completions, image, compact or WebSocket support.
+	OpenAIEndpointCapabilityResponsesCompatible OpenAIEndpointCapability = "responses_compatible"
+	OpenAIEndpointCapabilityEmbeddings          OpenAIEndpointCapability = "embeddings"
+	OpenAIEndpointCapabilityAlphaSearch         OpenAIEndpointCapability = "alpha_search"
+	OpenAIEndpointCapabilityLive                OpenAIEndpointCapability = "live"
 	// OpenAIEndpointCapabilityGrokMediaGeneration keeps image/video generation
 	// away from Grok accounts that are explicitly disabled or whose billing
 	// entitlement probe was forbidden. Video status lookups intentionally do not
@@ -979,7 +983,7 @@ func (a *Account) isModelMappingSupported(requestedModel string) bool {
 	// 该短路必须在 model_mapping 判定之前：账号从"白名单模式"切换到透传后，
 	// credentials 里常残留旧的非空 model_mapping，若不在此放行，透传账号会被
 	// model_mapping 白名单错误排除出候选集，导致 no available accounts / 404（issue #4936）。
-	if a.IsOpenAIPassthroughEnabled() {
+	if a.IsOpenAIPassthroughEnabled() && !a.IsExcelOAuth() {
 		return true
 	}
 	mapping := a.GetModelMapping()
@@ -1941,7 +1945,12 @@ func (a *Account) SupportsOpenAIEndpointCapability(capability OpenAIEndpointCapa
 		return false
 	}
 	if a.IsExcelOAuth() {
-		return capability == OpenAIEndpointCapabilityResponses
+		// Strict Responses admission is reserved for image/remote-compaction
+		// requests. The BPS adapter implements ordinary text Responses only.
+		return capability == OpenAIEndpointCapabilityResponsesCompatible
+	}
+	if capability == OpenAIEndpointCapabilityResponsesCompatible {
+		capability = OpenAIEndpointCapabilityChatCompletions
 	}
 
 	if a.IsGrok() {

@@ -4099,3 +4099,40 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_LegacyAccountModelRoute
 		selection.ReleaseFunc()
 	}
 }
+
+// A plain Responses request must acquire an Excel account through both the
+// candidate gate and the hydrated live gate, without granting the native chat endpoint.
+func TestOpenAIAccountScheduler_BPSOrdinaryResponsesAdmission(t *testing.T) {
+	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	groupID := int64(10129)
+	bps := *excelBPSAccount(t)
+	bps.Status, bps.Schedulable, bps.Priority = StatusActive, true, 0
+	bps.Credentials["model_mapping"] = map[string]any{"gpt-6-astra": "gpt-6-astra"}
+	legacy := Account{ID: 43, Platform: PlatformOpenAI, Type: AccountTypeAPIKey,
+		Status: StatusActive, Schedulable: true, Concurrency: 1, Priority: 10,
+		Extra: map[string]any{"openai_responses_supported": false}}
+	for _, tt := range []struct {
+		name       string
+		accounts   []Account
+		capability OpenAIEndpointCapability
+		want       int64
+	}{
+		{"BPS ranks first for ordinary Responses", []Account{bps, legacy}, OpenAIEndpointCapabilityResponsesCompatible, bps.ID},
+		{"legacy chat adapter still works", []Account{legacy}, OpenAIEndpointCapabilityResponsesCompatible, legacy.ID},
+		{"real chat excludes BPS", []Account{bps, legacy}, OpenAIEndpointCapabilityChatCompletions, legacy.ID},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Gateway.Scheduling.LoadBatchEnabled = false
+			svc := &OpenAIGatewayService{accountRepo: schedulerTestOpenAIAccountRepo{accounts: tt.accounts}, cache: &schedulerTestGatewayCache{}, cfg: cfg, concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{})}
+			selection, _, err := svc.SelectAccountWithSchedulerForCapability(context.Background(), &groupID, "", "", "gpt-6-astra", nil, OpenAIUpstreamTransportAny, tt.capability, false, false, true)
+			require.NoError(t, err)
+			require.NotNil(t, selection)
+			require.NotNil(t, selection.Account)
+			require.Equal(t, tt.want, selection.Account.ID)
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+		})
+	}
+}

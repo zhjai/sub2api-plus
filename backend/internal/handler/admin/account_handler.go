@@ -2884,7 +2884,14 @@ func (h *AccountHandler) respondAvailableModels(c *gin.Context, account *service
 			if models, fetchErr := h.accountTestService.FetchOpenAIAccountModels(c.Request.Context(), account); fetchErr == nil {
 				response.Success(c, models)
 				return
+			} else if account.IsExcelOAuth() {
+				response.ErrorFrom(c, fetchErr)
+				return
 			}
+		}
+		if account.IsExcelOAuth() {
+			response.Error(c, http.StatusServiceUnavailable, "BPS model discovery service is unavailable; configure explicit BPS model mappings")
+			return
 		}
 		// OpenAI 自动透传会绕过常规模型改写，测试/模型列表也应回落到默认模型集。
 		if account.IsOpenAIPassthroughEnabled() {
@@ -3233,6 +3240,10 @@ func (h *AccountHandler) SetPrivacy(c *gin.Context) {
 	}
 	if account.Type != service.AccountTypeOAuth {
 		response.BadRequest(c, "Only OAuth accounts support privacy setting")
+		return
+	}
+	if account.IsExcelOAuth() {
+		response.BadRequest(c, "BPS accounts do not support Codex privacy settings")
 		return
 	}
 	var mode string

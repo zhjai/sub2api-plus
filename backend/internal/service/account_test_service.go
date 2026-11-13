@@ -515,6 +515,13 @@ func (s *AccountTestService) doOpenAIEvalUpstream(req *http.Request, proxyURL st
 		return openAIEvalBeforeSend(ctx)
 	}
 	req = req.WithContext(context.WithValue(req.Context(), accountRPMRetryAdmissionKey{}, policy))
+	// Locale is a setting of the logical account, including when its credential
+	// is supplied by another account. Apply before every transport branch; the
+	// native evaluation path sends directly instead of using accountRPMSendHTTP.
+	req, err = applyUpstreamClientTimezoneHTTP(req, account, proxyURL)
+	if err != nil {
+		return nil, err
+	}
 	if credential.IsExcelOAuth() {
 		if transport, ok := s.httpUpstream.(HTTPUpstreamSingleSend); !ok || !transport.SupportsSingleSend() {
 			_ = req.Body.Close()
@@ -589,7 +596,7 @@ func (s *AccountTestService) SetOpenAIGatewayService(gateway *OpenAIGatewayServi
 // It only fills picker-only gaps (local display-name fallbacks, OAuth image choices)
 // on its own copy; the shared catalog and its cache stay untouched.
 func (s *AccountTestService) FetchOpenAIAccountModels(ctx context.Context, account *Account) ([]openai.Model, error) {
-	if s == nil || s.openaiGatewayService == nil {
+	if s == nil || (s.openaiGatewayService == nil && !account.IsExcelOAuth()) {
 		return nil, errors.New("OpenAI model discovery service is unavailable")
 	}
 	// The shared discovery response is the raw upstream catalog. Project it
@@ -1384,7 +1391,7 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if isOAuth && s.accountRepo != nil {
+	if isOAuth && !credentialAccount.IsExcelOAuth() && s.accountRepo != nil {
 		if updates, err := extractOpenAICodexProbeUpdates(resp); err == nil && len(updates) > 0 {
 			_ = s.accountRepo.UpdateExtra(ctx, account.ID, updates)
 			mergeAccountExtra(account, updates)

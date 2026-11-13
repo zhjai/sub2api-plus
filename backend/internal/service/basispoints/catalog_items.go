@@ -8,13 +8,18 @@ func isCatalogItem(kind string) bool {
 
 type catalogDeclaration struct {
 	item           object
+	namespaces     []object
 	namespace, key string
 	path           string
 }
 
 // Flatten only declaration identity here. Validate the selected schema later,
 // so a superseded historical schema cannot reject a valid current declaration.
-func flattenCatalogAt(value any, namespace, location string) ([]catalogDeclaration, error) {
+func flattenCatalogAt(value any, namespace, location string, ancestry ...[]object) ([]catalogDeclaration, error) {
+	var namespaces []object
+	if len(ancestry) > 0 {
+		namespaces = ancestry[0]
+	}
 	items, ok := value.([]any)
 	if value != nil && !ok {
 		return nil, fmt.Errorf("basispoints client tools must be an array")
@@ -35,7 +40,12 @@ func flattenCatalogAt(value any, namespace, location string) ([]catalogDeclarati
 			if namespace != "" {
 				path = namespace + "." + name
 			}
-			nested, err := flattenCatalogAt(item["tools"], path, itemPath+".tools")
+			metadata, err := namespaceMetadata(item)
+			if err != nil {
+				return nil, err
+			}
+			chain := append(append([]object(nil), namespaces...), metadata)
+			nested, err := flattenCatalogAt(item["tools"], path, itemPath+".tools", chain)
 			if err != nil {
 				return nil, err
 			}
@@ -49,7 +59,7 @@ func flattenCatalogAt(value any, namespace, location string) ([]catalogDeclarati
 		if isUnsupportedHostedTool(kind) {
 			key = "hosted:" + kind
 		}
-		result = append(result, catalogDeclaration{item: item, namespace: namespace, key: key, path: itemPath})
+		result = append(result, catalogDeclaration{item: item, namespaces: namespaces, namespace: namespace, key: key, path: itemPath})
 	}
 	return result, nil
 }
@@ -99,7 +109,7 @@ func (b *Bridge) collectClientCatalog(source object, inherited bool) ([]any, err
 		if inherited {
 			delete(b.tools, key)
 		}
-		additional, err := b.collectToolsAt([]any{declaration.item}, declaration.namespace, declaration.path, true)
+		additional, err := b.collectToolsAt([]any{declaration.item}, declaration.namespace, declaration.path, true, declaration.namespaces)
 		if err != nil {
 			return nil, err
 		}

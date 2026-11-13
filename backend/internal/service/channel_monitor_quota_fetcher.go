@@ -212,6 +212,10 @@ func (f *ChannelMonitorQuotaFetcher) fetchUncached(ctx context.Context, accountI
 		return quotaErrorSnapshot("usage", "linked account not found", now)
 	}
 
+	if account.IsExcelOAuth() {
+		return quotaErrorSnapshot("bps_local", "BPS accounts do not provide upstream quota; local usage is not a quota health signal", now)
+	}
+
 	// 账号只在路由前加载这一次；已加载的 account 直接传给数据源
 	// （GetUsageForAccount / QueryUsageForAccount / QueryBalanceForAccount），
 	// 下游服务不再各自 GetByID（每次含 proxies/groups 联查）。

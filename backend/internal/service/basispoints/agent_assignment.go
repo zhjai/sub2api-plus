@@ -23,17 +23,12 @@ func encryptedAgentPath(item object, index int) string {
 // substitute for its unreadable payload, even if a readable header is present.
 func validateNewAgentMessage(input any) error {
 	items, _ := input.([]any)
-	for index := len(items) - 1; index >= 0; index-- {
+	index := currentAgentAssignmentIndex(items)
+	if index >= 0 {
 		item, _ := items[index].(object)
-		switch text(item["type"]) {
-		case "additional_tools", "tool_search_output", "compaction_trigger":
-			continue
-		case "agent_message":
-			if path := encryptedAgentPath(item, index); path != "" {
-				return &ContentValidationError{Path: path, ContentType: "encrypted_content", message: "basispoints cannot read a new encrypted agent assignment; refresh the model catalog, start a new conversation without a multi-agent v2 override, and resend the original plaintext task"}
-			}
+		if path := encryptedAgentPath(item, index); path != "" {
+			return &ContentValidationError{Path: path, ContentType: "encrypted_content", message: "basispoints cannot read a new encrypted agent assignment; refresh the model catalog, start a new conversation without a multi-agent v2 override, and resend the original plaintext task"}
 		}
-		break
 	}
 	return nil
 }
@@ -90,4 +85,19 @@ func plaintextPromptParameters(name, namespace string, parameters object) object
 	props["message"] = schema
 	result["properties"] = props
 	return result
+}
+
+// Catalog updates and compaction markers do not supersede a trailing task.
+func currentAgentAssignmentIndex(items []any) int {
+	for index := len(items) - 1; index >= 0; index-- {
+		item, _ := items[index].(object)
+		switch text(item["type"]) {
+		case "additional_tools", "tool_search_output", "compaction_trigger":
+			continue
+		case "agent_message":
+			return index
+		}
+		break
+	}
+	return -1
 }

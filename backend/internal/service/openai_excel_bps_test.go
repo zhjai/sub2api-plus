@@ -41,7 +41,7 @@ func TestOpenAIExcelBPSForwardStreamingAndJSON(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		t.Run(map[bool]string{true: "stream", false: "json"}[stream], func(t *testing.T) {
 			upstream := &httpUpstreamRecorder{resp: excelBPSMockResponse(200, excelBPSSuccessWire)}
-			s := openAIClientToolsTestService(upstream)
+			s := excelBPSTestService(upstream)
 			a := excelBPSAccount(t)
 			a.Credentials["model_mapping"] = map[string]any{"client-model": "gpt-6-astra"}
 			body := []byte(`{"model":"client-model","input":"hello","reasoning":{"effort":"max"},"client_metadata":{"thread_id":"local-private-thread","os":"local-private-os"},"prompt_cache_key":"local-private-cache","stream":` + map[bool]string{true: "true", false: "false"}[stream] + "}")
@@ -78,12 +78,12 @@ func TestOpenAIExcelBPSForwardStreamingAndJSON(t *testing.T) {
 }
 
 func TestOpenAIExcelBPSUnsupportedRequestsNeverReachCodex(t *testing.T) {
-	s := openAIClientToolsTestService(&httpUpstreamRecorder{})
+	s := excelBPSTestService(&httpUpstreamRecorder{})
 	a := excelBPSAccount(t)
 	require.True(t, a.IsExcelOAuth())
 	require.False(t, a.UsesOpenAICodexProtocol())
-	require.True(t, a.SupportsOpenAIEndpointCapability(OpenAIEndpointCapabilityResponses))
-	for _, capability := range []OpenAIEndpointCapability{OpenAIEndpointCapabilityChatCompletions, OpenAIEndpointCapabilityEmbeddings, OpenAIEndpointCapabilityAlphaSearch, OpenAIEndpointCapabilityLive} {
+	require.True(t, a.SupportsOpenAIEndpointCapability(OpenAIEndpointCapabilityResponsesCompatible))
+	for _, capability := range []OpenAIEndpointCapability{OpenAIEndpointCapabilityResponses, OpenAIEndpointCapabilityChatCompletions, OpenAIEndpointCapabilityEmbeddings, OpenAIEndpointCapabilityAlphaSearch, OpenAIEndpointCapabilityLive} {
 		require.False(t, a.SupportsOpenAIEndpointCapability(capability))
 	}
 	require.Zero(t, openAICompactSupportTier(a))
@@ -134,7 +134,7 @@ func TestOpenAIExcelBPSAccountTestUsesSameBridge(t *testing.T) {
 func TestOpenAIExcelBPSHTTPErrorDoesNotEchoGrant(t *testing.T) {
 	a := excelBPSAccount(t)
 	upstream := &httpUpstreamRecorder{resp: excelBPSMockResponse(403, `{"error":{"code":"permission_error","message":"denied `+a.GetOpenAIAccessToken()+`"}}`)}
-	s := openAIClientToolsTestService(upstream)
+	s := excelBPSTestService(upstream)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest("POST", "/responses", nil)
@@ -255,7 +255,7 @@ func TestOpenAIExcelBPSGatewayToolContinuation(t *testing.T) {
 			native := map[string]any{"type": "function_call", "name": "run_officejs", "id": "fc_bps", "call_id": "call_bps", "arguments": string(args), "status": "completed"}
 			wire := "data: " + string(encode(map[string]any{"type": "response.completed", "response": map[string]any{"id": "resp_tool", "status": "completed", "output": []any{native}}})) + "\n\n"
 			upstream := &httpUpstreamRecorder{resp: excelBPSMockResponse(200, wire)}
-			s := openAIClientToolsTestService(upstream)
+			s := excelBPSTestService(upstream)
 			a := excelBPSAccount(t)
 			body := map[string]any{"model": "gpt-6-astra", "stream": false, "input": "hello", "tools": []any{map[string]any{"type": "namespace", "name": "client", "tools": []any{map[string]any{"type": kind, "name": "run"}}}}}
 			forward := func(raw []byte) (*httptest.ResponseRecorder, error) {
@@ -308,7 +308,7 @@ func TestOpenAIExcelBPSGatewayKeepsPlaintextCollaborationMetadata(t *testing.T) 
 					"data: " + string(encode(map[string]any{"type": "response.output_item.done", "output_index": 0, "item": native})) + "\n\n" +
 					"data: " + string(encode(map[string]any{"type": "response.completed", "response": map[string]any{"id": "resp_agent", "status": "completed", "output": []any{native}}})) + "\n\n"
 				upstream := &httpUpstreamRecorder{resp: excelBPSMockResponse(200, wire)}
-				s := openAIClientToolsTestService(upstream)
+				s := excelBPSTestService(upstream)
 				a := excelBPSAccount(t)
 				body := map[string]any{"model": "gpt-6-astra", "stream": stream, "input": "Delegate the synthetic task", "tools": []any{map[string]any{
 					"type": "namespace", "name": "collaboration", "tools": []any{map[string]any{"type": "function", "name": operation, "parameters": map[string]any{
@@ -422,8 +422,8 @@ func TestOpenAIExcelBPSTwoHopCollaboration(t *testing.T) {
 		t.Run(map[bool]string{true: "sse", false: "json"}[stream], func(t *testing.T) {
 			encode := func(v any) string { b, err := json.Marshal(v); require.NoError(t, err); return string(b) }
 			bps := &httpUpstreamRecorder{}
-			inner := openAIClientToolsTestService(bps)
-			outer := openAIClientToolsTestService(nil)
+			inner := excelBPSTestService(bps)
+			outer := excelBPSTestService(nil)
 			outer.httpUpstream = &excelBPSTwoHopTransport{httpUpstreamRecorder: new(httpUpstreamRecorder), inner: inner, account: excelBPSAccount(t)}
 			proxy := &Account{ID: 43, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Credentials: map[string]any{"api_key": "synthetic", "base_url": "https://relay.example/v1"}}
 			forward := func(thread string, input any, tools []any) gjson.Result {
@@ -476,7 +476,7 @@ func TestOpenAIExcelBPSTwoHopCollaboration(t *testing.T) {
 
 func TestExcelBPSCurrentAssignmentErrorHasSafeParam(t *testing.T) {
 	upstream := new(httpUpstreamRecorder)
-	s := openAIClientToolsTestService(upstream)
+	s := excelBPSTestService(upstream)
 	body := []byte(`{"model":"gpt-6-astra","input":[{"type":"agent_message","content":[{"type":"input_text","text":"Readable routing header"},{"type":"encrypted_content","data":"SYNTHETIC_PRIVATE_ASSIGNMENT"}]}]}`)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -491,7 +491,7 @@ func TestExcelBPSCurrentAssignmentErrorHasSafeParam(t *testing.T) {
 
 func TestExcelBPSForwardPreservesAccountErrorReason(t *testing.T) {
 	upstream := new(httpUpstreamRecorder)
-	s := openAIClientToolsTestService(upstream)
+	s := excelBPSTestService(upstream)
 	a := excelBPSAccount(t)
 	a.Credentials["plan_type"] = "free"
 	body := []byte(`{"model":"gpt-6-astra","input":"hello"}`)
@@ -503,4 +503,69 @@ func TestExcelBPSForwardPreservesAccountErrorReason(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, rec.Code)
 	require.Equal(t, "OPENAI_EXCEL_OAUTH_PLAN_UNSUPPORTED", gjson.Get(rec.Body.String(), "error.code").String())
 	require.Empty(t, upstream.requests)
+}
+
+func TestOpenAIExcelBPSRequestOptionsSharedPreparation(t *testing.T) {
+	a := excelBPSAccount(t)
+	history := []byte(`{"model":"gpt-6-astra","input":[{"type":"agent_message","author":"/root/worker","recipient":"/root","content":[{"type":"input_text","text":"Payload:\n"},{"type":"encrypted_content","encrypted_content":"opaque-history"}]},{"role":"user","content":"continue"}]}`)
+	_, _, err := prepareExcelBPSRequest(context.Background(), history, a.GetOpenAIAccessToken(), a, "", false)
+	require.Error(t, err, "history omission must be opt-in")
+	a.Extra = map[string]any{ExcelBPSHistoricalEncryptedKey: true}
+	req, _, err := prepareExcelBPSRequest(context.Background(), history, a.GetOpenAIAccessToken(), a, "", false)
+	require.NoError(t, err)
+	body, err := io.ReadAll(req.Body)
+	require.NoError(t, err)
+	require.NotContains(t, string(body), "opaque-history")
+	require.Contains(t, string(body), "Encrypted content omitted")
+	current := []byte(`{"model":"gpt-6-astra","input":[{"type":"agent_message","author":"/root","recipient":"/root/worker","content":[{"type":"input_text","text":"Message Type: TASK\nPayload:\n"},{"type":"encrypted_content","encrypted_content":"current-task"}]}]}`)
+	_, _, err = prepareExcelBPSRequest(context.Background(), current, a.GetOpenAIAccessToken(), a, "", false)
+	require.Error(t, err, "omission must not discard a current encrypted assignment")
+	hosted := []byte(`{"model":"gpt-6-astra","input":"hi","tools":[{"type":"namespace","name":"native","tools":[{"type":"web_search"}]}]}`)
+	a.Extra = map[string]any{ExcelBPSHostedToolsPolicyKey: "reject"}
+	_, _, err = prepareExcelBPSRequest(context.Background(), hosted, a.GetOpenAIAccessToken(), a, "", false)
+	require.ErrorContains(t, err, "hosted tool")
+	a.Extra[ExcelBPSHostedToolsPolicyKey] = "omit"
+	_, _, err = prepareExcelBPSRequest(context.Background(), hosted, a.GetOpenAIAccessToken(), a, "", false)
+	require.NoError(t, err)
+	a.Extra[ExcelBPSHostedToolsPolicyKey] = "reject"
+	none := bytes.Replace(hosted, []byte(`"input":"hi"`), []byte(`"input":"hi","tool_choice":"none"`), 1)
+	_, _, err = prepareExcelBPSRequest(context.Background(), none, a.GetOpenAIAccessToken(), a, "", false)
+	require.NoError(t, err, "tool_choice none never asks BPS for hosted tools")
+}
+
+func TestOpenAIExcelBPSManifestDisablesWebsocketPreference(t *testing.T) {
+	bps := excelBPSAccount(t)
+	body := []byte(`{"models":[{"slug":"gpt-6-astra","prefer_websockets":true,"multi_agent_reasoning_effort":"high"}]}`)
+	out, changed, err := restrictExcelBPSModels(body, PlatformOpenAI, []Account{*bps}, nil, nil, true)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.False(t, gjson.GetBytes(out, "models.0.prefer_websockets").Bool())
+	require.Equal(t, gjson.Null, gjson.GetBytes(out, "models.0.multi_agent_reasoning_effort").Type)
+}
+
+func TestOpenAIExcelBPSWebsocketPreferenceFollowsEligibleRoutes(t *testing.T) {
+	bps := excelBPSAccount(t)
+	bps.Credentials["model_mapping"] = map[string]any{"bps-only": "gpt-6-astra", "shared": "gpt-6-astra"}
+	native := Account{ID: 44, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{"client_id": openai.ClientID, "model_mapping": map[string]any{"native-only": "gpt-6-astra", "shared": "gpt-6-astra"}}}
+	body := []byte(`{"models":[{"slug":"bps-only","prefer_websockets":true,"support_verbosity":true,"supports_reasoning_summary_parameter":true,"supports_reasoning_summaries":true,"multi_agent_version":"v2"},{"slug":"shared","prefer_websockets":true,"support_verbosity":true,"supports_reasoning_summary_parameter":true,"supports_reasoning_summaries":true,"multi_agent_version":"v2"},{"slug":"native-only","prefer_websockets":true,"support_verbosity":true,"supports_reasoning_summary_parameter":true,"supports_reasoning_summaries":true,"multi_agent_version":"v2"}]}`)
+	out, changed, err := restrictExcelBPSModels(body, PlatformOpenAI, []Account{*bps, native}, nil, nil, true)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.False(t, gjson.GetBytes(out, "models.0.prefer_websockets").Bool())
+	require.False(t, gjson.GetBytes(out, "models.1.prefer_websockets").Bool())
+	require.True(t, gjson.GetBytes(out, "models.2.prefer_websockets").Bool())
+	require.Equal(t, "v2", gjson.GetBytes(out, "models.2.multi_agent_version").String())
+	for _, field := range []string{"support_verbosity", "supports_reasoning_summary_parameter"} {
+		require.False(t, gjson.GetBytes(out, "models.0."+field).Bool())
+		require.False(t, gjson.GetBytes(out, "models.1."+field).Bool())
+		require.True(t, gjson.GetBytes(out, "models.2."+field).Bool())
+	}
+	require.True(t, gjson.GetBytes(out, "models.0.supports_reasoning_summaries").Bool())
+	require.True(t, gjson.GetBytes(out, "models.1.supports_reasoning_summaries").Bool())
+
+	group := &Group{ModelRoutingEnabled: true, ModelRouting: map[string][]int64{"shared": {native.ID}}}
+	out, _, err = restrictExcelBPSModels(body, PlatformOpenAI, []Account{*bps, native}, group, nil, true)
+	require.NoError(t, err)
+	require.True(t, gjson.GetBytes(out, "models.1.prefer_websockets").Bool())
+	require.Equal(t, "v2", gjson.GetBytes(out, "models.1.multi_agent_version").String())
 }

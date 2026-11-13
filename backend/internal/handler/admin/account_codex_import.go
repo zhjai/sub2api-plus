@@ -489,6 +489,9 @@ func flattenCodexImportValues(values []any) []any {
 }
 
 func normalizeCodexImportEntry(entry codexImportEntry) (*codexImportAccount, error) {
+	if codexImportContainsExcelGrant(entry.Value) {
+		return nil, errors.New("BPS Excel OAuth sessions cannot be imported as Codex accounts; use the BPS OAuth login or reauthorization flow")
+	}
 	now := time.Now().UTC()
 	item := &codexImportAccount{
 		Credentials: map[string]any{},
@@ -950,7 +953,7 @@ func buildCodexAccountIndex(accounts []service.Account) *codexAccountIndex {
 }
 
 func (i *codexAccountIndex) Add(account service.Account) {
-	if i == nil {
+	if i == nil || account.IsExcelOAuth() {
 		return
 	}
 	if i.accountsByKey == nil {
@@ -1288,4 +1291,59 @@ func codexUnixTime(value int64) time.Time {
 		return time.UnixMilli(value).UTC()
 	}
 	return time.Unix(value, 0).UTC()
+}
+
+// Detection is only an import-routing guard, not authentication of a JWT.
+// Inspect every recognized token/client location so an outer Codex client_id
+// cannot conceal an Excel token in the same import object.
+func codexImportContainsExcelGrant(value any) bool {
+	switch value := value.(type) {
+	case string:
+		parts := strings.Split(strings.TrimSpace(value), ".")
+		if len(parts) != 3 {
+			return false
+		}
+		payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+		if err != nil {
+			return false
+		}
+		var claims struct {
+			ClientID string `json:"client_id"`
+			AZP      string `json:"azp"`
+			Audience any    `json:"aud"`
+		}
+		if json.Unmarshal(payload, &claims) != nil {
+			return false
+		}
+		if strings.TrimSpace(claims.ClientID) == openai.ExcelClientID || strings.TrimSpace(claims.AZP) == openai.ExcelClientID {
+			return true
+		}
+		switch audience := claims.Audience.(type) {
+		case string:
+			return strings.TrimSpace(audience) == openai.ExcelClientID
+		case []any:
+			for _, audience := range audience {
+				if audience == openai.ExcelClientID {
+					return true
+				}
+			}
+		}
+	case map[string]any:
+		for _, key := range []string{"client_id", "clientId"} {
+			if client, ok := value[key].(string); ok && strings.TrimSpace(client) == openai.ExcelClientID {
+				return true
+			}
+		}
+		for _, key := range []string{"access_token", "accessToken", "token", "id_token", "idToken"} {
+			if token, ok := value[key].(string); ok && codexImportContainsExcelGrant(token) {
+				return true
+			}
+		}
+		for _, key := range []string{"tokens", "credentials", "session_info"} {
+			if nested, ok := value[key].(map[string]any); ok && codexImportContainsExcelGrant(nested) {
+				return true
+			}
+		}
+	}
+	return false
 }

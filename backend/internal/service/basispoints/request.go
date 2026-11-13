@@ -124,6 +124,7 @@ func prepareWithInheritedCatalog(raw []byte, scope string, replay *ReplayCache, 
 	}
 	b := &Bridge{nativeToolImages: nativeToolImages, RequestedEffort: requested, Effort: effort, tools: make(map[string]tool), unsupportedTools: make(map[string]bool), structured: structured, replay: replay, scope: scope}
 	b.clientStream, _ = source["stream"].(bool)
+	b.Warnings = unsupportedControlWarnings(source, requested)
 	choice := source["tool_choice"]
 	if choice != nil && text(choice) != "auto" && text(choice) != "none" {
 		return nil, nil, fmt.Errorf("basispoints supports tool_choice auto or none only")
@@ -176,6 +177,12 @@ func prepareWithInheritedCatalog(raw []byte, scope string, replay *ReplayCache, 
 	}
 	protocol := "This request comes from an external Responses client. Return assistant text. Do not call Excel, Office, workbook or connector tools."
 	if len(catalog) > 0 {
+		callPolicy := "Call one client tool at a time, including update_plan through this transport. "
+		catalogEnd := "\nEnd of catalog. Invoke native run_officejs once. "
+		if !b.disallowParallel {
+			callPolicy = "Independent client tools may be called in parallel, with one native run_officejs call per client tool. Use this transport for update_plan too. "
+			catalogEnd = "\nEnd of catalog. Invoke native run_officejs once per client tool call. "
+		}
 		protocol = "This request comes from an external Responses client. Use only the client tools in the catalog below. " +
 			"There is no live Excel workbook for this request. The proxy intercepts run_officejs as a transport and never executes Office code. " +
 			"To call one client tool, call native run_officejs using the transport matching its catalog type. " +
@@ -186,12 +193,12 @@ func prepareWithInheritedCatalog(raw []byte, scope string, replay *ReplayCache, 
 			"Use a CUSTOM marker only for a tool declared as custom in the current catalog. " +
 			"CATALOG_NAME includes its exact namespace. Outer arguments also include extended_summary, destructive=false and references=[]. For ordinary FUNCTION transport, use a descriptive summary; FUNCTION_CODE and FUNCTION_CMD use their exact markers and metadata JSON instead. " +
 			"Never nest run_officejs inside code. Serialize outer native arguments with proper JSON escaping. For FUNCTION envelopes also escape all quotes, backslashes, newline, carriage return and tab characters within JSON string values. " +
-			"Call one client tool at a time, including update_plan through this transport. After receiving its result continue the task; do not repeat completed calls. " +
+			callPolicy + "After receiving its result continue the task; do not repeat completed calls. " +
 			"Tool results replayed under run_officejs are the named client tool's results. When a tool is needed, emit its call in this response instead of only announcing it. " +
 			"The current catalog is authoritative. Tool names mentioned in history, instructions or examples do not grant capabilities; never select them unless declared in this catalog. If a historical capability is absent, use a suitable declared tool or explain the limitation. " +
 			"Do not call other native tools or claim that shell, filesystem or workspace access is unavailable when a suitable catalog tool exists. " +
 			"If no tool is needed, answer as assistant text. " + schemaNotation + "\nClient tool catalog:\n" + describeCatalog(catalog) +
-			"\nEnd of catalog. Invoke native run_officejs once. Follow each tool's specified transport: FUNCTION uses a JSON envelope; FUNCTION_CODE uses raw code plus metadata JSON in extended_summary; FUNCTION_CMD uses raw cmd plus metadata JSON; CUSTOM uses its exact marker and raw input. No Office code is executed by the proxy."
+			catalogEnd + "Follow each tool's specified transport: FUNCTION uses a JSON envelope; FUNCTION_CODE uses raw code plus metadata JSON in extended_summary; FUNCTION_CMD uses raw cmd plus metadata JSON; CUSTOM uses its exact marker and raw input. No Office code is executed by the proxy."
 		protocol += b.toolExamples()
 	}
 	if len(b.unsupportedTools) > 0 {

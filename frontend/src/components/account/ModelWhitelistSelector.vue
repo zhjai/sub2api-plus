@@ -95,6 +95,7 @@
     <!-- Quick Actions -->
     <div class="mb-4 flex flex-wrap gap-2">
       <button
+        v-if="!bpsMode"
         type="button"
         @click="fillRelated"
         class="rounded-lg border border-blue-200 px-3 py-1.5 text-sm text-blue-600 hover:bg-blue-50 dark:border-blue-800 dark:text-blue-400 dark:hover:bg-blue-900/30"
@@ -157,6 +158,7 @@ import Icon from '@/components/icons/Icon.vue'
 import { allModels, getModelsByPlatform } from '@/composables/useModelWhitelist'
 import { supportsUpstreamModelSync } from '@/constants/platformCatalog'
 import { extractApiErrorMessage } from '@/utils/apiError'
+import { OPENAI_BPS_RECOMMENDED_MODELS } from '@/utils/openaiBPS'
 
 const { t } = useI18n()
 
@@ -173,7 +175,8 @@ const props = withDefaults(defineProps<{
     api_key: string
   }
   showSyncButton?: boolean
-}>(), { showSyncButton: true })
+  bpsMode?: boolean
+}>(), { showSyncButton: true, bpsMode: false })
 
 const emit = defineEmits<{
   'update:modelValue': [value: string[]]
@@ -221,6 +224,7 @@ const normalizedPlatforms = computed(() => {
 })
 
 const canSyncUpstream = computed(() => {
+  if (props.bpsMode) return false
   if (props.accountId) {
     if (normalizedPlatforms.value.length === 0) return true
     return normalizedPlatforms.value.some(supportsUpstreamModelSync)
@@ -232,6 +236,9 @@ const canSyncUpstream = computed(() => {
 })
 
 const availableOptions = computed(() => {
+  if (props.bpsMode) {
+    return OPENAI_BPS_RECOMMENDED_MODELS.map(value => ({ value, label: value }))
+  }
   if (normalizedPlatforms.value.length === 0) {
     return allModels
   }

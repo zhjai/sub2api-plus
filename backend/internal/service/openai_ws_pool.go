@@ -223,6 +223,10 @@ func (l *openAIWSConnLease) WriteJSONWithContextTimeout(ctx context.Context, val
 	if err != nil {
 		return err
 	}
+	value, err = upstreamClientTimezoneWSValue(ctx, value)
+	if err != nil {
+		return err
+	}
 	value, err = codexPrivacyWSValue(ctx, value)
 	if err != nil {
 		return err

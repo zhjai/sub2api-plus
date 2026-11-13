@@ -1,5 +1,5 @@
 <template>
-  <div class="flex flex-wrap items-center gap-1.5">
+  <div v-if="!isBPS" class="flex flex-wrap items-center gap-1.5">
     <button
       type="button"
       data-testid="referral-count"
@@ -95,9 +95,11 @@ import type { Account } from '@/types'
 import type { OpenAIReferralEligibility } from '@/types/openaiReferrals'
 import { refreshOpenAIReferrals, sendOpenAIReferralInvite } from '@/api/admin/accounts'
 import BaseDialog from '@/components/common/BaseDialog.vue'
+import { isOpenAIBPSAccount } from '@/utils/openaiOAuthClient'
 
 const props = defineProps<{ account: Account }>()
 const { t } = useI18n()
+const isBPS = computed(() => isOpenAIBPSAccount(props.account))
 const eligibility = ref<OpenAIReferralEligibility | null>(props.account.extra?.codex_referral_snapshot ?? null)
 const show = ref(false)
 const loading = ref(false)

@@ -460,7 +460,7 @@ func (s *OpenAIQuotaService) prepareUpstreamCall(ctx context.Context, accountID 
 		return "", "", "", false, infraerrors.New(http.StatusBadRequest, "OPENAI_QUOTA_INVALID_TYPE", "account is not an OAuth account")
 	}
 	if account.IsExcelOAuth() {
-		return "", "", "", false, excelBPSUnsupported(nil)
+		return "", "", "", false, infraerrors.BadRequest("OPENAI_BPS_QUOTA_UNAVAILABLE", "BPS accounts do not provide Codex quota, reset credits or referrals; view local usage statistics instead")
 	}
 
 	// Spark shadow accounts do not hold their own credentials; resolve to the

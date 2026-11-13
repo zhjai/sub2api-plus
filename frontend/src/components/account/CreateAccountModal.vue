@@ -2600,6 +2600,40 @@
             </button>
           </div>
 
+          <!-- BPS (Excel login) explicit model configuration & recommended prefill -->
+          <div
+            v-if="isOpenAIBPSOAuth"
+            class="mb-3 space-y-2 rounded-lg border border-emerald-200/80 bg-emerald-50/60 p-3 dark:border-emerald-800/50 dark:bg-emerald-950/20"
+            data-testid="create-bps-model-guidance"
+          >
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <p
+                class="text-xs leading-relaxed text-emerald-900 dark:text-emerald-200"
+                data-testid="create-bps-sync-unavailable"
+              >
+                {{ t('admin.accounts.bpsAccount.models.syncUnavailable') }}
+              </p>
+              <button
+                type="button"
+                data-testid="create-bps-prefill-models"
+                class="shrink-0 rounded-lg border border-emerald-300 bg-white px-2.5 py-1 text-xs font-medium text-emerald-700 transition-colors hover:bg-emerald-100/70 dark:border-emerald-700 dark:bg-dark-700 dark:text-emerald-300 dark:hover:bg-emerald-900/40"
+                @click="prefillRecommendedBPSModels"
+              >
+                + {{ t('admin.accounts.bpsAccount.models.prefillRecommended') }}
+              </button>
+            </div>
+            <p class="text-[11px] text-emerald-800/80 dark:text-emerald-300/80">
+              {{ t('admin.accounts.bpsAccount.models.prefillRecommendedHint') }}
+            </p>
+            <p
+              v-if="!hasExplicitBPSModels"
+              class="rounded-md border border-amber-200 bg-amber-50/90 px-2.5 py-1.5 text-xs text-amber-800 dark:border-amber-800/60 dark:bg-amber-900/30 dark:text-amber-200"
+              data-testid="create-bps-explicit-models-hint"
+            >
+              {{ t('admin.accounts.bpsAccount.models.configureRequired') }}
+            </p>
+          </div>
+
           <!-- Whitelist Mode -->
           <div v-if="modelRestrictionMode === 'whitelist'">
             <ModelWhitelistSelector
@@ -2607,11 +2641,13 @@
               :model-mappings="modelMappings"
               :platform="form.platform"
               :sync-credentials="syncPreviewCredentials"
+              :show-sync-button="!isOpenAIBPSOAuth"
+              :bps-mode="isOpenAIBPSOAuth"
               @upstream-synced="upstreamModelsPreviewed = true"
             />
             <p class="text-xs text-gray-500 dark:text-gray-400">
               {{ t('admin.accounts.selectedModels', { count: allowedModels.length }) }}
-              <span v-if="allowedModels.length === 0">{{
+              <span v-if="!isOpenAIBPSOAuth && allowedModels.length === 0">{{
                 t('admin.accounts.supportsAllModels')
               }}</span>
             </p>
@@ -2682,7 +2718,7 @@
             </button>
 
             <!-- Quick Add Buttons -->
-            <div class="flex flex-wrap gap-2">
+            <div v-if="!isOpenAIBPSOAuth" class="flex flex-wrap gap-2">
               <button
                 v-for="preset in presetMappings"
                 :key="'oauth-' + preset.label"
@@ -3424,9 +3460,9 @@
         </div>
       </div>
 
-      <!-- OpenAI Codex namespace 工具摊平（兼容开关，仅 OAuth） -->
+      <!-- OpenAI Codex namespace 工具摊平（兼容开关，仅原生 Codex OAuth；BPS 账号隐藏且不发出） -->
       <div
-        v-if="form.platform === 'openai' && form.type === 'oauth'"
+        v-if="form.platform === 'openai' && form.type === 'oauth' && !isOpenAIBPSOAuth"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="flex items-center justify-between">
@@ -3454,6 +3490,26 @@
           </button>
         </div>
       </div>
+
+      <!-- OpenAI BPS (official Excel OAuth) dedicated options -->
+      <OpenAIBPSOptionsSection
+        v-if="isOpenAIBPSOAuth"
+        id-prefix="create"
+        v-model:skip-historical-encrypted="bpsSkipHistoricalEncrypted"
+        v-model:hosted-tools-policy="bpsHostedToolsPolicy"
+      />
+
+      <!-- OpenAI account upstream client fingerprint timezone (API Key + OAuth including BPS) -->
+      <UpstreamClientTimezoneField
+        v-if="supportsCreateUpstreamClientTimezone"
+        id-prefix="create"
+        :mode="upstreamClientTimezoneMode"
+        :timezone="upstreamClientTimezoneManual"
+        :validation-error="upstreamClientTimezoneValidationError"
+        :server-error="upstreamClientTimezoneServerError"
+        @update:mode="onUpdateUpstreamTimezoneMode"
+        @update:timezone="onUpdateUpstreamTimezoneManual"
+      />
 
       <!-- OpenAI WS Mode 三态（off/ctx_pool/passthrough）；BPS 只走 HTTP /responses，不显示 -->
       <div
@@ -4253,6 +4309,22 @@ import { useQuotaNotifyState } from '@/composables/useQuotaNotifyState'
 import { useCodexPrivacyMode } from '@/composables/useCodexPrivacyMode'
 import { extractApiErrorMessage } from '@/utils/apiError'
 import CodexPrivacyModeField from './CodexPrivacyModeField.vue'
+import OpenAIBPSOptionsSection from './OpenAIBPSOptionsSection.vue'
+import UpstreamClientTimezoneField from './UpstreamClientTimezoneField.vue'
+import {
+  DEFAULT_OPENAI_BPS_OPTIONS,
+  applyOpenAIBPSOptions,
+  hasExplicitOpenAIBPSModels,
+  mergeRecommendedBPSMappings,
+  mergeRecommendedBPSWhitelist,
+  type OpenAIBPSHostedToolsPolicy
+} from '@/utils/openaiBPS'
+import {
+  applyUpstreamClientTimezone,
+  validateUpstreamClientTimezone,
+  type UpstreamClientTimezoneError,
+  type UpstreamClientTimezoneMode
+} from '@/utils/upstreamClientTimezone'
 import {
   useAccountOAuth,
   type AddMethod,
@@ -4858,6 +4930,67 @@ const openaiPassthroughEnabled = ref(false)
 const openaiOpaqueUpstreamEnabled = ref(false)
 // OpenAI Codex namespace 工具摊平兼容开关（仅 OAuth），缺省关闭即原样保留
 const openaiFlattenNamespacesEnabled = ref(false)
+// BPS dedicated options & OpenAI upstream client fingerprint timezone state
+const bpsSkipHistoricalEncrypted = ref<boolean>(DEFAULT_OPENAI_BPS_OPTIONS.skipHistoricalEncrypted)
+const bpsHostedToolsPolicy = ref<OpenAIBPSHostedToolsPolicy>(DEFAULT_OPENAI_BPS_OPTIONS.hostedToolsPolicy)
+const upstreamClientTimezoneMode = ref<UpstreamClientTimezoneMode>('off')
+const upstreamClientTimezoneManual = ref<string>('')
+const upstreamClientTimezoneValidationError = ref<UpstreamClientTimezoneError | null>(null)
+const upstreamClientTimezoneServerError = ref<string>('')
+
+const supportsCreateUpstreamClientTimezone = computed(
+  () => form.platform === 'openai' && (accountCategory.value === 'oauth-based' || accountCategory.value === 'apikey')
+)
+
+const hasExplicitBPSModels = computed(() =>
+  hasExplicitOpenAIBPSModels(allowedModels.value, modelMappings.value)
+)
+
+const prefillRecommendedBPSModels = () => {
+  if (modelRestrictionMode.value === 'whitelist') {
+    const { models } = mergeRecommendedBPSWhitelist(allowedModels.value)
+    allowedModels.value = models
+    return
+  }
+  const { rows } = mergeRecommendedBPSMappings(modelMappings.value)
+  modelMappings.value = rows
+}
+
+const onUpdateUpstreamTimezoneMode = (mode: UpstreamClientTimezoneMode) => {
+  upstreamClientTimezoneMode.value = mode
+  upstreamClientTimezoneValidationError.value = null
+  upstreamClientTimezoneServerError.value = ''
+}
+
+const onUpdateUpstreamTimezoneManual = (timezone: string) => {
+  upstreamClientTimezoneManual.value = timezone
+  upstreamClientTimezoneValidationError.value = null
+  upstreamClientTimezoneServerError.value = ''
+}
+
+const reportUpstreamClientTimezoneError = (error: unknown): string | null => {
+  const err = error as {
+    code?: string
+    error?: string
+    message?: string
+    response?: { data?: { code?: string; error?: string; message?: string; detail?: string } }
+  } | null
+  const fields = [
+    err?.code,
+    err?.error,
+    err?.message,
+    err?.response?.data?.code,
+    err?.response?.data?.error,
+    err?.response?.data?.message,
+    err?.response?.data?.detail
+  ]
+  if (!fields.some((v) => typeof v === 'string' && /upstream_client_timezone/i.test(v))) {
+    return null
+  }
+  const msg = extractApiErrorMessage(error, t('admin.accounts.failedToCreate'))
+  upstreamClientTimezoneServerError.value = msg
+  return msg
+}
 const openAILongContextBillingEnabled = ref(false)
 const openAILongContextBillingTouched = ref(false)
 const openAICompactMode = ref<OpenAICompactMode>('auto')
@@ -5347,8 +5480,20 @@ watch(
 )
 
 // OpenAI login client: a session generated for one client is never reused for the other.
-watch(openaiOAuthClient, () => {
+// Switching to Excel (BPS) also drops untouched native Codex default whitelist models so
+// a new BPS account never silently inherits the native Codex catalog.
+watch(openaiOAuthClient, (nextClient, prevClient) => {
   openaiOAuth.resetState()
+  if (form.platform !== 'openai') return
+  const defaultOpenAIModels = getModelsByPlatform('openai')
+  const isDefaultOpenAIWhitelist =
+    allowedModels.value.length === defaultOpenAIModels.length &&
+    defaultOpenAIModels.every((m, idx) => allowedModels.value[idx] === m)
+  if (nextClient === 'excel' && isDefaultOpenAIWhitelist) {
+    allowedModels.value = []
+  } else if (nextClient === 'codex' && prevClient === 'excel' && modelRestrictionMode.value === 'whitelist' && allowedModels.value.length === 0) {
+    allowedModels.value = [...defaultOpenAIModels]
+  }
 })
 watch(accountCategory, (category) => {
   if (category !== 'oauth-based') openaiOAuthClient.value = 'codex'
@@ -5436,6 +5581,12 @@ watch(
       openaiPassthroughEnabled.value = false
       openaiOpaqueUpstreamEnabled.value = false
       openaiFlattenNamespacesEnabled.value = false
+      bpsSkipHistoricalEncrypted.value = DEFAULT_OPENAI_BPS_OPTIONS.skipHistoricalEncrypted
+      bpsHostedToolsPolicy.value = DEFAULT_OPENAI_BPS_OPTIONS.hostedToolsPolicy
+      upstreamClientTimezoneMode.value = 'off'
+      upstreamClientTimezoneManual.value = ''
+      upstreamClientTimezoneValidationError.value = null
+      upstreamClientTimezoneServerError.value = ''
       openAIEndpointCapabilities.value = ['chat_completions', 'embeddings']
       openaiOAuthResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
       openaiAPIKeyResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
@@ -5505,10 +5656,11 @@ const handleSelectGeminiOAuthType = (oauthType: 'code_assist' | 'google_one' | '
 }
 
 // Auto-fill related models when switching to whitelist mode or changing platform
+// (never auto-fill native Codex catalog into a BPS account)
 watch(
   [modelRestrictionMode, () => form.platform],
   ([newMode]) => {
-    if (newMode === 'whitelist') {
+    if (newMode === 'whitelist' && !isOpenAIBPSOAuth.value) {
       allowedModels.value = [...getModelsByPlatform(form.platform)]
     }
   }
@@ -5781,6 +5933,7 @@ const ensureAntigravityMixedChannelConfirmed = async (onConfirm: () => Promise<v
 const submitCreateAccount = async (payload: CreateAccountRequest) => {
   submitting.value = true
   clearCodexPrivacyServerError()
+  upstreamClientTimezoneServerError.value = ''
   try {
     const account = await adminAPI.accounts.create(withAntigravityConfirmFlag(payload))
     const modelMapping = payload.credentials.model_mapping
@@ -5831,8 +5984,10 @@ const submitCreateAccount = async (payload: CreateAccountRequest) => {
     if (privacyReason) {
       void codexPrivacyFieldRef.value?.revealConflict()
     }
+    const tzReason = reportUpstreamClientTimezoneError(error)
     appStore.showError(
       privacyReason ||
+      tzReason ||
       error.response?.data?.message ||
       error.response?.data?.detail ||
       extractApiErrorMessage(error, t('admin.accounts.failedToCreate'))
@@ -5907,6 +6062,12 @@ const resetForm = () => {
   openaiPassthroughEnabled.value = false
   openaiOpaqueUpstreamEnabled.value = false
   openaiFlattenNamespacesEnabled.value = false
+  bpsSkipHistoricalEncrypted.value = DEFAULT_OPENAI_BPS_OPTIONS.skipHistoricalEncrypted
+  bpsHostedToolsPolicy.value = DEFAULT_OPENAI_BPS_OPTIONS.hostedToolsPolicy
+  upstreamClientTimezoneMode.value = 'off'
+  upstreamClientTimezoneManual.value = ''
+  upstreamClientTimezoneValidationError.value = null
+  upstreamClientTimezoneServerError.value = ''
   openAILongContextBillingEnabled.value = false
   openAILongContextBillingTouched.value = false
   openAICompactMode.value = 'auto'
@@ -6003,8 +6164,8 @@ const buildOpenAIExtra = (base?: Record<string, unknown>): Record<string, unknow
   } else {
     delete extra.openai_opaque_upstream
   }
-  // 缺省即保留 namespace，不写空值，避免 extra 里堆积默认项
-  if (form.type === 'oauth' && openaiFlattenNamespacesEnabled.value) {
+  // 缺省即保留 namespace，不写空值，避免 extra 里堆积默认项；BPS 账号隐藏且不发出
+  if (form.type === 'oauth' && !isOpenAIBPSOAuth.value && openaiFlattenNamespacesEnabled.value) {
     extra.openai_responses_flatten_namespaces = true
   } else {
     delete extra.openai_responses_flatten_namespaces
@@ -6059,6 +6220,20 @@ const buildOpenAIExtra = (base?: Record<string, unknown>): Record<string, unknow
   } else {
     delete extra.images_url_to_b64_json
   }
+
+  applyOpenAIBPSOptions(
+    extra,
+    isOpenAIBPSOAuth.value
+      ? {
+          skipHistoricalEncrypted: bpsSkipHistoricalEncrypted.value,
+          hostedToolsPolicy: bpsHostedToolsPolicy.value
+        }
+      : null
+  )
+  applyUpstreamClientTimezone(extra, {
+    mode: upstreamClientTimezoneMode.value,
+    timezone: upstreamClientTimezoneManual.value
+  })
 
   return Object.keys(extra).length > 0 ? extra : undefined
 }
@@ -6200,6 +6375,23 @@ const handleSubmit = async () => {
     appStore.showError(t('admin.accounts.openai.codexPrivacy.conflictToast'))
     void codexPrivacyFieldRef.value?.revealConflict()
     return
+  }
+  if (supportsCreateUpstreamClientTimezone.value) {
+    const tzError = validateUpstreamClientTimezone({
+      mode: upstreamClientTimezoneMode.value,
+      timezone: upstreamClientTimezoneManual.value
+    })
+    upstreamClientTimezoneValidationError.value = tzError
+    if (tzError) {
+      appStore.showError(
+        t(
+          tzError === 'required'
+            ? 'admin.accounts.upstreamClientTimezone.errorRequired'
+            : 'admin.accounts.upstreamClientTimezone.errorInvalid'
+        )
+      )
+      return
+    }
   }
   // For OAuth-based type, handle OAuth flow (goes to step 2)
   if (isOAuthFlow.value) {
@@ -6983,7 +7175,10 @@ const handleOpenAIExchange = async (authCode: string) => {
     handleClose()
   } catch (error: any) {
     oauthClient.error.value =
-      reportCodexPrivacyError(error) || error.response?.data?.detail || t('admin.accounts.oauth.authFailed')
+      reportCodexPrivacyError(error) ||
+      reportUpstreamClientTimezoneError(error) ||
+      error.response?.data?.detail ||
+      t('admin.accounts.oauth.authFailed')
     appStore.showError(oauthClient.error.value)
   } finally {
     oauthClient.loading.value = false

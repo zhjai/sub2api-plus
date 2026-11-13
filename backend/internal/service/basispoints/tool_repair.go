@@ -84,6 +84,24 @@ func (b *Bridge) translateCompleted(ctx context.Context, response object, repair
 		return validation
 	}
 	for _, item := range original {
+		// A decoded, named envelope whose operation is invalid is not just
+		// missing transport framing. Argument precedence may be ambiguous;
+		// never let a correction choose new executable bytes for it.
+		check := *b
+		check.replay = nil
+		if _, invalid := check.translateCall(item); invalid != nil {
+			code := transportArguments(item)["code"]
+			if _, isText := code.(string); !isText {
+				// Invalid object-valued payloads have no unambiguous original
+				// executable bytes to restore. Do not delegate that choice.
+				return validation
+			}
+			if envelope, decodeErr := decodeTransportEnvelope(code); decodeErr == nil {
+				if name, nameErr := envelopeName(envelope); nameErr == nil && name != "" {
+					return validation
+				}
+			}
+		}
 		if target := transportTarget(transportArguments(item)); target != "" {
 			if _, allowed := b.tools[target]; !allowed {
 				return validation
@@ -229,11 +247,11 @@ func (b *Bridge) preservesToolOperations(original, corrected []object) bool {
 		}
 		code, isText := args["code"].(string)
 		if !isText {
-			continue
+			return false
 		}
 		if envelope, envelopeErr := decodeTransportEnvelope(code); envelopeErr == nil {
 			if name, nameErr := envelopeName(envelope); nameErr == nil && name != "" {
-				continue
+				return false
 			}
 		}
 		if text(after["type"]) == "custom_tool_call" {
@@ -369,8 +387,9 @@ func BuildToolRepairRequest(prepared []byte, failed map[string]any, validation e
 }
 
 // ReadToolRepairResponse withholds all intermediate events from the client.
-// Only the terminal native response is authoritative, as in the primary stream.
-func ReadToolRepairResponse(reader io.Reader) (map[string]any, error) {
+// Tool execution uses only the terminal response. Model declarations on every
+// event remain observable so a later terminal cannot hide a routing mismatch.
+func ReadToolRepairResponse(reader io.Reader, observeModels ...func(string)) (map[string]any, error) {
 	var response object
 	var observedUsage object
 	var terminalError error
@@ -381,9 +400,20 @@ func ReadToolRepairResponse(reader io.Reader) (map[string]any, error) {
 		}
 		var payload object
 		if decode(data, &payload) != nil || payload == nil {
-			return fmt.Errorf("invalid Basispoints correction SSE event")
+			return protocolError{fmt.Errorf("invalid Basispoints correction SSE event")}
 		}
+		observe := func(value any) {
+			if model, ok := value.(string); ok && strings.TrimSpace(model) != "" {
+				for _, observer := range observeModels {
+					if observer != nil {
+						observer(model)
+					}
+				}
+			}
+		}
+		observe(payload["model"])
 		if current, ok := payload["response"].(object); ok {
+			observe(current["model"])
 			if usage, ok := current["usage"].(object); ok {
 				observedUsage = maxReportedUsage(observedUsage, usage)
 			}
@@ -398,7 +428,7 @@ func ReadToolRepairResponse(reader io.Reader) (map[string]any, error) {
 		item, _ := payload["item"].(object)
 		if kind == "response.output_item.done" && isTool(item) {
 			if len(pending) >= 1024 {
-				return fmt.Errorf("too many Basispoints correction tool items")
+				return protocolError{fmt.Errorf("too many Basispoints correction tool items")}
 			}
 			pending[text(item["call_id"])+"\x00"+text(item["id"])] = true
 		}
@@ -434,7 +464,14 @@ func ReadToolRepairResponse(reader io.Reader) (map[string]any, error) {
 		response["usage"] = observedUsage
 	}
 	if err != nil && !errors.Is(err, io.EOF) {
-		return response, err
+		var invalid protocolError
+		if errors.As(err, &invalid) {
+			return response, err
+		}
+		// Scanner errors may contain private proxy/transport details. Do not
+		// carry their text or cancellation identity into the public terminal;
+		// a live parent's HTTP timeout must still report known usage.
+		return response, &UpstreamFailure{Status: 502, Code: "basispoints_upstream_error", Type: "server_error", Message: "BPS tool correction response transport failed"}
 	}
 	if terminalError != nil {
 		return response, terminalError

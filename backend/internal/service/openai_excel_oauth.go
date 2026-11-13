@@ -95,3 +95,37 @@ func validateExcelOAuthAccount(account *Account, accessToken string) error {
 	}
 	return nil
 }
+
+// Bulk settings must not rotate or relabel an Excel grant. Use the per-account
+// OAuth endpoints, which validate the complete token/workspace pair, instead.
+func validateExcelOAuthBulkCredentialPatch(account *Account, patch map[string]any) error {
+	if account == nil || !account.IsOpenAIOAuth() {
+		return nil
+	}
+	candidate := *account
+	candidate.Credentials = make(map[string]any, len(account.Credentials)+len(patch))
+	for key, value := range account.Credentials {
+		candidate.Credentials[key] = value
+	}
+	for key, value := range patch {
+		candidate.Credentials[key] = value
+	}
+	carriesExcelToken := false
+	for _, key := range []string{"access_token", "id_token"} {
+		token, _ := patch[key].(string)
+		claims := excelOAuthClaims(token)
+		carriesExcelToken = carriesExcelToken || claims.Get("client_id").String() == openai.ExcelClientID || claims.Get("azp").String() == openai.ExcelClientID || claims.Get("aud").String() == openai.ExcelClientID
+		for _, aud := range claims.Get("aud").Array() {
+			carriesExcelToken = carriesExcelToken || aud.String() == openai.ExcelClientID
+		}
+	}
+	if !account.IsExcelOAuth() && !candidate.IsExcelOAuth() && !carriesExcelToken {
+		return nil
+	}
+	for _, key := range []string{"client_id", "access_token", "refresh_token", "id_token", "chatgpt_account_id", "chatgpt_user_id", "organization_id", "auth_mode"} {
+		if _, exists := patch[key]; exists {
+			return infraerrors.BadRequest("OPENAI_EXCEL_OAUTH_BULK_GRANT_UNSUPPORTED", "BPS login credentials cannot be changed in bulk; reauthorize or refresh each account separately")
+		}
+	}
+	return nil
+}

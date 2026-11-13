@@ -172,7 +172,7 @@ func restrictExcelBPSModels(body []byte, platform string, accounts []Account, gr
 		bpsRouted, allRoutedBPS := false, true
 		for i := range accounts {
 			a := &accounts[i]
-			if !a.IsOpenAI() || len(routed) > 0 && !containsInt64(routed, a.ID) || !supportsOpenAIRequestModel(a, target, false) || !a.SupportsOpenAIEndpointCapability(OpenAIEndpointCapabilityResponses) || ownershipRoute && !explicitModelMappingClaims(*a, slug) {
+			if !a.IsOpenAI() || len(routed) > 0 && !containsInt64(routed, a.ID) || !supportsOpenAIRequestModel(a, target, false) || !a.SupportsOpenAIEndpointCapability(OpenAIEndpointCapabilityResponsesCompatible) || ownershipRoute && !explicitModelMappingClaims(*a, slug) {
 				continue
 			}
 			bpsRouted = bpsRouted || a.IsExcelOAuth()
@@ -180,6 +180,14 @@ func restrictExcelBPSModels(body []byte, platform string, accounts []Account, gr
 		}
 		if !bpsRouted {
 			continue
+		}
+		// A shared slug can reach BPS on any attempt. Its transport preference
+		// must remain HTTP even when native accounts also serve the slug.
+		for _, field := range []string{"prefer_websockets", "support_verbosity", "supports_reasoning_summary_parameter"} {
+			if raw, exists := model[field]; exists && string(raw) != "false" {
+				model[field] = json.RawMessage("false")
+				changed = true
+			}
 		}
 		fields := []string{"multi_agent_reasoning_effort"}
 		if !allRoutedBPS {

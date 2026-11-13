@@ -985,6 +985,40 @@
             @sync="requestGrokCatalogSync"
           />
 
+          <!-- BPS (Excel login) explicit model configuration & recommended prefill -->
+          <div
+            v-if="isOpenAIBPS"
+            class="mb-3 space-y-2 rounded-lg border border-emerald-200/80 bg-emerald-50/60 p-3 dark:border-emerald-800/50 dark:bg-emerald-950/20"
+            data-testid="edit-bps-model-guidance"
+          >
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <p
+                class="text-xs leading-relaxed text-emerald-900 dark:text-emerald-200"
+                data-testid="edit-bps-sync-unavailable"
+              >
+                {{ t('admin.accounts.bpsAccount.models.syncUnavailable') }}
+              </p>
+              <button
+                type="button"
+                data-testid="edit-bps-prefill-models"
+                class="shrink-0 rounded-lg border border-emerald-300 bg-white px-2.5 py-1 text-xs font-medium text-emerald-700 transition-colors hover:bg-emerald-100/70 dark:border-emerald-700 dark:bg-dark-700 dark:text-emerald-300 dark:hover:bg-emerald-900/40"
+                @click="prefillRecommendedBPSModels"
+              >
+                + {{ t('admin.accounts.bpsAccount.models.prefillRecommended') }}
+              </button>
+            </div>
+            <p class="text-[11px] text-emerald-800/80 dark:text-emerald-300/80">
+              {{ t('admin.accounts.bpsAccount.models.prefillRecommendedHint') }}
+            </p>
+            <p
+              v-if="!hasExplicitBPSModels"
+              class="rounded-md border border-amber-200 bg-amber-50/90 px-2.5 py-1.5 text-xs text-amber-800 dark:border-amber-800/60 dark:bg-amber-900/30 dark:text-amber-200"
+              data-testid="edit-bps-explicit-models-hint"
+            >
+              {{ t('admin.accounts.bpsAccount.models.configureRequired') }}
+            </p>
+          </div>
+
           <ModelWhitelistSelector
             ref="grokOAuthWhitelistRef"
             v-show="modelRestrictionMode === 'whitelist'"
@@ -992,7 +1026,8 @@
             :model-mappings="modelMappings"
             :platform="account?.platform || 'anthropic'"
             :account-id="account?.id"
-            :show-sync-button="account.platform !== 'grok' || !account.id"
+            :show-sync-button="!isOpenAIBPS && (account.platform !== 'grok' || !account.id)"
+            :bps-mode="isOpenAIBPS"
             @upstream-sync-finished="refreshGrokDiagnostics"
           />
 
@@ -1000,7 +1035,7 @@
           <div v-if="modelRestrictionMode === 'whitelist'">
             <p class="text-xs text-gray-500 dark:text-gray-400">
               {{ t('admin.accounts.selectedModels', { count: allowedModels.length }) }}
-              <span v-if="allowedModels.length === 0 && modelMappings.length === 0">{{
+              <span v-if="!isOpenAIBPS && allowedModels.length === 0 && modelMappings.length === 0">{{
                 t('admin.accounts.supportsAllModels')
               }}</span>
             </p>
@@ -1100,7 +1135,7 @@
             </button>
 
             <!-- Quick Add Buttons -->
-            <div class="flex flex-wrap gap-2">
+            <div v-if="!isOpenAIBPS" class="flex flex-wrap gap-2">
               <button
                 v-for="preset in presetMappings"
                 :key="'oauth-' + preset.label"
@@ -2114,9 +2149,9 @@
         </div>
       </div>
 
-      <!-- OpenAI Codex namespace 工具摊平（兼容开关，仅 OAuth） -->
+      <!-- OpenAI Codex namespace 工具摊平（兼容开关，仅原生 Codex OAuth；BPS 账号隐藏且不发出） -->
       <div
-        v-if="account?.platform === 'openai' && account?.type === 'oauth'"
+        v-if="account?.platform === 'openai' && account?.type === 'oauth' && !isOpenAIBPS"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="flex items-center justify-between">
@@ -2144,6 +2179,28 @@
           </button>
         </div>
       </div>
+
+      <!-- OpenAI BPS (official Excel OAuth) dedicated options -->
+      <OpenAIBPSOptionsSection
+        v-if="isOpenAIBPS"
+        id-prefix="edit"
+        v-model:skip-historical-encrypted="bpsSkipHistoricalEncrypted"
+        v-model:hosted-tools-policy="bpsHostedToolsPolicy"
+      />
+
+      <!-- OpenAI account upstream client fingerprint timezone (API Key + OAuth including BPS) -->
+      <UpstreamClientTimezoneField
+        v-if="supportsUpstreamClientTimezone"
+        id-prefix="edit"
+        :mode="upstreamClientTimezoneMode"
+        :timezone="upstreamClientTimezoneManual"
+        :validation-error="upstreamClientTimezoneValidationError"
+        :server-error="upstreamClientTimezoneServerError"
+        :runtime="account?.upstream_client_timezone ?? null"
+        :saved-state="savedUpstreamClientTimezoneState"
+        @update:mode="onUpdateUpstreamTimezoneMode"
+        @update:timezone="onUpdateUpstreamTimezoneManual"
+      />
 
       <!-- OpenAI Codex hosted image_generation bridge policy（BPS 账号不适用） -->
       <div
@@ -2925,7 +2982,7 @@
       </div>
 
       <div
-        v-if="account?.platform === 'openai'"
+        v-if="account?.platform === 'openai' && !isOpenAIBPS"
         class="border-t border-gray-200 pt-4 dark:border-dark-600 space-y-4"
       >
         <div class="space-y-2">
@@ -3003,7 +3060,7 @@
       </div>
 
       <div
-        v-if="account?.platform === 'openai' && account?.type === 'oauth' && !isSparkShadow"
+        v-if="account?.platform === 'openai' && account?.type === 'oauth' && !isSparkShadow && !isOpenAIBPS"
         class="space-y-4 border-t border-gray-200 pt-4 dark:border-dark-600"
         data-testid="auto-reset-credit-settings"
       >
@@ -3582,7 +3639,26 @@ import {
   useCodexPrivacyMode
 } from '@/composables/useCodexPrivacyMode'
 import CodexPrivacyModeField from './CodexPrivacyModeField.vue'
+import OpenAIBPSOptionsSection from './OpenAIBPSOptionsSection.vue'
+import UpstreamClientTimezoneField from './UpstreamClientTimezoneField.vue'
 import { OPENAI_EXCEL_OAUTH_CLIENT_ID, isOpenAIBPSAccount } from '@/utils/openaiOAuthClient'
+import {
+  DEFAULT_OPENAI_BPS_OPTIONS,
+  applyOpenAIBPSOptions,
+  hasExplicitOpenAIBPSModels,
+  mergeRecommendedBPSMappings,
+  mergeRecommendedBPSWhitelist,
+  readOpenAIBPSOptions,
+  type OpenAIBPSHostedToolsPolicy
+} from '@/utils/openaiBPS'
+import {
+  applyUpstreamClientTimezone,
+  readUpstreamClientTimezone,
+  validateUpstreamClientTimezone,
+  type UpstreamClientTimezoneError,
+  type UpstreamClientTimezoneMode,
+  type UpstreamClientTimezoneState
+} from '@/utils/upstreamClientTimezone'
 import type {
   Account,
   Proxy,
@@ -3737,6 +3813,55 @@ const openaiBPSIdentity = computed(() => {
     email: text(creds.email) || text(extra.email)
   }
 })
+
+// BPS dedicated options & OpenAI upstream client fingerprint timezone state
+const bpsSkipHistoricalEncrypted = ref<boolean>(DEFAULT_OPENAI_BPS_OPTIONS.skipHistoricalEncrypted)
+const bpsHostedToolsPolicy = ref<OpenAIBPSHostedToolsPolicy>(DEFAULT_OPENAI_BPS_OPTIONS.hostedToolsPolicy)
+const upstreamClientTimezoneMode = ref<UpstreamClientTimezoneMode>('off')
+const upstreamClientTimezoneManual = ref<string>('')
+const upstreamClientTimezoneValidationError = ref<UpstreamClientTimezoneError | null>(null)
+const upstreamClientTimezoneServerError = ref<string>('')
+const savedUpstreamClientTimezoneState = ref<UpstreamClientTimezoneState>({ mode: 'off', timezone: '' })
+
+const supportsUpstreamClientTimezone = computed(
+  () =>
+    props.account?.platform === 'openai' &&
+    (props.account?.type === 'oauth' || props.account?.type === 'setup-token' || props.account?.type === 'apikey') &&
+    !isSparkShadow.value
+)
+
+const onUpdateUpstreamTimezoneMode = (mode: UpstreamClientTimezoneMode) => {
+  upstreamClientTimezoneMode.value = mode
+  upstreamClientTimezoneValidationError.value = null
+  upstreamClientTimezoneServerError.value = ''
+}
+
+const onUpdateUpstreamTimezoneManual = (timezone: string) => {
+  upstreamClientTimezoneManual.value = timezone
+  upstreamClientTimezoneValidationError.value = null
+  upstreamClientTimezoneServerError.value = ''
+}
+
+const isUpstreamClientTimezoneApiError = (error: unknown): boolean => {
+  const err = error as {
+    code?: string
+    error?: string
+    message?: string
+    response?: { data?: { code?: string; error?: string; message?: string; detail?: string } }
+  } | null
+  const fields = [
+    err?.code,
+    err?.error,
+    err?.message,
+    err?.response?.data?.code,
+    err?.response?.data?.error,
+    err?.response?.data?.message,
+    err?.response?.data?.detail
+  ]
+  return fields.some(
+    (v) => typeof v === 'string' && /upstream_client_timezone/i.test(v)
+  )
+}
 
 const hideAccountLongContextBilling = computed(() => {
   return allSelectedGroupsEnableLongContextPricing(form.group_ids, props.groups)
@@ -5008,6 +5133,13 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   restoreCodexIdentityDefault()
   resetCodexPrivacyState()
   codexImageToolMode.value = 'inherit'
+  bpsSkipHistoricalEncrypted.value = DEFAULT_OPENAI_BPS_OPTIONS.skipHistoricalEncrypted
+  bpsHostedToolsPolicy.value = DEFAULT_OPENAI_BPS_OPTIONS.hostedToolsPolicy
+  upstreamClientTimezoneMode.value = 'off'
+  upstreamClientTimezoneManual.value = ''
+  upstreamClientTimezoneValidationError.value = null
+  upstreamClientTimezoneServerError.value = ''
+  savedUpstreamClientTimezoneState.value = { mode: 'off', timezone: '' }
   anthropicPassthroughEnabled.value = false
   anthropicAPIKeyAuthScheme.value = 'x_api_key'
   webSearchEmulationMode.value = 'default'
@@ -5075,6 +5207,10 @@ const syncFormFromAccount = (newAccount: Account | null) => {
     if (compactMappings && typeof compactMappings === 'object') {
       openAICompactModelMappings.value = Object.entries(compactMappings).map(([from, to]) => ({ from, to }))
     }
+    const tzState = readUpstreamClientTimezone(extra)
+    upstreamClientTimezoneMode.value = tzState.mode
+    upstreamClientTimezoneManual.value = tzState.timezone
+    savedUpstreamClientTimezoneState.value = { ...tzState }
     // BPS (official Excel login) accounts: Codex-only and native-transport settings are
     // hidden. Hold them at their defaults so a save applies each key's existing "off"
     // semantics (WS mode written as off, CLI-only false only if it was on, privacy
@@ -5082,7 +5218,11 @@ const syncFormFromAccount = (newAccount: Account | null) => {
     // stale native option. Compact settings are hidden but kept as stored; other extras
     // and credentials are untouched.
     if (isOpenAIBPSAccount(newAccount as { platform?: string; type?: string; credentials?: Record<string, unknown> | null })) {
+      const bpsOpts = readOpenAIBPSOptions(extra)
+      bpsSkipHistoricalEncrypted.value = bpsOpts.skipHistoricalEncrypted
+      bpsHostedToolsPolicy.value = bpsOpts.hostedToolsPolicy
       openaiPassthroughEnabled.value = false
+      openaiFlattenNamespacesEnabled.value = false
       openaiOAuthResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
       codexCLIOnlyEnabled.value = false
       codexCLIOnlyAppServerEnabled.value = false
@@ -5090,6 +5230,11 @@ const syncFormFromAccount = (newAccount: Account | null) => {
       codexFingerprintMode.value = 'off'
       restoreCodexIdentityDefault()
       setCodexPrivacyEnabled(false)
+      autoPause5hThreshold.value = null
+      autoPause7dThreshold.value = null
+      autoPause5hDisabled.value = false
+      autoPause7dDisabled.value = false
+      autoResetCreditEnabled.value = false
     }
   }
   if (newAccount.platform === 'anthropic' && newAccount.type === 'apikey') {
@@ -5419,6 +5564,20 @@ watch(
 )
 
 // Model mapping helpers
+const hasExplicitBPSModels = computed(() =>
+  hasExplicitOpenAIBPSModels(allowedModels.value, modelMappings.value)
+)
+
+const prefillRecommendedBPSModels = () => {
+  if (modelRestrictionMode.value === 'whitelist') {
+    const { models } = mergeRecommendedBPSWhitelist(allowedModels.value)
+    allowedModels.value = models
+    return
+  }
+  const { rows } = mergeRecommendedBPSMappings(modelMappings.value)
+  modelMappings.value = rows
+}
+
 const addModelMapping = () => {
   modelMappings.value.push({ from: '', to: '' })
 }
@@ -5973,6 +6132,7 @@ const persistGrokMediaEligibility = async (accountID: number, updatedAccount: Ac
 const submitUpdateAccount = async (accountID: number, updatePayload: Record<string, unknown>) => {
   submitting.value = true
   codexIdentityServerError.value = ''
+  upstreamClientTimezoneServerError.value = ''
   clearCodexPrivacyServerError()
   try {
     let updatedAccount = await adminAPI.accounts.update(accountID, withAntigravityConfirmFlag(updatePayload))
@@ -5994,11 +6154,14 @@ const submitUpdateAccount = async (accountID: number, updatePayload: Record<stri
     if (isCodexIdentityError(error)) {
       codexIdentityServerError.value = extractApiErrorMessage(error, t('admin.accounts.failedToUpdate'))
     }
+    if (isUpstreamClientTimezoneApiError(error)) {
+      upstreamClientTimezoneServerError.value = extractApiErrorMessage(error, t('admin.accounts.failedToUpdate'))
+    }
     // CODEX_PRIVACY_* 拒绝同时显示在开关旁，内容是服务端给出的真实原因。
     if (captureCodexPrivacyServerError(error, t('admin.accounts.failedToUpdate'))) {
       void codexPrivacyFieldRef.value?.revealConflict()
     }
-    appStore.showError(error.message || t('admin.accounts.failedToUpdate'))
+    appStore.showError(extractApiErrorMessage(error, t('admin.accounts.failedToUpdate')))
   } finally {
     submitting.value = false
   }
@@ -6027,6 +6190,23 @@ const handleSubmit = async () => {
     appStore.showError(t('admin.accounts.openai.codexPrivacy.conflictToast'))
     void codexPrivacyFieldRef.value?.revealConflict()
     return
+  }
+  if (supportsUpstreamClientTimezone.value) {
+    const tzError = validateUpstreamClientTimezone({
+      mode: upstreamClientTimezoneMode.value,
+      timezone: upstreamClientTimezoneManual.value
+    })
+    upstreamClientTimezoneValidationError.value = tzError
+    if (tzError) {
+      appStore.showError(
+        t(
+          tzError === 'required'
+            ? 'admin.accounts.upstreamClientTimezone.errorRequired'
+            : 'admin.accounts.upstreamClientTimezone.errorInvalid'
+        )
+      )
+      return
+    }
   }
 	if (autoResetCreditEnabled.value) {
 		const thresholds = [autoResetCredit5hThreshold.value, autoResetCredit7dThreshold.value]
@@ -6614,8 +6794,8 @@ const handleSubmit = async () => {
       } else {
         delete newExtra.openai_opaque_upstream
       }
-      // 缺省即保留 namespace，不写空值，避免 extra 里堆积默认项
-      if (props.account.type === 'oauth' && openaiFlattenNamespacesEnabled.value) {
+      // 缺省即保留 namespace，不写空值，避免 extra 里堆积默认项；BPS 账号隐藏且不发出
+      if (props.account.type === 'oauth' && !isOpenAIBPS.value && openaiFlattenNamespacesEnabled.value) {
         newExtra.openai_responses_flatten_namespaces = true
       } else {
         delete newExtra.openai_responses_flatten_namespaces
@@ -6667,10 +6847,14 @@ const handleSubmit = async () => {
 		} else {
 			delete newExtra.auto_pause_7d_disabled
 		}
-		if (props.account.type === 'oauth' && !isSparkShadow.value) {
+		if (props.account.type === 'oauth' && !isSparkShadow.value && !isOpenAIBPS.value) {
 			newExtra.auto_reset_credit_enabled = autoResetCreditEnabled.value
 			newExtra.auto_reset_credit_5h_threshold = autoResetCredit5hThreshold.value / 100
 			newExtra.auto_reset_credit_7d_threshold = autoResetCredit7dThreshold.value / 100
+		} else if (isOpenAIBPS.value) {
+			delete newExtra.auto_reset_credit_enabled
+			delete newExtra.auto_reset_credit_5h_threshold
+			delete newExtra.auto_reset_credit_7d_threshold
 		}
 		// 运行态只允许后端服务更新，账号编辑不得回写旧状态。
 		delete newExtra.codex_auto_reset_credit_state
@@ -6743,10 +6927,29 @@ const handleSubmit = async () => {
         }
       }
 
+      applyOpenAIBPSOptions(
+        newExtra,
+        isOpenAIBPS.value
+          ? {
+              skipHistoricalEncrypted: bpsSkipHistoricalEncrypted.value,
+              hostedToolsPolicy: bpsHostedToolsPolicy.value
+            }
+          : null,
+        currentExtra
+      )
+      if (!isSparkShadow.value) {
+        applyUpstreamClientTimezone(
+          newExtra,
+          {
+            mode: upstreamClientTimezoneMode.value,
+            timezone: upstreamClientTimezoneManual.value
+          },
+          currentExtra
+        )
+      }
+
       updatePayload.extra = newExtra
     }
-
-    // For apikey/bedrock/service_account accounts, handle quota_limit in extra
     if (supportsAccountQuota(props.account.type)) {
       const currentExtra = (updatePayload.extra as Record<string, unknown>) ||
         (props.account.extra as Record<string, unknown>) || {}

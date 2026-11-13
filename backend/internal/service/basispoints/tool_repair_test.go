@@ -306,7 +306,11 @@ func TestToolRepairRejectsChangedBatchAndOperations(t *testing.T) {
 				return repairResponse("resp_fixed", 20, 3, corrected...), nil
 			})
 			events := repairEvents(t, body)
-			require.Equal(t, 1, calls)
+			expectedCalls := 1
+			if change == "explicit_target" {
+				expectedCalls = 0
+			} // Invalid named arguments are not a framing repair.
+			require.Equal(t, expectedCalls, calls)
 			require.Len(t, events, 1)
 			require.Equal(t, "response.failed", events[0]["type"])
 			require.Nil(t, cache.get("repair-scope", "fixed"))
@@ -488,5 +492,43 @@ func TestToolRepairPreservesAlreadyValidOperations(t *testing.T) {
 			require.JSONEq(t, string(before), string(after), "keep native continuation history immutable")
 			require.Equal(t, json.Number("30"), repairValue[object](t, response["usage"])["input_tokens"])
 		})
+	}
+}
+
+func TestToolRepairRejectsAmbiguousNamedEnvelopeBeforeCorrection(t *testing.T) {
+	for _, envelope := range []object{
+		{"name": "functions.exec", "input": "text(1)", "args": "text(1)"},
+		{"name": "shell", "arguments": object{"cmd": "keep"}, "args": object{"cmd": "keep"}},
+		{"name": "shell", "arguments": 42},
+	} {
+		_, bridge := repairBridge(t, nil)
+		invalid := nativeCall(envelope)
+		original := repairResponse("resp", 10, 2, invalid)
+		calls := 0
+		err := bridge.translateCompleted(context.Background(), original, func(context.Context, object, error) (object, error) {
+			calls++
+			return repairResponse("fixed", 20, 2, nativeCall(object{"name": "functions.exec", "input": "CHANGED"})), nil
+		})
+		require.Error(t, err)
+		require.Zero(t, calls)
+	}
+}
+
+func TestToolRepairRejectsInvalidObjectPayloadBeforeCorrection(t *testing.T) {
+	for _, code := range []any{
+		object{"name": "functions.exec", "input": "text(1)", "args": "text(1)"},
+		object{"unframed": "text(1)"},
+		[]any{"text(1)"}, nil, 42,
+	} {
+		_, bridge := repairBridge(t, nil)
+		invalid := object{"type": "function_call", "name": "run_officejs", "id": "fc_old", "call_id": "old", "arguments": object{"summary": "Run", "code": code}}
+		original := repairResponse("original", 10, 2, invalid)
+		calls := 0
+		err := bridge.translateCompleted(context.Background(), original, func(context.Context, object, error) (object, error) {
+			calls++
+			return repairResponse("fixed", 10, 2, nativeCall(object{"name": "functions.exec", "input": "text(999)"})), nil
+		})
+		require.Error(t, err)
+		require.Zero(t, calls)
 	}
 }

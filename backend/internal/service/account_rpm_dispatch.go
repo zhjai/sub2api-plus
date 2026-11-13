@@ -102,6 +102,11 @@ func accountRPMDo(upstream HTTPUpstream, cache GatewayCache, repo accountRPMAcco
 }
 
 func accountRPMSendHTTP(upstream HTTPUpstream, account *Account, req *http.Request, proxy string, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	var err error
+	req, err = applyUpstreamClientTimezoneHTTP(req, account, proxy)
+	if err != nil {
+		return nil, err
+	}
 	// Production implements this optional capability at RoundTrip, after host
 	// and proxy validation. Existing mock/custom upstreams admit at their Do.
 	transport, ok := upstream.(interface{ HandlesAccountRPMAdmission() bool })

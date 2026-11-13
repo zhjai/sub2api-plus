@@ -2036,6 +2036,86 @@ export default {
       }
       },
 
+      bpsAccount: {
+        badge: 'BPS',
+        badgeTitle: 'OpenAI BPS (official Excel OAuth) channel: HTTP /responses text and client tools only',
+        usage: {
+          title: 'Local usage',
+          hint: 'Counts requests, tokens, and billing windows recorded locally by this gateway; BPS does not expose upstream quota utilization, remaining counts, or credit reset probes.',
+          refresh: 'Refresh',
+          refreshing: 'Refreshing...',
+          noRequests: '0 requests',
+          empty: 'No local window data yet',
+          refreshedAt: 'Refreshed at {time}',
+          loadFailed: 'Failed to load local usage'
+        },
+        options: {
+          sectionTitle: 'BPS Protocol & Tool Policy',
+          clientToolsHint:
+            'Client tools (function / custom) are forwarded over HTTP /responses without Codex namespace flattening, and never fall back to native Codex transport.',
+          skipHistoricalEncrypted: 'Ignore historical encrypted content',
+          skipHistoricalEncryptedDesc:
+            'Replaces unreadable historical encrypted reasoning blocks from earlier turns with a placeholder marker before forwarding.',
+          skipHistoricalEncryptedWarning:
+            'Only unreadable historical encrypted items from older turns are replaced with a marker; encrypted tasks in the current turn are still rejected, and ciphertext is never decrypted.',
+          hostedToolsPolicy: 'Unsupported hosted tools policy',
+          hostedToolsPolicyDesc:
+            'How to handle hosted tools unsupported on the BPS channel (such as web_search or code_interpreter).',
+          hostedToolsOmit: 'Omit & notice',
+          hostedToolsReject: 'Reject request'
+        },
+        models: {
+          configureRequired:
+            'No explicit account models configured yet: specify supported models via whitelist or model mapping (group allowlists still serve as the public manifest fallback, while BPS never assumes all models are supported or syncs the native Codex catalog).',
+          prefillRecommended: 'Prefill suggested models (gpt-6-astra, gpt-6.1-sol)',
+          prefillRecommendedHint:
+            'Suggested model IDs only; actual availability depends on upstream account entitlement, and unconfigured models are not implicitly enabled.',
+          prefillAdded: 'Added {count} suggested model(s)',
+          prefillAlreadyPresent: 'All suggested models are already configured',
+          syncUnavailable:
+            'Native Codex upstream catalog sync is unavailable for BPS accounts; select models or configure mappings manually.',
+          testCatalogLoadFailed: 'Failed to load testable models'
+        },
+        bulk: {
+          nativeControlsHiddenHint:
+            'Selection includes BPS (Excel OAuth) accounts: native Codex-only controls (passthrough, namespace flattening, WebSocket, fingerprint convergence, Compact) are hidden; model mappings, priority, groups, and proxy remain editable.',
+          incompleteSubtypeHiddenHint:
+            'Some target accounts are on unloaded pages or beyond the current preview, so their authorization subtype cannot be verified: native Codex-only controls (passthrough, namespace flattening, WebSocket, Codex CLI restriction, fingerprint convergence, Compact) are conservatively hidden; model mappings, priority, groups, and proxy remain editable.'
+        }
+      },
+
+      upstreamClientTimezone: {
+        title: 'Upstream Client Fingerprint Timezone',
+        desc: 'Overrides the client timezone reported upstream only on protocols that already carry client environment markers; completely independent from the local quota reset timezone.',
+        boundaryNote:
+          'Auto mode resolves once on first use from the account’s actual proxy egress (or server public egress when no proxy is configured) and caches by source—never per-request geolocation and never browser or server process timezone. Aligns the timezone field only and does not guarantee anonymity.',
+        modeLabel: 'Timezone Mode',
+        modeOff: 'Off (keep default)',
+        modeManual: 'Manual IANA timezone',
+        modeAuto: 'Auto (proxy / server egress)',
+        manualLabel: 'IANA Timezone Name',
+        manualPlaceholder: 'e.g. America/Los_Angeles, Asia/Tokyo, Europe/London',
+        manualHint:
+          'Enter a canonical IANA identifier (e.g. Asia/Singapore); raw offsets like +08:00 are not accepted. Draft input stays in memory if you switch modes and is only sent in Manual mode.',
+        errorRequired: 'Please enter an IANA timezone name in Manual mode',
+        errorInvalid: 'Invalid IANA timezone name; use a standard identifier such as America/New_York or UTC',
+        runtimeTitle: 'Saved Runtime Status',
+        unsavedDraftNote: 'Current form edits are unsaved; status below reflects the last saved configuration on the server.',
+        status: {
+          off: 'Off',
+          pending: 'Pending first-use resolution',
+          ready: 'Ready',
+          stale: 'Stale (refresh pending)',
+          error: 'Resolution error'
+        },
+        source: {
+          manual: 'Manual',
+          proxy_exit: 'Proxy egress',
+          server_exit: 'Server egress'
+        },
+        updatedAt: 'Updated {time}'
+      },
+
     },
 
     // Scheduled Tests

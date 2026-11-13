@@ -40,6 +40,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	}
 	responseModelObserver := &upstreamResponseModelObserver{}
 	ctx = withCodexPrivacyWS(ctx, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
+	ctx = withUpstreamClientTimezoneWS(ctx, account)
 
 	wsURL, err := s.buildOpenAIResponsesWSURL(account)
 	if err != nil {

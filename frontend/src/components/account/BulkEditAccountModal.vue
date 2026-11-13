@@ -31,9 +31,29 @@
         </p>
       </div>
 
+      <!-- BPS / incomplete authorization subtype selection notice -->
+      <div
+        v-if="hasSelectedBPS && targetSelectedPlatforms.includes('openai')"
+        class="rounded-lg border border-emerald-200 bg-emerald-50/80 p-3.5 dark:border-emerald-800/50 dark:bg-emerald-950/30"
+        data-testid="bulk-edit-bps-native-hidden-hint"
+      >
+        <p class="text-xs leading-relaxed text-emerald-800 dark:text-emerald-200">
+          {{ t('admin.accounts.bpsAccount.bulk.nativeControlsHiddenHint') }}
+        </p>
+      </div>
+      <div
+        v-else-if="showIncompleteOpenAISubtypeNotice"
+        class="rounded-lg border border-slate-200 bg-slate-50/90 p-3.5 dark:border-slate-700/60 dark:bg-slate-900/40"
+        data-testid="bulk-edit-incomplete-subtype-hint"
+      >
+        <p class="text-xs leading-relaxed text-slate-700 dark:text-slate-200">
+          {{ t('admin.accounts.bpsAccount.bulk.incompleteSubtypeHiddenHint') }}
+        </p>
+      </div>
+
       <!-- OpenAI passthrough -->
       <div
-        v-if="allOpenAIPassthroughCapable"
+        v-if="allOpenAINativePassthroughCapable"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="mb-3 flex items-center justify-between">
@@ -345,13 +365,21 @@
                 v-model="allowedModels"
                 :model-mappings="modelMappings"
                 :platforms="targetSelectedPlatforms"
+                :show-sync-button="!mayContainOpenAIBPS"
               />
 
               <p class="text-xs text-gray-500 dark:text-gray-400">
                 {{ t('admin.accounts.selectedModels', { count: allowedModels.length }) }}
-                <span v-if="allowedModels.length === 0">{{
+                <span v-if="allowedModels.length === 0 && !mayContainOpenAIBPS">{{
                   t('admin.accounts.supportsAllModels')
                 }}</span>
+              </p>
+              <p
+                v-if="hasSelectedBPS && allowedModels.length === 0"
+                class="mt-1.5 text-xs text-amber-700 dark:text-amber-300"
+                data-testid="bulk-edit-bps-explicit-models-hint"
+              >
+                {{ t('admin.accounts.bpsAccount.models.configureRequired') }}
               </p>
             </div>
 
@@ -1165,7 +1193,7 @@
       </div>
 
       <!-- OpenAI Compact mode -->
-      <div v-if="allOpenAIPassthroughCapable" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+      <div v-if="allOpenAINativePassthroughCapable" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <div class="mb-3 flex items-center justify-between">
           <div class="flex-1 pr-4">
             <label
@@ -1201,7 +1229,7 @@
       </div>
 
       <!-- OpenAI Compact model mapping -->
-      <div v-if="allOpenAIPassthroughCapable" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+      <div v-if="allOpenAINativePassthroughCapable" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <div class="mb-3 flex items-center justify-between">
           <div class="flex-1 pr-4">
             <label
@@ -1522,18 +1550,24 @@ interface Props {
   accountIds: number[]
   selectedPlatforms: AccountPlatform[]
   selectedTypes: AccountType[]
+  hasSelectedBps?: boolean
+  subtypeMetadataComplete?: boolean
   target?: {
     mode: 'selected' | 'filtered'
     filters?: Record<string, unknown>
     previewCount?: number
     selectedPlatforms?: AccountPlatform[]
     selectedTypes?: AccountType[]
+    hasSelectedBps?: boolean
+    subtypeMetadataComplete?: boolean
   }
   proxies: ProxyConfig[]
   groups: AdminGroup[]
 }
 
-const props = defineProps<Props>()
+const props = withDefaults(defineProps<Props>(), {
+  subtypeMetadataComplete: true
+})
 const emit = defineEmits<{
   close: []
   updated: []
@@ -1547,6 +1581,26 @@ const targetMode = computed(() => props.target?.mode ?? 'selected')
 const targetPreviewCount = computed(() => props.target?.previewCount ?? props.accountIds.length)
 const targetSelectedPlatforms = computed(() => props.target?.selectedPlatforms ?? props.selectedPlatforms)
 const targetSelectedTypes = computed(() => props.target?.selectedTypes ?? props.selectedTypes)
+const hasSelectedBPS = computed(() => Boolean(props.target?.hasSelectedBps ?? props.hasSelectedBps))
+const isSubtypeMetadataComplete = computed(
+  () => props.target?.subtypeMetadataComplete ?? props.subtypeMetadataComplete ?? true
+)
+const hideOpenAINativeControls = computed(
+  () => hasSelectedBPS.value || !isSubtypeMetadataComplete.value
+)
+const hasAnyTargetAccounts = computed(
+  () => (targetMode.value === 'filtered' ? targetPreviewCount.value : props.accountIds.length) > 0
+)
+const showIncompleteOpenAISubtypeNotice = computed(
+  () =>
+    hasAnyTargetAccounts.value &&
+    !hasSelectedBPS.value &&
+    !isSubtypeMetadataComplete.value &&
+    (targetSelectedPlatforms.value.includes('openai') || targetSelectedPlatforms.value.length === 0)
+)
+const mayContainOpenAIBPS = computed(
+  () => hasSelectedBPS.value || showIncompleteOpenAISubtypeNotice.value
+)
 // Grok 快捷端点仅在所选账号全部为 grok 平台时展示（其他平台不显示）
 const allTargetsGrok = computed(
   () =>
@@ -1564,8 +1618,13 @@ const allOpenAIPassthroughCapable = computed(() => {
   )
 })
 
+const allOpenAINativePassthroughCapable = computed(
+  () => allOpenAIPassthroughCapable.value && !hideOpenAINativeControls.value
+)
+
 const allOpenAIOAuth = computed(() => {
   return (
+    !hideOpenAINativeControls.value &&
     targetSelectedPlatforms.value.length === 1 &&
     targetSelectedPlatforms.value[0] === 'openai' &&
     targetSelectedTypes.value.length > 0 &&
@@ -1573,9 +1632,10 @@ const allOpenAIOAuth = computed(() => {
   )
 })
 
-// 严格 OAuth（不含 setup-token）：namespace 摊平兼容开关只对 OAuth 账号生效
+// 严格 OAuth（不含 setup-token、不含 BPS）：namespace 摊平兼容开关只对原生 Codex OAuth 账号生效
 const allOpenAIOAuthOnly = computed(() => {
   return (
+    !hideOpenAINativeControls.value &&
     targetSelectedPlatforms.value.length === 1 &&
     targetSelectedPlatforms.value[0] === 'openai' &&
     targetSelectedTypes.value.length > 0 &&
@@ -1750,7 +1810,7 @@ const upstreamBillingAutoProbeOptions = computed(() => [
 ])
 const isOpenAIModelRestrictionDisabled = computed(
   () =>
-    allOpenAIPassthroughCapable.value &&
+    allOpenAINativePassthroughCapable.value &&
     enableOpenAIPassthrough.value &&
     openaiPassthroughEnabled.value
 )
@@ -1977,7 +2037,7 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     }
   }
 
-  if (enableOpenAIPassthrough.value) {
+  if (enableOpenAIPassthrough.value && allOpenAINativePassthroughCapable.value) {
     const extra = ensureExtra()
     extra.openai_passthrough = openaiPassthroughEnabled.value
     if (!openaiPassthroughEnabled.value) {
@@ -2054,7 +2114,7 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     credentialsChanged = true
   }
 
-  if (enableOpenAIWSMode.value) {
+  if (enableOpenAIWSMode.value && allOpenAIOAuth.value) {
     const extra = ensureExtra()
     extra.openai_oauth_responses_websockets_v2_mode = openaiOAuthResponsesWebSocketV2Mode.value
     extra.openai_oauth_responses_websockets_v2_enabled = isOpenAIWSModeEnabled(
@@ -2062,7 +2122,7 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     )
   }
 
-  if (enableOpenAIAPIKeyWSMode.value) {
+  if (enableOpenAIAPIKeyWSMode.value && allOpenAIAPIKey.value) {
     const extra = ensureExtra()
     extra.openai_apikey_responses_websockets_v2_mode = openaiAPIKeyResponsesWebSocketV2Mode.value
     extra.openai_apikey_responses_websockets_v2_enabled = isOpenAIWSModeEnabled(
@@ -2074,7 +2134,7 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     updates.upstream_billing_probe_enabled = upstreamBillingAutoProbeMode.value === 'enabled'
   }
 
-  if (enableCodexCLIOnly.value) {
+  if (enableCodexCLIOnly.value && allOpenAIOAuth.value) {
     const extra = ensureExtra()
     extra.codex_cli_only = codexCLIOnlyEnabled.value
   }
@@ -2084,13 +2144,14 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
   if (
     enableCodexCLIOnlyAppServer.value &&
     enableCodexCLIOnly.value &&
-    codexCLIOnlyEnabled.value
+    codexCLIOnlyEnabled.value &&
+    allOpenAIOAuth.value
   ) {
     const extra = ensureExtra()
     extra.codex_cli_only_allow_app_server = codexCLIOnlyAppServerEnabled.value
   }
 
-  if (enableCodexFingerprintMode.value) {
+  if (enableCodexFingerprintMode.value && allOpenAIOAuth.value) {
     const extra = ensureExtra()
     // off 必须显式落键，不能靠删本地键表达。批量更新走 JSONB 顶层合并
     // （extra = COALESCE(extra,'{}') || payload），删掉 payload 里的键只表示
@@ -2111,12 +2172,12 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     extra.codex_fingerprint_mode = codexFingerprintMode.value
   }
 
-  if (enableOpenAICompactMode.value) {
+  if (enableOpenAICompactMode.value && allOpenAINativePassthroughCapable.value) {
     const extra = ensureExtra()
     extra.openai_compact_mode = openAICompactMode.value
   }
 
-  if (enableOpenAICompactModelMapping.value) {
+  if (enableOpenAICompactModelMapping.value && allOpenAINativePassthroughCapable.value) {
     credentials.compact_model_mapping = buildOpenAICompactModelMapping() ?? {}
     credentialsChanged = true
   }
@@ -2203,8 +2264,8 @@ const handleSubmit = async () => {
 
   const hasAnyFieldEnabled =
     enableBaseUrl.value ||
-    enableOpenAIPassthrough.value ||
-    enableOpenAIFlattenNamespaces.value ||
+    (enableOpenAIPassthrough.value && allOpenAINativePassthroughCapable.value) ||
+    (enableOpenAIFlattenNamespaces.value && allOpenAIOAuthOnly.value) ||
     (enableOpenAILongContextBilling.value && allOpenAIPassthroughCapable.value) ||
     (enableOpenAIEndpointCapabilities.value && allOpenAIAPIKey.value) ||
     (enableOpenAIResponsesMode.value && allOpenAIAPIKey.value) ||
@@ -2219,14 +2280,14 @@ const handleSubmit = async () => {
     enableRateMultiplier.value ||
     enableStatus.value ||
     enableGroups.value ||
-    enableOpenAIWSMode.value ||
-    enableOpenAIAPIKeyWSMode.value ||
+    (enableOpenAIWSMode.value && allOpenAIOAuth.value) ||
+    (enableOpenAIAPIKeyWSMode.value && allOpenAIAPIKey.value) ||
     enableUpstreamBillingAutoProbe.value ||
-    enableCodexCLIOnly.value ||
-    enableCodexCLIOnlyAppServer.value ||
-    enableCodexFingerprintMode.value ||
-    enableOpenAICompactMode.value ||
-    enableOpenAICompactModelMapping.value ||
+    (enableCodexCLIOnly.value && allOpenAIOAuth.value) ||
+    (enableCodexCLIOnlyAppServer.value && allOpenAIOAuth.value) ||
+    (enableCodexFingerprintMode.value && allOpenAIOAuth.value) ||
+    (enableOpenAICompactMode.value && allOpenAINativePassthroughCapable.value) ||
+    (enableOpenAICompactModelMapping.value && allOpenAINativePassthroughCapable.value) ||
     enableRpmLimit.value ||
     userMsgQueueMode.value !== null
 

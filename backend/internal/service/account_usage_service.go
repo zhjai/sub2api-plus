@@ -179,9 +179,15 @@ type AICredit struct {
 	MinimumBalance float64 `json:"minimum_balance,omitempty"`
 }
 
+// BPSLocalUsageInfo contains local request statistics, never upstream quota estimates.
+type BPSLocalUsageInfo struct {
+	FiveHour *WindowStats `json:"five_hour,omitempty"`
+	SevenDay *WindowStats `json:"seven_day,omitempty"`
+}
+
 // UsageInfo 账号使用量信息
 type UsageInfo struct {
-	Source             string         `json:"source,omitempty"`               // "passive" or "active"
+	Source             string         `json:"source,omitempty"`               // "passive", "active", or "bps_local"
 	UpdatedAt          *time.Time     `json:"updated_at,omitempty"`           // 更新时间
 	FiveHour           *UsageProgress `json:"five_hour"`                      // 5小时窗口
 	SevenDay           *UsageProgress `json:"seven_day,omitempty"`            // 7天窗口
@@ -193,6 +199,8 @@ type UsageInfo struct {
 	GeminiSharedMinute *UsageProgress `json:"gemini_shared_minute,omitempty"` // Gemini shared pool RPM (Google One / Code Assist)
 	GeminiProMinute    *UsageProgress `json:"gemini_pro_minute,omitempty"`    // Gemini Pro RPM
 	GeminiFlashMinute  *UsageProgress `json:"gemini_flash_minute,omitempty"`  // Gemini Flash RPM
+
+	BPSLocalUsage *BPSLocalUsageInfo `json:"bps_local_usage,omitempty"`
 
 	// Antigravity 多模型配额
 	AntigravityQuota map[string]*AntigravityModelQuota `json:"antigravity_quota,omitempty"`
@@ -706,7 +714,29 @@ func (s *AccountUsageService) syncActiveToPassive(ctx context.Context, accountID
 	}
 }
 
+func (s *AccountUsageService) getExcelBPSLocalUsage(ctx context.Context, account *Account) (*UsageInfo, error) {
+	now := time.Now()
+	usage := &UsageInfo{Source: "bps_local", UpdatedAt: &now, BPSLocalUsage: &BPSLocalUsageInfo{}}
+	if s.usageLogRepo == nil {
+		return usage, nil
+	}
+	fiveHour, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, now.Add(-5*time.Hour))
+	if err != nil {
+		return nil, fmt.Errorf("load BPS local five-hour usage: %w", err)
+	}
+	sevenDay, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, now.Add(-7*24*time.Hour))
+	if err != nil {
+		return nil, fmt.Errorf("load BPS local seven-day usage: %w", err)
+	}
+	usage.BPSLocalUsage.FiveHour = windowStatsFromAccountStats(fiveHour)
+	usage.BPSLocalUsage.SevenDay = windowStatsFromAccountStats(sevenDay)
+	return usage, nil
+}
+
 func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Account, force bool) (*UsageInfo, error) {
+	if account.IsExcelOAuth() {
+		return s.getExcelBPSLocalUsage(ctx, account)
+	}
 	now := time.Now()
 	usage := &UsageInfo{UpdatedAt: &now}
 
@@ -827,6 +857,9 @@ func (s *AccountUsageService) shouldProbeOpenAICodexSnapshot(accountID int64, no
 }
 
 func (s *AccountUsageService) probeOpenAICodexSnapshot(ctx context.Context, account *Account) (map[string]any, error) {
+	if account.IsExcelOAuth() {
+		return nil, nil
+	}
 	if account == nil || !account.IsOAuth() {
 		return nil, nil
 	}

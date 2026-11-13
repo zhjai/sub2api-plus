@@ -265,8 +265,9 @@
                 <PlatformTypeBadge :platform="row.platform" :type="row.type"
                   :auth-mode="getOpenAIAuthMode(row)"
                   :plan-type="getAccountPlanType(row)"
-                  :privacy-mode="row.extra?.privacy_mode || row.parent_privacy_mode"
+                  :privacy-mode="isOpenAIBPSAccount(row) ? undefined : (row.extra?.privacy_mode || row.parent_privacy_mode)"
                   :subscription-expires-at="row.credentials?.subscription_expires_at || row.parent_subscription_expires_at" />
+                <OpenAIBPSBadge :account="row" />
                 <span
                   v-if="getAntigravityTierLabel(row)"
                   :class="['inline-block rounded px-1.5 py-0.5 text-[10px] font-medium', getAntigravityTierClass(row)]"
@@ -466,6 +467,8 @@
       :account-ids="selIds"
       :selected-platforms="selPlatforms"
       :selected-types="selTypes"
+      :has-selected-bps="selHasBPS"
+      :subtype-metadata-complete="selSubtypeMetadataComplete"
       :target="bulkEditTarget ?? undefined"
       :proxies="proxies"
       :groups="groups"
@@ -524,7 +527,9 @@ import AccountGroupsCell from '@/components/account/AccountGroupsCell.vue'
 import AccountCapacityCell from '@/components/account/AccountCapacityCell.vue'
 import UpstreamBillingRateCell from '@/components/account/UpstreamBillingRateCell.vue'
 import AccountPriorityCell from '@/components/account/AccountPriorityCell.vue'
+import OpenAIBPSBadge from '@/components/account/OpenAIBPSBadge.vue'
 import PlatformTypeBadge from '@/components/common/PlatformTypeBadge.vue'
+import { isOpenAIBPSAccount } from '@/utils/openaiOAuthClient'
 import Icon from '@/components/icons/Icon.vue'
 import ErrorPassthroughRulesModal from '@/components/admin/ErrorPassthroughRulesModal.vue'
 import TLSFingerprintProfilesModal from '@/components/admin/TLSFingerprintProfilesModal.vue'
@@ -558,6 +563,8 @@ type AccountBulkEditTarget =
       accountIds: number[]
       selectedPlatforms: AccountPlatform[]
       selectedTypes: AccountType[]
+      hasSelectedBps?: boolean
+      subtypeMetadataComplete?: boolean
     }
   | {
       mode: 'filtered'
@@ -574,23 +581,25 @@ type AccountBulkEditTarget =
       previewCount: number
       selectedPlatforms: AccountPlatform[]
       selectedTypes: AccountType[]
+      hasSelectedBps?: boolean
+      subtypeMetadataComplete?: boolean
     }
-const selPlatforms = computed<AccountPlatform[]>(() => {
-  const platforms = new Set(
-    accounts.value
-      .filter(a => isSelected(a.id))
-      .map(a => a.platform)
-  )
-  return [...platforms]
-})
-const selTypes = computed<AccountType[]>(() => {
-  const types = new Set(
-    accounts.value
-      .filter(a => isSelected(a.id))
-      .map(a => a.type)
-  )
-  return [...types]
-})
+interface KnownAccountSubtypeMetadata {
+  platform: AccountPlatform
+  type: AccountType
+  isBps: boolean
+}
+const knownAccountMetadata = reactive(new Map<number, KnownAccountSubtypeMetadata>())
+const recordKnownAccountMetadata = (rows: Array<Partial<AccountListItem> | null | undefined>) => {
+  for (const row of rows) {
+    if (!row || typeof row.id !== 'number' || !row.platform || !row.type) continue
+    knownAccountMetadata.set(row.id, {
+      platform: row.platform,
+      type: row.type,
+      isBps: isOpenAIBPSAccount(row)
+    })
+  }
+}
 const showCreate = ref(false)
 const showEdit = ref(false)
 const showSync = ref(false)
@@ -1138,6 +1147,43 @@ const {
   rows: accounts,
   getId: (account) => account.id
 })
+
+watch(
+  accounts,
+  (rows) => {
+    recordKnownAccountMetadata(rows)
+  },
+  { immediate: true }
+)
+
+const selPlatforms = computed<AccountPlatform[]>(() => {
+  const platforms = new Set<AccountPlatform>()
+  for (const id of selIds.value) {
+    const meta = knownAccountMetadata.get(id)
+    if (meta) platforms.add(meta.platform)
+  }
+  if (platforms.size === 0 && selIds.value.length > 0 && params.platform) {
+    platforms.add(params.platform as AccountPlatform)
+  }
+  return [...platforms]
+})
+const selTypes = computed<AccountType[]>(() => {
+  const types = new Set<AccountType>()
+  for (const id of selIds.value) {
+    const meta = knownAccountMetadata.get(id)
+    if (meta) types.add(meta.type)
+  }
+  if (types.size === 0 && selIds.value.length > 0 && params.type) {
+    types.add(params.type as AccountType)
+  }
+  return [...types]
+})
+const selHasBPS = computed<boolean>(() =>
+  selIds.value.some((id) => knownAccountMetadata.get(id)?.isBps === true)
+)
+const selSubtypeMetadataComplete = computed<boolean>(() =>
+  selIds.value.every((id) => knownAccountMetadata.has(id))
+)
 
 const selectingAllResults = ref(false)
 const selectedAllResultIDs = ref<Set<number> | null>(null)
@@ -1765,6 +1811,7 @@ type OpenAICompactBadgeState = 'active' | 'blocked' | 'auto'
 
 function getOpenAICompactState(row: any): OpenAICompactBadgeState | null {
   if (row.platform !== 'openai' || (row.type !== 'oauth' && row.type !== 'apikey')) return null
+  if (isOpenAIBPSAccount(row)) return null
   const extra = row.extra as Record<string, unknown> | undefined
   const mode = typeof extra?.openai_compact_mode === 'string' ? extra.openai_compact_mode : 'auto'
   if (mode === 'force_on') return 'active'
@@ -1902,8 +1949,13 @@ const handleBulkDelete = async () => {
         success: result.success,
         failed: result.failed
       }))
+      const failedSet = new Set(result.failed_ids ?? [])
+      if (failedSet.size > 0) {
+        accountIds.filter(id => !failedSet.has(id)).forEach(id => knownAccountMetadata.delete(id))
+      }
       setSelectedIds(result.failed_ids?.length ? result.failed_ids : accountIds)
     } else {
+      accountIds.forEach(id => knownAccountMetadata.delete(id))
       appStore.showSuccess(t('admin.accounts.bulkActions.deleteSuccess', { count: result.success }))
       clearSelection()
     }
@@ -2125,10 +2177,13 @@ const handleSelectAllResults = async () => {
   }
 }
 
-const collectSelectionMetadata = (rows: Account[]) => {
-  const selectedPlatforms = Array.from(new Set(rows.map(account => account.platform)))
-  const selectedTypes = Array.from(new Set(rows.map(account => account.type)))
-  return { selectedPlatforms, selectedTypes }
+const collectSelectionMetadata = (rows: Account[], totalCount: number = rows.length) => {
+  const validRows = rows.filter((account): account is Account => Boolean(account?.platform && account?.type))
+  const selectedPlatforms = Array.from(new Set(validRows.map(account => account.platform)))
+  const selectedTypes = Array.from(new Set(validRows.map(account => account.type)))
+  const hasSelectedBps = validRows.some(account => isOpenAIBPSAccount(account))
+  const subtypeMetadataComplete = validRows.length === rows.length && rows.length >= totalCount
+  return { selectedPlatforms, selectedTypes, hasSelectedBps, subtypeMetadataComplete }
 }
 
 const openBulkEditSelected = () => {
@@ -2136,7 +2191,9 @@ const openBulkEditSelected = () => {
     mode: 'selected',
     accountIds: [...selIds.value],
     selectedPlatforms: [...selPlatforms.value],
-    selectedTypes: [...selTypes.value]
+    selectedTypes: [...selTypes.value],
+    hasSelectedBps: selHasBPS.value,
+    subtypeMetadataComplete: selSubtypeMetadataComplete.value
   }
   showBulkEdit.value = true
 }
@@ -2144,13 +2201,16 @@ const openBulkEditSelected = () => {
 const openBulkEditFiltered = async () => {
   const filters = buildBulkEditFilterSnapshot()
   const preview = await adminAPI.accounts.list(1, 100, filters)
-  const { selectedPlatforms, selectedTypes } = collectSelectionMetadata(preview.items)
+  const { selectedPlatforms, selectedTypes, hasSelectedBps, subtypeMetadataComplete } =
+    collectSelectionMetadata(preview.items, preview.total)
   bulkEditTarget.value = {
     mode: 'filtered',
     filters,
     previewCount: preview.total,
     selectedPlatforms,
-    selectedTypes
+    selectedTypes,
+    hasSelectedBps,
+    subtypeMetadataComplete
   }
   showBulkEdit.value = true
 }
@@ -2239,6 +2299,7 @@ const syncPaginationAfterLocalRemoval = () => {
 }
 
 const patchAccountInList = (updatedAccount: Account) => {
+  recordKnownAccountMetadata([updatedAccount])
   const index = accounts.value.findIndex(account => account.id === updatedAccount.id)
   if (index === -1) return
   const mergedAccount = mergeRuntimeFields(accounts.value[index], updatedAccount)
@@ -2488,7 +2549,7 @@ const confirmCreateSparkShadow = async () => {
   }
 }
 const handleDelete = (a: Account) => { deletingAcc.value = a; showDeleteDialog.value = true }
-const confirmDelete = async () => { if(!deletingAcc.value) return; try { await adminAPI.accounts.delete(deletingAcc.value.id); showDeleteDialog.value = false; deletingAcc.value = null; reload() } catch (error) { console.error('Failed to delete account:', error) } }
+const confirmDelete = async () => { if(!deletingAcc.value) return; const deletedId = deletingAcc.value.id; try { await adminAPI.accounts.delete(deletedId); knownAccountMetadata.delete(deletedId); showDeleteDialog.value = false; deletingAcc.value = null; reload() } catch (error) { console.error('Failed to delete account:', error) } }
 const handleToggleSchedulable = async (a: Account) => {
   const nextSchedulable = !a.schedulable
   togglingSchedulable.value = a.id

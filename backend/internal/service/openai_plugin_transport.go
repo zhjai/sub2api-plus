@@ -21,6 +21,11 @@ func (s *OpenAIGatewayService) doOpenAIUpstreamWithAdmission(request *http.Reque
 	if account.IsExcelOAuth() {
 		return nil, excelBPSUnsupported(nil) // Excel inference has its own minimal transport.
 	}
+	var timezoneErr error
+	request, timezoneErr = applyUpstreamClientTimezoneHTTP(request, account, proxyURL)
+	if timezoneErr != nil {
+		return nil, timezoneErr
+	}
 	var privacyErr error
 	request, privacyErr = applyCodexPrivacyBeforeSend(request, account)
 	if privacyErr != nil {
@@ -91,6 +96,10 @@ func (s *AccountTestService) doOpenAIAccountTestUpstream(
 		return nil, privacyErr
 	}
 	request = withCodexOutboundDiagnostics(request, account)
+	request, privacyErr = applyUpstreamClientTimezoneHTTP(request, account, proxyURL)
+	if privacyErr != nil {
+		return nil, privacyErr
+	}
 	if s.pluginManager != nil {
 		response, handled, err := s.pluginManager.RoundTripOpenAIOAuth(request.Context(), request, proxyURL, account)
 		if handled {

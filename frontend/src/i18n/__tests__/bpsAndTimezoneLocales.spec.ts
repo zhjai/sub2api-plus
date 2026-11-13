@@ -1,0 +1,46 @@
+import { describe, expect, it } from 'vitest'
+import zhAccounts from '../locales/zh/admin/accounts'
+import enAccounts from '../locales/en/admin/accounts'
+
+function collectLeafPaths(obj: Record<string, unknown>, prefix = ''): string[] {
+  const paths: string[] = []
+  for (const [key, value] of Object.entries(obj)) {
+    const next = prefix ? `${prefix}.${key}` : key
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      paths.push(...collectLeafPaths(value as Record<string, unknown>, next))
+    } else {
+      paths.push(next)
+      expect(typeof value, `Expected string at ${next}`).toBe('string')
+      expect((value as string).trim().length, `Expected non-empty translation at ${next}`).toBeGreaterThan(0)
+    }
+  }
+  return paths.sort()
+}
+
+describe('BPS account and upstream client timezone i18n parity (zh/en)', () => {
+  it('maintains identical non-empty key trees for bpsAccount in zh and en', () => {
+    const zhPaths = collectLeafPaths(zhAccounts.accounts.bpsAccount as Record<string, unknown>)
+    const enPaths = collectLeafPaths(enAccounts.accounts.bpsAccount as Record<string, unknown>)
+    expect(zhPaths).toEqual(enPaths)
+
+    expect(zhAccounts.accounts.bpsAccount.usage.title).toBe('本地用量')
+    expect(zhAccounts.accounts.bpsAccount.options.skipHistoricalEncrypted).toBe('忽略历史加密内容')
+    expect(zhAccounts.accounts.bpsAccount.options.hostedToolsOmit).toBe('省略并提示')
+    expect(zhAccounts.accounts.bpsAccount.options.hostedToolsReject).toBe('拒绝请求')
+    expect(zhAccounts.accounts.bpsAccount.models.prefillRecommended).toContain('gpt-6-astra')
+    expect(zhAccounts.accounts.bpsAccount.models.prefillRecommended).toContain('gpt-6.1-sol')
+    expect(zhAccounts.accounts.bpsAccount.bulk.incompleteSubtypeHiddenHint).toContain('无法确认其授权子类型')
+    expect(enAccounts.accounts.bpsAccount.bulk.incompleteSubtypeHiddenHint).toContain('authorization subtype cannot be verified')
+  })
+
+  it('maintains identical non-empty key trees for upstreamClientTimezone in zh and en without false anonymity claims', () => {
+    const zhPaths = collectLeafPaths(zhAccounts.accounts.upstreamClientTimezone as Record<string, unknown>)
+    const enPaths = collectLeafPaths(enAccounts.accounts.upstreamClientTimezone as Record<string, unknown>)
+    expect(zhPaths).toEqual(enPaths)
+
+    expect(zhAccounts.accounts.upstreamClientTimezone.desc).toContain('配额定时重置时区')
+    expect(enAccounts.accounts.upstreamClientTimezone.desc).toContain('quota reset timezone')
+    expect(enAccounts.accounts.upstreamClientTimezone.desc.toLowerCase()).not.toContain('total anonymity')
+    expect(enAccounts.accounts.upstreamClientTimezone.boundaryNote.toLowerCase()).not.toContain('total anonymity')
+  })
+})

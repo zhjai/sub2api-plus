@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -66,6 +67,15 @@ func prepareExcelBPSRequest(ctx context.Context, raw []byte, token string, accou
 	if err := validateExcelOAuthAccount(account, token); err != nil {
 		return nil, nil, err
 	}
+	var optionsErr error
+	raw, optionsErr = applyExcelBPSOptions(raw, account)
+	if optionsErr != nil {
+		return nil, nil, optionsErr
+	}
+	raw, optionsErr = ApplyUpstreamClientTimezone(ctx, account, raw, upstreamTimezoneAccountProxy(account))
+	if optionsErr != nil {
+		return nil, nil, optionsErr
+	}
 	var prepared []byte
 	var bridge *basispoints.Bridge
 	var err error
@@ -95,26 +105,31 @@ func excelBPSConversationScope(c *gin.Context, body []byte, accountID int64) (st
 
 func (s *OpenAIGatewayService) forwardExcelBPS(ctx context.Context, c *gin.Context, account *Account, body []byte, start time.Time) (*OpenAIForwardResult, error) {
 	if GetOpenAIClientTransport(c) == OpenAIClientTransportWS || isOpenAIResponsesCompactPath(c) {
-		return nil, excelBPSUnsupported(c)
+		return nil, &OpenAILocalBridgeError{Failure: &basispoints.BridgeFailure{Message: excelBPSUnsupported(c).Error(), FailureStage: "bridge_request_preparation"}}
 	}
 	restriction := s.detectCodexClientRestriction(c, account, body)
 	if restriction.Enabled && !restriction.Matched {
+		MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalPolicyDenied)
 		c.JSON(http.StatusForbidden, gin.H{"error": gin.H{"type": "forbidden_error", "message": CodexClientRestrictionMessage(restriction)}})
-		return nil, errors.New("codex_cli_only restriction: only codex official clients are allowed")
+		return nil, &OpenAILocalBridgeError{Failure: &basispoints.BridgeFailure{Message: "codex_cli_only restriction: only codex official clients are allowed", FailureStage: "bridge_request_preparation"}}
 	}
 	originalModel := gjson.GetBytes(body, "model").String()
 	billingModel, model := resolveOpenAIForwardMappedModels(account, originalModel, false)
 	mapped, err := sjson.SetBytes(body, "model", model)
 	if err != nil {
-		return nil, err
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"type": "invalid_request_error", "code": "basispoints_request_invalid", "message": "Invalid JSON request body"}})
+		return nil, &OpenAILocalBridgeError{Failure: &basispoints.BridgeFailure{Message: "Invalid JSON request body", FailureStage: "bridge_request_preparation"}}
 	}
 	token, _, err := s.GetAccessToken(ctx, account)
 	if err != nil {
 		return nil, err
 	}
 	scope, cache := excelBPSConversationScope(c, body, account.ID)
-	req, bridge, err := prepareExcelBPSRequest(ctx, mapped, token, account, scope, cache)
+	req, bridge, err := s.prepareExcelBPSForwardRequest(ctx, mapped, token, account, scope, cache)
 	if err != nil {
+		if IsAccountRPMError(err) || ctx.Err() != nil {
+			return nil, err
+		}
 		status := http.StatusBadRequest
 		diagnostic := gin.H{"type": "invalid_request_error", "code": "basispoints_request_invalid", "message": err.Error()}
 		var contentErr *basispoints.ContentValidationError
@@ -126,8 +141,24 @@ func (s *OpenAIGatewayService) forwardExcelBPS(ctx context.Context, c *gin.Conte
 			status = int(accountErr.Code)
 			diagnostic["code"], diagnostic["message"] = accountErr.Reason, accountErr.Message
 		}
+		var timezoneErr *UpstreamClientTimezoneError
+		if errors.As(err, &timezoneErr) {
+			diagnostic["code"] = timezoneErr.Code
+			if strings.HasPrefix(timezoneErr.Code, "exit_") || timezoneErr.Code == "invalid_proxy" || timezoneErr.Code == "resolution_cancelled" {
+				status = http.StatusBadGateway
+			}
+		}
+		if status >= 500 {
+			diagnostic["type"] = "server_error"
+		} else if status == http.StatusForbidden {
+			diagnostic["type"] = "permission_error"
+		}
 		c.JSON(status, gin.H{"error": diagnostic})
-		return nil, err
+		return nil, &OpenAILocalBridgeError{Failure: &basispoints.BridgeFailure{Message: err.Error(), FailureStage: "bridge_request_preparation"}}
+	}
+	if len(bridge.Warnings) > 0 {
+		warnings, _ := json.Marshal(bridge.Warnings)
+		c.Header("X-Sub2API-BPS-Warnings", string(warnings))
 	}
 	setOpenAIExecContract(c, mapped, true)
 	proxyURL := ""
@@ -137,6 +168,13 @@ func (s *OpenAIGatewayService) forwardExcelBPS(ctx context.Context, c *gin.Conte
 	SetActualOpenAIUpstreamEndpoint(c, "/basispoints/api/responses")
 	SetOpsUpstreamModel(c, model)
 	resp, err := s.doAccountRPMUpstream(req, proxyURL, account)
+	if err == nil {
+		initialReq := req
+		req, resp, err = s.recoverExcelBPSEncryptedReasoning(req, resp, token, account, proxyURL)
+		if req != initialReq {
+			c.Header("X-Sub2API-BPS-Recovery", "encrypted_reasoning_removed")
+		}
+	}
 	if err != nil {
 		if IsAccountRPMError(err) || ctx.Err() != nil {
 			return nil, err
@@ -146,17 +184,32 @@ func (s *OpenAIGatewayService) forwardExcelBPS(ctx context.Context, c *gin.Conte
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		defer resp.Body.Close()
 		raw := redactExcelBPSCredentialBody(s.readUpstreamErrorBody(resp), account, token)
+		var charged *OpenAIForwardResult
+		usage, known := extractOpenAIUsageFromJSONBytes(raw)
+		if !known {
+			if nested := gjson.GetBytes(raw, "error"); nested.IsObject() {
+				usage, known = extractOpenAIUsageFromJSONBytes([]byte(nested.Raw))
+			}
+		}
+		if known {
+			charged = &OpenAIForwardResult{Model: originalModel, BillingModel: billingModel, UpstreamModel: model,
+				UpstreamEndpoint: "/basispoints/api/responses", RequestID: resp.Header.Get("x-request-id"),
+				Stream: gjson.GetBytes(body, "stream").Bool(), ReasoningEffort: &bridge.Effort, RequestedReasoningEffort: &bridge.RequestedEffort,
+				Usage: usage, Duration: time.Since(start), UpstreamHeaders: resp.Header,
+				ResponsesOutcomeObserved: true, ResponsesProtocolStatus: "failed", ResponsesStatus: "failed"}
+		}
 		message := sanitizeUpstreamErrorMessage(extractUpstreamErrorMessage(raw))
 		resp.Body = io.NopCloser(bytes.NewReader(raw))
 		if s.shouldFailoverOpenAIUpstreamResponse(account, resp.StatusCode, message, raw) {
 			shouldDisable := s.handleFailoverSideEffects(ctx, resp, account, raw, model)
-			return nil, s.newOpenAIAccountFailoverError(account, resp.StatusCode, resp.Header, raw, message, shouldDisable, !shouldDisable && account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode))
+			return charged, s.newOpenAIAccountFailoverError(account, resp.StatusCode, resp.Header, raw, message, shouldDisable, !shouldDisable && account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode))
 		}
-		return s.handleErrorResponse(ctx, resp, c, account, mapped, model)
+		_, responseErr := s.handleErrorResponse(ctx, resp, c, account, mapped, model)
+		return charged, responseErr
 	}
 	// The bridge owns a successful upstream body, including cancellation and
 	// cleanup. Do not also close the original body outside its once guard.
-	converted := bridge.StreamWithToolRepair(ctx, resp.Body, nil)
+	converted := bridge.StreamWithToolRepair(ctx, resp.Body, s.excelBPSToolRepair(req, token, account, proxyURL))
 	defer converted.Close()
 	response := *resp
 	response.Body = converted
@@ -190,7 +243,9 @@ func (s *OpenAIGatewayService) forwardExcelBPS(ctx context.Context, c *gin.Conte
 	result.Duration = time.Since(start)
 	result.UpstreamResponseModel = observedUpstreamResponseModel(c)
 	result.UpstreamResponseModelConflict = observedUpstreamResponseModelConflict(c)
-	s.bindHTTPResponseAccount(ctx, c, account, result.ResponseID)
+	if err == nil && result.ResponsesProtocolStatus == "completed" {
+		s.bindHTTPResponseAccount(ctx, c, account, result.ResponseID)
+	}
 	return result, err
 }
 

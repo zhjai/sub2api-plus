@@ -21,19 +21,23 @@ import (
 
 // OpenAIRecordUsageInput input for recording usage
 type OpenAIRecordUsageInput struct {
-	Result             *OpenAIForwardResult
-	APIKey             *APIKey
-	User               *User
-	Account            *Account
-	Subscription       *UserSubscription
-	InboundEndpoint    string
-	UpstreamEndpoint   string
-	UserAgent          string // 请求的 User-Agent
-	IPAddress          string // 请求的客户端 IP 地址
-	SessionID          string // 客户端显式会话标识（session_id / X-Session-Id 等请求头），仅用于用量行会话关联
-	RequestPayloadHash string
-	APIKeyService      APIKeyQuotaUpdater
-	QuotaPlatform      string // user×platform quota platform resolved by the handler before async billing.
+	// BPSAttemptBillingID is assigned once per HTTP Forward attempt by the
+	// handler, so separate consumed attempts cannot collapse under one client ID.
+	// Re-submitting the same attempt must keep this ID for billing idempotency.
+	BPSAttemptBillingID string
+	Result              *OpenAIForwardResult
+	APIKey              *APIKey
+	User                *User
+	Account             *Account
+	Subscription        *UserSubscription
+	InboundEndpoint     string
+	UpstreamEndpoint    string
+	UserAgent           string // 请求的 User-Agent
+	IPAddress           string // 请求的客户端 IP 地址
+	SessionID           string // 客户端显式会话标识（session_id / X-Session-Id 等请求头），仅用于用量行会话关联
+	RequestPayloadHash  string
+	APIKeyService       APIKeyQuotaUpdater
+	QuotaPlatform       string // user×platform quota platform resolved by the handler before async billing.
 	// PricingAt 是请求级定价时刻（请求开始捕获，与利润门的 D 同源）：高峰因子
 	// 按该时刻计算，保证同一请求从准入到扣费不中途变价。零值回退记录时刻
 	//（既有行为），供未装配的路径（图片/异步/cyber 等）沿用。
@@ -343,7 +347,7 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	// Create usage log
 	durationMs := int(result.Duration.Milliseconds())
 	accountRateMultiplier := account.BillingRateMultiplier()
-	requestID := resolveUsageBillingRequestID(ctx, result.RequestID)
+	requestID := resolveOpenAIUsageBillingRequestID(ctx, input)
 	if result.OpenAIWSMode {
 		if upstreamRequestID := strings.TrimSpace(result.RequestID); upstreamRequestID != "" {
 			requestID = upstreamRequestID
@@ -1197,4 +1201,13 @@ func cloneImageSizeBreakdown(input map[string]int) map[string]int {
 		output[key] = value
 	}
 	return output
+}
+
+func resolveOpenAIUsageBillingRequestID(ctx context.Context, input *OpenAIRecordUsageInput) string {
+	if input.Account.IsExcelOAuth() {
+		if attemptID := strings.TrimSpace(input.BPSAttemptBillingID); attemptID != "" {
+			return attemptID
+		}
+	}
+	return resolveUsageBillingRequestID(ctx, input.Result.RequestID)
 }

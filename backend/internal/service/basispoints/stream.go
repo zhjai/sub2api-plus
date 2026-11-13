@@ -276,6 +276,7 @@ func (b *Bridge) transformWithRepairs(ctx context.Context, reader io.Reader, wri
 				}
 				response["output"] = filtered
 				response["reasoning"] = object{"effort": b.Effort}
+				response["parallel_tool_calls"] = !b.disallowParallel
 			}
 		}
 		terminal = kind == "response.completed" || kind == "response.incomplete" || kind == "response.failed" || kind == "response.cancelled" || kind == "error"

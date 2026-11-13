@@ -157,7 +157,7 @@ func (s *OpenAIEvalService) GetConfig(ctx context.Context) (*OpenAIEvalConfig, e
 				route.BPSState = nil
 				account := accountFor(route.AccountID)
 				if account != nil {
-					route.DirectOAuthEligible = account.IsOpenAIOAuth() && !account.IsShadow() && !account.IsSyntheticUITest() && !account.IsOpenAIAgentIdentity()
+					route.DirectOAuthEligible = account.IsOpenAIOAuth() && !account.IsExcelOAuth() && !account.IsShadow() && !account.IsSyntheticUITest() && !account.IsOpenAIAgentIdentity()
 				}
 			}
 

@@ -2007,6 +2007,86 @@ export default {
       }
       },
 
+      bpsAccount: {
+        badge: 'BPS',
+        badgeTitle: 'OpenAI BPS（官方 Excel OAuth）通道：仅支持 HTTP /responses 文本与客户端工具请求',
+        usage: {
+          title: '本地用量',
+          hint: '统计本系统记录的请求、Token 与计费窗口；BPS 不提供上游配额利用率、剩余次数或额度重置探测。',
+          refresh: '刷新',
+          refreshing: '刷新中...',
+          noRequests: '0 次请求',
+          empty: '暂无本地窗口记录',
+          refreshedAt: '已刷新 {time}',
+          loadFailed: '加载本地用量失败'
+        },
+        options: {
+          sectionTitle: 'BPS 协议与工具策略',
+          clientToolsHint:
+            '支持通过 HTTP /responses 转发客户端工具（function / custom），无需开启 Codex namespace 摊平，也不会回退到原生 Codex 通道。',
+          skipHistoricalEncrypted: '忽略历史加密内容',
+          skipHistoricalEncryptedDesc:
+            '将旧对话轮次中无法识别的历史加密推理块替换为占位标记后继续转发。',
+          skipHistoricalEncryptedWarning:
+            '仅将旧轮次中不可读的历史加密内容替换为标记；当前轮次携带的加密任务仍会被直接拒绝，且本开关不会解密任何密文。',
+          hostedToolsPolicy: '不支持的托管工具处理策略',
+          hostedToolsPolicyDesc:
+            '当请求包含 BPS 通道不支持的托管工具（如 web_search、code_interpreter 等）时的处理方式。',
+          hostedToolsOmit: '省略并提示',
+          hostedToolsReject: '拒绝请求'
+        },
+        models: {
+          configureRequired:
+            '尚未配置显式账号模型：请通过白名单或模型映射明确填写可用模型（分组允许列表仍可作为公开清单兜底，但 BPS 不会假定支持全部模型，也不会同步原生 Codex 目录）。',
+          prefillRecommended: '填入推荐模型（gpt-6-astra、gpt-6.1-sol）',
+          prefillRecommendedHint:
+            '仅为常见候选建议，实际可用性取决于当前账号的上游权限；不会自动放行其他未配置模型。',
+          prefillAdded: '已填入 {count} 个推荐模型',
+          prefillAlreadyPresent: '推荐模型已全部在当前列表中',
+          syncUnavailable:
+            'BPS 账号不支持原生 Codex 上游模型目录同步，请手动选择或配置模型映射。',
+          testCatalogLoadFailed: '加载可用测试模型失败'
+        },
+        bulk: {
+          nativeControlsHiddenHint:
+            '所选账号包含 BPS（Excel OAuth）账号：原生 Codex 专属开关（透传、namespace 摊平、WebSocket、指纹收敛、Compact）已隐藏；模型映射、优先级、分组与代理仍可正常批量修改。',
+          incompleteSubtypeHiddenHint:
+            '部分目标账号位于未加载分页或超出当前预览范围，无法确认其授权子类型：原生 Codex 专属开关（透传、namespace 摊平、WebSocket、仅限 Codex CLI、指纹收敛、Compact）已保守隐藏；模型映射、优先级、分组与代理仍可正常批量修改。'
+        }
+      },
+
+      upstreamClientTimezone: {
+        title: '上游客户端指纹时区',
+        desc: '仅在协议本身已携带客户端环境标记时覆写上报给上游的时区信息；与本地配额定时重置时区相互独立，互不影响。',
+        boundaryNote:
+          '自动模式在首次使用时按账号实际代理出口（未配置代理时按服务器公网出口）解析并按来源缓存，不会逐请求查询地理位置，也不会读取浏览器或服务端进程本地时区；此设置仅对齐时区字段，不代表完全匿名。',
+        modeLabel: '时区模式',
+        modeOff: '关闭（保持默认）',
+        modeManual: '手动指定 IANA 时区',
+        modeAuto: '自动（按代理/服务器出口）',
+        manualLabel: 'IANA 时区名称',
+        manualPlaceholder: '例如：America/Los_Angeles、Asia/Tokyo、Europe/London',
+        manualHint:
+          '请输入标准 IANA 时区标识（如 Asia/Singapore），不支持 +08:00 等纯偏移格式；切换其他模式再切回时会保留已填草稿，但非手动模式下不会提交该值。',
+        errorRequired: '手动模式下请填写 IANA 时区名称',
+        errorInvalid: '无效的 IANA 时区名称，请使用如 America/New_York 或 UTC 的标准标识',
+        runtimeTitle: '已保存运行状态',
+        unsavedDraftNote: '当前表单修改尚未保存；下方展示的是服务端已保存配置的运行状态。',
+        status: {
+          off: '未启用',
+          pending: '待首次请求解析',
+          ready: '已就绪',
+          stale: '缓存待刷新',
+          error: '解析异常'
+        },
+        source: {
+          manual: '手动配置',
+          proxy_exit: '代理出口',
+          server_exit: '服务器公网出口'
+        },
+        updatedAt: '更新于 {time}'
+      },
+
     },
 
     // Scheduled Tests

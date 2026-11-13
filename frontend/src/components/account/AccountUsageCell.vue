@@ -122,6 +122,18 @@
       </ClaudeResetCreditsCell>
     </template>
 
+    <!-- OpenAI BPS (official Excel OAuth) accounts: local gateway usage windows only -->
+    <template v-else-if="isOpenAIBPS">
+      <OpenAIBPSLocalUsage
+        :usage="usageInfo"
+        :loading="loading"
+        :refreshing="bpsRefreshLoading"
+        :error="bpsUsageError"
+        :refreshed-at="bpsRefreshedAt"
+        @refresh="refreshBPSLocalUsage"
+      />
+    </template>
+
     <!-- OpenAI OAuth accounts: single source from /usage API -->
     <template v-else-if="account.platform === 'openai' && account.type === 'oauth'">
       <div v-if="hasOpenAIUsageFallback" class="space-y-1">
@@ -708,10 +720,13 @@ import { enqueueUsageRequest } from '@/utils/usageLoadQueue'
 import { formatCompactNumber } from '@/utils/format'
 import { isOfficialGeminiBaseUrl } from '@/utils/geminiExplicitCache'
 import { supportsAccountQuota } from '@/utils/accountQuota'
+import { extractApiErrorMessage } from '@/utils/apiError'
+import { isOpenAIBPSAccount } from '@/utils/openaiOAuthClient'
 import UsageProgressBar from './UsageProgressBar.vue'
 import AccountQuotaInfo from './AccountQuotaInfo.vue'
 import ClaudeResetCreditsCell from './ClaudeResetCreditsCell.vue'
 import OpenAIQuotaResetCell from './OpenAIQuotaResetCell.vue'
+import OpenAIBPSLocalUsage from './OpenAIBPSLocalUsage.vue'
 import GrokQuotaProbeCell from './GrokQuotaProbeCell.vue'
 import CNProviderQuotaCell from './CNProviderQuotaCell.vue'
 import CNProviderBalanceCell from './CNProviderBalanceCell.vue'
@@ -762,8 +777,22 @@ onBeforeUnmount(() => { unmounted.value = true })
 
 const loading = ref(false)
 const activeQueryLoading = ref(false)
+const bpsRefreshLoading = ref(false)
+const bpsExplicitError = ref<string | null>(null)
+const bpsRefreshedAt = ref<Date | null>(null)
 const error = ref<string | null>(null)
 const usageInfo = ref<AccountUsageInfo | null>(null)
+const isOpenAIBPS = computed(() => isOpenAIBPSAccount(props.account))
+const bpsUsageError = computed(
+  () => bpsExplicitError.value || error.value || usageInfo.value?.error || null
+)
+watch(
+  () => props.account.id,
+  () => {
+    bpsExplicitError.value = null
+    bpsRefreshedAt.value = null
+  }
+)
 watch(usageInfo, (usage) => {
   if (usage) emit('usage-loaded', usage)
 })
@@ -1482,7 +1511,9 @@ const loadUsage = async (options?: { source?: 'passive' | 'active'; bypassCache?
     }
   } catch (e: any) {
     if (!unmounted.value) {
-      error.value = t('common.error')
+      error.value = isOpenAIBPS.value
+        ? extractApiErrorMessage(e, t('admin.accounts.bpsAccount.usage.loadFailed'))
+        : t('common.error')
       console.error('Failed to load usage:', e)
     }
   } finally {
@@ -1541,6 +1572,10 @@ const attachVisibilityObserver = () => {
 }
 
 const loadActiveUsage = async () => {
+  if (isOpenAIBPS.value) {
+    await refreshBPSLocalUsage()
+    return
+  }
   activeQueryLoading.value = true
   try {
     usageInfo.value = await adminAPI.accounts.getUsage(props.account.id, 'active', true)
@@ -1548,6 +1583,33 @@ const loadActiveUsage = async () => {
     console.error('Failed to load active usage:', e)
   } finally {
     activeQueryLoading.value = false
+  }
+}
+
+const refreshBPSLocalUsage = async () => {
+  if (bpsRefreshLoading.value) return
+  bpsRefreshLoading.value = true
+  bpsExplicitError.value = null
+  try {
+    // Never pass source='active' for BPS accounts: local gateway usage only, no native Codex probe.
+    const fresh = await adminAPI.accounts.getUsage(props.account.id, undefined, true)
+    if (!unmounted.value) {
+      usageInfo.value = fresh
+      error.value = null
+      _usageCache.set(props.account.id, { data: fresh, ts: Date.now() })
+      bpsRefreshedAt.value = new Date()
+    }
+  } catch (err: unknown) {
+    if (!unmounted.value) {
+      bpsExplicitError.value = extractApiErrorMessage(
+        err,
+        t('admin.accounts.bpsAccount.usage.loadFailed')
+      )
+    }
+  } finally {
+    if (!unmounted.value) {
+      bpsRefreshLoading.value = false
+    }
   }
 }
 

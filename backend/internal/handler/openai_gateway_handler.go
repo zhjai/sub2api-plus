@@ -300,6 +300,9 @@ func openAIResponsesRequiredCapability(imageIntent bool, platform string) servic
 	if imageIntent && platform == service.PlatformOpenAI {
 		return service.OpenAIEndpointCapabilityResponses
 	}
+	if platform == service.PlatformOpenAI {
+		return service.OpenAIEndpointCapabilityResponsesCompatible
+	}
 	return service.OpenAIEndpointCapabilityChatCompletions
 }
 
@@ -751,6 +754,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		}
 		previousResponseOwner = owner
 		previousResponseOwnerBound = bound
+		if owner.IsExcelOAuth() {
+			h.handleStreamingAwareError(c, http.StatusBadRequest, "invalid_request_error", "BPS requires expanded conversation history; previous_response_id is not supported", streamStarted)
+			return
+		}
 	}
 
 	// 分组利润控制：请求级装配定价上下文——pricingAt 固定本请求的
@@ -995,7 +1002,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		if service.GetOpsCyberPolicy(c) != nil {
 			cyberBlockBodyHTTP = sessionHashBody
 		}
-		h.recordCyberPolicyIfMarked(c, apiKey, account, subscription, reqModel, err != nil, cyberBlockBodyHTTP, clientRequestedUsageFields(c, channelMapping, reqModel, ""), service.HashUsageRequestPayload(body))
+		// BPS result owns cumulative usage, including correction turns. Keep
+		// cyber diagnostics but avoid a second independent billing submission.
+		bpsForwardOwnsUsage := account.IsExcelOAuth() && result != nil
+		h.recordCyberPolicyIfMarked(c, apiKey, account, subscription, reqModel, err != nil && !bpsForwardOwnsUsage, cyberBlockBodyHTTP, clientRequestedUsageFields(c, channelMapping, reqModel, ""), service.HashUsageRequestPayload(body))
 		forwardDurationMs := time.Since(forwardStart).Milliseconds()
 		upstreamLatencyMs, _ := getContextInt64(c, service.OpsUpstreamLatencyMsKey)
 		responseLatencyMs := forwardDurationMs
@@ -1007,7 +1017,11 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			service.SetOpsLatencyMs(c, service.OpsTimeToFirstTokenMsKey, int64(*result.FirstTokenMs))
 		}
 		// #5148 对齐：错误返回携带的部分 result（流中断前上游已计量的 usage）照常
-		// 入账；failover 错误恒定 result=nil，不会重复计费。
+		// 入账；带已知用量的终态失败在切换账号前也提交一次。
+		bpsAttemptBillingID := ""
+		if bpsForwardOwnsUsage {
+			bpsAttemptBillingID = "bps:" + uuid.NewString()
+		}
 		submitResponsesUsage := func(res *service.OpenAIForwardResult) {
 			if res == nil {
 				return
@@ -1023,23 +1037,24 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			cyberBlocked := service.GetOpsCyberPolicy(c) != nil
 			h.submitOpenAIUsageRecordTask(c.Request.Context(), res, func(ctx context.Context) {
 				if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
-					Result:             res,
-					APIKey:             apiKey,
-					User:               apiKey.User,
-					Account:            account,
-					Subscription:       subscription,
-					InboundEndpoint:    inboundEndpoint,
-					UpstreamEndpoint:   upstreamEndpoint,
-					UserAgent:          userAgent,
-					IPAddress:          clientIP,
-					RequestPayloadHash: requestPayloadHash,
-					APIKeyService:      h.apiKeyService,
-					QuotaPlatform:      quotaPlatform,
-					SessionID:          sessionID,
-					ChannelUsageFields: clientRequestedUsageFields(c, channelMapping, reqModel, res.UpstreamModel),
-					PricingAt:          pricingAt,
-					CyberBlocked:       cyberBlocked,
-					NativeCompactionV2: nativeV2,
+					BPSAttemptBillingID: bpsAttemptBillingID,
+					Result:              res,
+					APIKey:              apiKey,
+					User:                apiKey.User,
+					Account:             account,
+					Subscription:        subscription,
+					InboundEndpoint:     inboundEndpoint,
+					UpstreamEndpoint:    upstreamEndpoint,
+					UserAgent:           userAgent,
+					IPAddress:           clientIP,
+					RequestPayloadHash:  requestPayloadHash,
+					APIKeyService:       h.apiKeyService,
+					QuotaPlatform:       quotaPlatform,
+					SessionID:           sessionID,
+					ChannelUsageFields:  clientRequestedUsageFields(c, channelMapping, reqModel, res.UpstreamModel),
+					PricingAt:           pricingAt,
+					CyberBlocked:        cyberBlocked,
+					NativeCompactionV2:  nativeV2,
 				}); err != nil {
 					logger.L().With(
 						zap.String("component", "handler.openai_gateway.responses"),
@@ -1078,6 +1093,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			} else {
 				var failoverErr *service.UpstreamFailoverError
 				if errors.As(err, &failoverErr) {
+					if account.IsExcelOAuth() {
+						submitResponsesUsage(result)
+					}
 					if failoverErr.Reason == service.OpenAIExecProtocolLeakReason {
 						h.gatewayService.ObserveOpenAIExecProtocolLeak(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, result), routeSessionHash)
 					}

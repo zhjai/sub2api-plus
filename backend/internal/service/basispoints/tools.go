@@ -15,6 +15,7 @@ import (
 type tool struct {
 	Name       string
 	Namespace  string
+	Namespaces []object
 	Kind       string
 	Definition string
 	Parameters object
@@ -204,8 +205,12 @@ func (b *Bridge) collectTools(value any, namespace string) ([]any, error) {
 }
 
 // A replayed declaration already carries its original item location.
-func (b *Bridge) collectToolsAt(value any, namespace, path string, single bool) ([]any, error) {
+func (b *Bridge) collectToolsAt(value any, namespace, path string, single bool, ancestry ...[]object) ([]any, error) {
 	var catalog []any
+	var namespaces []object
+	if len(ancestry) > 0 {
+		namespaces = ancestry[0]
+	}
 	items, ok := value.([]any)
 	if value != nil && !ok {
 		return nil, fmt.Errorf("basispoints client tools must be an array")
@@ -228,7 +233,12 @@ func (b *Bridge) collectToolsAt(value any, namespace, path string, single bool) 
 			if namespace != "" {
 				nestedNamespace = namespace + "." + name
 			}
-			nested, err := b.collectToolsAt(item["tools"], nestedNamespace, itemPath+".tools", false)
+			metadata, err := namespaceMetadata(item)
+			if err != nil {
+				return nil, err
+			}
+			chain := append(append([]object(nil), namespaces...), metadata)
+			nested, err := b.collectToolsAt(item["tools"], nestedNamespace, itemPath+".tools", false, chain)
 			if err != nil {
 				return nil, err
 			}
@@ -253,6 +263,9 @@ func (b *Bridge) collectToolsAt(value any, namespace, path string, single bool) 
 			key = namespace + "." + name
 		}
 		entry := object{"type": kind, "name": key}
+		if len(namespaces) > 0 {
+			entry["namespaces"] = namespaces
+		}
 		for _, field := range []string{"description", "format", "parameters"} {
 			if v, exists := item[field]; exists {
 				entry[field] = v
@@ -282,7 +295,7 @@ func (b *Bridge) collectToolsAt(value any, namespace, path string, single bool) 
 		if err != nil {
 			return nil, contextualToolSchemaError(key, itemPath+"."+schemaField, err)
 		}
-		b.tools[key] = tool{Name: name, Namespace: namespace, Kind: kind, Definition: definition, Parameters: parameters, Schema: schema, Catalog: item}
+		b.tools[key] = tool{Name: name, Namespace: namespace, Namespaces: namespaces, Kind: kind, Definition: definition, Parameters: parameters, Schema: schema, Catalog: item}
 		if kind == "function" {
 			entry["parameters"] = plaintextPromptParameters(name, namespace, parameters)
 		}
@@ -434,6 +447,7 @@ func (b *Bridge) translateHistory(input []any) ([]any, error) {
 	result := make([]any, 0, len(input))
 	seenCalls := make(map[string]bool)
 	var trigger any
+	assignmentIndex := currentAgentAssignmentIndex(input)
 	for index, raw := range input {
 		var toolImages object
 		item, ok := raw.(object)
@@ -450,9 +464,11 @@ func (b *Bridge) translateHistory(input []any) ([]any, error) {
 			trigger = item
 			continue
 		case "reasoning":
-			if encrypted := text(item["encrypted_content"]); encrypted != "" {
-				result = append(result, object{"type": "reasoning", "summary": []any{}, "encrypted_content": encrypted})
+			items, err := reasoningHistoryItems(item, index)
+			if err != nil {
+				return nil, err
 			}
+			result = append(result, items...)
 			continue
 		case "function_call", "custom_tool_call":
 			id := text(item["call_id"])
@@ -518,7 +534,7 @@ func (b *Bridge) translateHistory(input []any) ([]any, error) {
 			return nil, err
 		}
 		var err error
-		item, err = normalizeHistoryMessage(item, index)
+		item, err = normalizeHistoryMessage(item, index, index == assignmentIndex)
 		if err != nil {
 			return nil, err
 		}
@@ -805,7 +821,7 @@ func (b *Bridge) translateResponse(response object) error {
 	}
 	response["output"] = translated
 	response["reasoning"] = object{"effort": b.Effort}
-	response["parallel_tool_calls"] = false
+	response["parallel_tool_calls"] = !b.disallowParallel
 	return nil
 }
 

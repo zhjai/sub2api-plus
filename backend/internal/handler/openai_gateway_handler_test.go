@@ -161,9 +161,9 @@ func TestOpenAIResponsesRequiredCapability(t *testing.T) {
 			want:        service.OpenAIEndpointCapabilityChatCompletions,
 		},
 		{
-			name:     "non-image intent keeps chat capability",
+			name:     "non-image intent allows Responses and chat adapter",
 			platform: service.PlatformOpenAI,
-			want:     service.OpenAIEndpointCapabilityChatCompletions,
+			want:     service.OpenAIEndpointCapabilityResponsesCompatible,
 		},
 	}
 
@@ -172,6 +172,14 @@ func TestOpenAIResponsesRequiredCapability(t *testing.T) {
 			require.Equal(t, tt.want, openAIResponsesRequiredCapability(tt.imageIntent, tt.platform))
 		})
 	}
+}
+
+func TestOrdinaryResponsesAdmitsBPSWithoutAdmittingChatCompletions(t *testing.T) {
+	bps := &service.Account{Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth,
+		Credentials: map[string]any{"client_id": "app_fnr0pYvVwwFDocDumLG3H2Bp"}}
+	capability := openAIResponsesRequiredCapabilityForRequest(false, false, service.PlatformOpenAI)
+	require.True(t, bps.SupportsOpenAIEndpointCapability(capability), "ordinary HTTP Responses must admit Excel OAuth")
+	require.False(t, bps.SupportsOpenAIEndpointCapability(service.OpenAIEndpointCapabilityChatCompletions))
 }
 
 func TestResolveOpenAIMessagesMetadataSession_DoesNotDerivePromptCacheKey(t *testing.T) {

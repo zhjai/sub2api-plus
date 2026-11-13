@@ -250,6 +250,7 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 		openCodeGoUsage = state
 	}
 	out := &Account{
+		UpstreamClientTimezone:  service.UpstreamClientTimezoneStatus(a),
 		RPMLimit:                rpmLimit,
 		ID:                      a.ID,
 		Name:                    a.Name,
@@ -468,7 +469,8 @@ func AccountListItemFromAccount(a *Account) *AccountListItem {
 		return nil
 	}
 	return &AccountListItem{
-		RPMLimit: a.RPMLimit, RPMCapacity: a.RPMCapacity,
+		UpstreamClientTimezone: a.UpstreamClientTimezone,
+		RPMLimit:               a.RPMLimit, RPMCapacity: a.RPMCapacity,
 		ID: a.ID, Name: a.Name, Notes: a.Notes, Platform: a.Platform, Type: a.Type,
 		Credentials: a.Credentials, CredentialsStatus: a.CredentialsStatus, Extra: a.Extra,
 		OllamaCloudUsage: a.OllamaCloudUsage, OpenCodeGoUsage: a.OpenCodeGoUsage,

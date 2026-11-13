@@ -111,6 +111,14 @@ func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Cont
 	}
 	stateCtx, cancel := openAIAccountStateContext(ctx)
 	defer cancel()
+	// Handle Excel 403 before native access-state/team/custom-policy branches.
+	// In particular, a model cooldown must not become an account runtime block.
+	if statusCode == http.StatusForbidden && account.IsExcelOAuth() {
+		if s == nil || s.rateLimitService == nil {
+			return false
+		}
+		return s.rateLimitService.handleExcelBPS403(stateCtx, account, responseBody, firstRequestedModel(canonicalModel))
+	}
 	if account != nil && account.Platform == PlatformOpenAI && isOpenAIHTTPUpstreamAccessStateError(statusCode, "", responseBody) {
 		message := "OpenAI upstream account or workspace is unavailable"
 		if upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(responseBody)); upstreamMsg != "" {

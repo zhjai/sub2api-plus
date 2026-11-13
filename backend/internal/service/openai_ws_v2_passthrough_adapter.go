@@ -734,6 +734,11 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	if err := validateOpenAIWSBearerToken(account, token); err != nil {
 		return err
 	}
+	var timezoneErr error
+	firstClientMessage, timezoneErr = ApplyUpstreamClientTimezone(ctx, account, firstClientMessage, upstreamTimezoneAccountProxy(account))
+	if timezoneErr != nil {
+		return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, timezoneErr.Error(), timezoneErr)
+	}
 	if isOpenAIResponsesLiteWebSocketPayload(firstClientMessage) {
 		liteFirstMessage, _, liteErr := normalizeOpenAIResponsesLitePayloadForAccount(firstClientMessage, account)
 		if liteErr != nil {
@@ -977,6 +982,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	if privacy != nil {
 		upstreamFrameConn = &codexPrivacyFrameConn{FrameConn: upstreamFrameConn, projection: privacy}
 	}
+	upstreamFrameConn = &upstreamClientTimezoneFrameConn{FrameConn: upstreamFrameConn, account: account, proxy: proxyURL}
 	upstreamFrameConn = &accountRPMFrameConn{FrameConn: upstreamFrameConn, admit: func(admitCtx context.Context) error { return s.admitAccountRPM(admitCtx, account) }}
 	relayUpstreamFrameConn := &openAIWSPassthroughFirstOutputFrameConn{
 		inner:             upstreamFrameConn,
@@ -1039,6 +1045,13 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		// capturedSessionModel 的读写都发生在该 goroutine 内，因此无需
 		// 加锁/原子化。
 		filter: func(msgType coderws.MessageType, payload []byte) (out []byte, blocked *OpenAIFastBlockedError, filterErr error) {
+			if gjson.ValidBytes(payload) {
+				var timezoneErr error
+				payload, timezoneErr = ApplyUpstreamClientTimezone(ctx, account, payload, proxyURL)
+				if timezoneErr != nil {
+					return payload, nil, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, timezoneErr.Error(), timezoneErr)
+				}
+			}
 			if msgType != coderws.MessageText && msgType != coderws.MessageBinary {
 				return payload, nil, nil
 			}

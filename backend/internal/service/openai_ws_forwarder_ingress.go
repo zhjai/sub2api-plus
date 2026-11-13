@@ -95,6 +95,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	}
 	ctx = withCodexPrivacyHTTPSource(ctx, account, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
 	ctx = withCodexPrivacyWS(ctx, codexAccountIdentitySource(c, account), getAPIKeyIDFromContext(c))
+	ctx = withUpstreamClientTimezoneWS(ctx, account)
 	if err := s.guardCodexIdentityRequest(c, account, firstClientMessage, "ws"); err != nil {
 		return err
 	}
@@ -278,6 +279,11 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			normalized = next
 		}
 		responsesLite := isOpenAIResponsesLiteWebSocketPayload(normalized)
+		if timezoneBody, timezoneErr := ApplyUpstreamClientTimezone(ctx, account, normalized, upstreamTimezoneAccountProxy(account)); timezoneErr != nil {
+			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, timezoneErr.Error(), timezoneErr)
+		} else {
+			normalized = timezoneBody
+		}
 		if compatibilityBody, compatibilityChanged, compatibilityErr := normalizeOpenAIResponsesWebSocketCompatibilityBodyWithConfig(s.cfg, normalized, account, responsesLite); compatibilityErr != nil {
 			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", compatibilityErr)
 		} else if compatibilityChanged {

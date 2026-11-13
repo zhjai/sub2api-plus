@@ -20,6 +20,21 @@ func TestFilterSchedulerCredentialsKeepsSubscriptionPlanType(t *testing.T) {
 	require.NotContains(t, filtered, "refresh_token")
 }
 
+func TestSchedulerMetadataPreservesBPSAdmissionIdentity(t *testing.T) {
+	full := service.Account{Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth,
+		Credentials: map[string]any{"client_id": "app_fnr0pYvVwwFDocDumLG3H2Bp", "access_token": "secret", "refresh_token": "secret"}}
+	lite := buildSchedulerMetadataAccount(full)
+	require.True(t, lite.IsExcelOAuth())
+	for _, capability := range []service.OpenAIEndpointCapability{
+		service.OpenAIEndpointCapabilityChatCompletions, service.OpenAIEndpointCapabilityResponses,
+		service.OpenAIEndpointCapabilityResponsesCompatible, service.OpenAIEndpointCapabilityEmbeddings,
+	} {
+		require.Equal(t, full.SupportsOpenAIEndpointCapability(capability), lite.SupportsOpenAIEndpointCapability(capability), string(capability))
+	}
+	require.Empty(t, lite.GetCredential("access_token"))
+	require.Empty(t, lite.GetCredential("refresh_token"))
+}
+
 func TestFilterSchedulerCredentialsKeepsGeminiExplicitCacheKeys(t *testing.T) {
 	filtered := filterSchedulerCredentials(map[string]any{
 		"api_key":              "k",

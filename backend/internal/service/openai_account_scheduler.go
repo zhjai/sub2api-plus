@@ -2876,6 +2876,12 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 	if account == nil {
 		return false, "account_nil"
 	}
+	if account.IsExcelOAuth() && strings.TrimSpace(req.PreviousResponseID) != "" {
+		return false, "bps_requires_full_history"
+	}
+	if !excelBPSModelConfigurationEligible(ctx, account, req.RequestedModel) {
+		return false, "bps_models_not_configured"
+	}
 
 	if source, ok := CompositeRouteSourceFromContext(ctx); ok && source == CompositeRouteSourceAccount {
 		if publicModel, modelOK := RequestedPublicModelFromContext(ctx); modelOK && !explicitModelMappingClaims(*account, publicModel) {
@@ -3363,6 +3369,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	previousResponseCanMove bool,
 	useUpstreamTokenCost bool,
 ) (selected *AccountSelectionResult, finalDecision OpenAIAccountScheduleDecision, selectErr error) {
+	ctx = context.WithValue(ctx, openAIPreviousResponseAdmissionKey{}, strings.TrimSpace(previousResponseID) != "")
 	ctx = s.withOpenAIQuotaAutoPauseContext(ctx)
 	ctx = s.withOpenAIGroupPrivacyRequirement(ctx, groupID)
 	// 分组利润控制：唯一文本调度入口的防御性装门。handler 文本
@@ -3695,7 +3702,8 @@ func (s *OpenAIGatewayService) ReportOpenAIAccountScheduleResultForRequest(accou
 
 func (s *OpenAIGatewayService) reportOpenAIAccountScheduleResult(account *Account, model string, result *OpenAIForwardResult, success bool, firstTokenMs *int, observedErr ...error) bool {
 	for _, err := range observedErr {
-		if IsAccountRPMError(err) {
+		var localBridge *OpenAILocalBridgeError
+		if IsAccountRPMError(err) || errors.As(err, &localBridge) {
 			return false
 		}
 	}
@@ -3736,7 +3744,8 @@ func (s *OpenAIGatewayService) reportOpenAIAccountScheduleResult(account *Accoun
 // ObserveOpenAIAccountHealthFailure records failures that cannot reach the
 // scheduler-result path, for example after semantic response bytes were sent.
 func (s *OpenAIGatewayService) ObserveOpenAIAccountHealthFailure(ctx context.Context, account *Account, observedErr error) bool {
-	if IsAccountRPMError(observedErr) {
+	var localBridge *OpenAILocalBridgeError
+	if IsAccountRPMError(observedErr) || errors.As(observedErr, &localBridge) {
 		return false
 	}
 	if s == nil || account == nil || observedErr == nil {

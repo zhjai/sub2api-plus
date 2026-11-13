@@ -100,6 +100,9 @@ func (s *structuredOutput) instructions() string {
 	prompt := "The client requires a structured final answer. Your final assistant answer must be exactly one JSON value, with no Markdown fences or surrounding prose. " +
 		"Tool calls and refusals remain separate protocol items; use the client tool transport as needed before the final answer. " +
 		"The gateway validates the final JSON before returning it to the client."
+	if text(s.format["type"]) == "json_object" {
+		prompt += " The JSON root must be an object, not an array, scalar or null."
+	}
 	if s.schema != nil {
 		encoded, _ := json.Marshal(s.format)
 		prompt += " The final answer must satisfy the schema in this output format: \n" + string(encoded)
@@ -142,6 +145,11 @@ func (s *structuredOutput) validate(response object) error {
 	var instance any
 	if err := decode([]byte(answer.String()), &instance); err != nil {
 		return fmt.Errorf("basispoints structured output is not one valid JSON value")
+	}
+	if text(s.format["type"]) == "json_object" {
+		if _, ok := instance.(object); !ok {
+			return fmt.Errorf("basispoints json_object output requires a JSON object root")
+		}
 	}
 	if s.schema != nil && s.schema.Validate(instance) != nil {
 		return fmt.Errorf("basispoints structured output does not satisfy the requested JSON schema")

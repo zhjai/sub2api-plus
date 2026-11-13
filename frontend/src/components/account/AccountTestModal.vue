@@ -53,9 +53,24 @@
           label-key="display_name"
           :placeholder="loadingModels ? t('common.loading') + '...' : t('admin.accounts.selectTestModel')"
         />
+        <p
+          v-if="catalogError"
+          role="alert"
+          data-testid="account-test-catalog-error"
+          class="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-800/60 dark:bg-red-900/20 dark:text-red-300"
+        >
+          {{ catalogError }}
+        </p>
+        <p
+          v-else-if="isOpenAIBPS && !loadingModels && availableModels.length === 0"
+          data-testid="account-test-bps-empty-models"
+          class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-800/60 dark:bg-amber-900/20 dark:text-amber-300"
+        >
+          {{ t('admin.accounts.bpsAccount.models.configureRequired') }}
+        </p>
       </div>
 
-      <div v-if="isOpenAIAccount" class="space-y-1.5">
+      <div v-if="isOpenAIAccount && !isOpenAIBPS" class="space-y-1.5">
         <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
           {{ t('admin.accounts.openai.testMode') }}
         </label>
@@ -251,6 +266,8 @@ import { Icon } from '@/components/icons'
 import { useClipboard } from '@/composables/useClipboard'
 import { buildApiUrl } from '@/api/client'
 import { adminAPI } from '@/api/admin'
+import { extractApiErrorMessage } from '@/utils/apiError'
+import { isOpenAIBPSAccount } from '@/utils/openaiOAuthClient'
 import type { Account, ClaudeModel } from '@/types'
 
 const { t } = useI18n()
@@ -287,7 +304,9 @@ const loadingModels = ref(false)
 let abortController: AbortController | null = null
 const generatedImages = ref<PreviewImage[]>([])
 const testMode = ref<'default' | 'compact'>('default')
+const catalogError = ref('')
 const isOpenAIAccount = computed(() => props.account?.platform === 'openai')
+const isOpenAIBPS = computed(() => isOpenAIBPSAccount(props.account))
 const openAITestModeOptions = computed(() => [
   { value: 'default', label: t('admin.accounts.openai.testModeDefault') },
   { value: 'compact', label: t('admin.accounts.openai.testModeCompact') }
@@ -302,6 +321,7 @@ const supportsGeminiImageTest = computed(() => {
 })
 
 const supportsOpenAIImageTest = computed(() => {
+  if (isOpenAIBPS.value) return false
   const modelID = selectedModelId.value.toLowerCase()
   if (!modelID.startsWith('gpt-image-')) return false
   return props.account?.platform === 'openai'
@@ -345,6 +365,7 @@ const loadAvailableModels = async () => {
   if (!props.account) return
 
   loadingModels.value = true
+  catalogError.value = ''
   selectedModelId.value = '' // Reset selection before loading
   try {
     const models = await adminAPI.accounts.getAvailableModels(props.account.id)
@@ -363,7 +384,10 @@ const loadAvailableModels = async () => {
     }
   } catch (error) {
     console.error('Failed to load available models:', error)
-    // Fallback to empty list
+    catalogError.value = extractApiErrorMessage(
+      error,
+      t('admin.accounts.bpsAccount.models.testCatalogLoadFailed')
+    )
     availableModels.value = []
     selectedModelId.value = ''
   } finally {
@@ -431,7 +455,7 @@ const startTest = async () => {
       body: JSON.stringify({
         model_id: selectedModelId.value,
         prompt: supportsImageTest.value ? testPrompt.value.trim() : '',
-        mode: isOpenAIAccount.value ? testMode.value : 'default'
+        mode: isOpenAIAccount.value && !isOpenAIBPS.value ? testMode.value : 'default'
       }),
       signal: abortController.signal
     })

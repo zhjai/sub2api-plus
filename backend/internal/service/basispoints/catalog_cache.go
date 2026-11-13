@@ -155,10 +155,7 @@ func prepareWithCatalog(raw []byte, scope string, replay *ReplayCache, cache *Ca
 		declarations := make([]any, 0, len(keys))
 		for _, key := range keys {
 			info := b.tools[key]
-			var declaration any = info.Catalog
-			if info.Namespace != "" {
-				declaration = object{"type": "namespace", "name": info.Namespace, "tools": []any{declaration}}
-			}
+			declaration := info.catalogDeclaration()
 			declarations = append(declarations, declaration)
 		}
 		saved, err := json.Marshal(declarations)
@@ -200,10 +197,7 @@ func (b *Bridge) Reprepare(raw []byte) ([]byte, *Bridge, error) {
 		declarations := make([]any, 0, len(keys))
 		for _, key := range keys {
 			info := b.tools[key]
-			var declaration any = info.Catalog
-			if info.Namespace != "" {
-				declaration = object{"type": "namespace", "name": info.Namespace, "tools": []any{declaration}}
-			}
+			declaration := info.catalogDeclaration()
 			declarations = append(declarations, declaration)
 		}
 		source["tools"] = declarations
