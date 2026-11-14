@@ -1203,8 +1203,21 @@ func cloneImageSizeBreakdown(input map[string]int) map[string]int {
 	return output
 }
 
+// OpenAIUsageAttemptUsesBPS identifies the channel that actually consumed usage.
+// A dual-grant account keeps its native primary identity in the HTTP handler;
+// conversely, a native fallback must not inherit BPS accounting from settings.
+// Only legacy results without an endpoint use the credential classification.
+func OpenAIUsageAttemptUsesBPS(account *Account, result *OpenAIForwardResult) bool {
+	if result != nil {
+		if endpoint := strings.TrimSpace(result.UpstreamEndpoint); endpoint != "" {
+			return strings.HasPrefix(endpoint, "/basispoints/")
+		}
+	}
+	return account != nil && account.IsExcelOAuth()
+}
+
 func resolveOpenAIUsageBillingRequestID(ctx context.Context, input *OpenAIRecordUsageInput) string {
-	if input.Account.IsExcelOAuth() {
+	if OpenAIUsageAttemptUsesBPS(input.Account, input.Result) {
 		if attemptID := strings.TrimSpace(input.BPSAttemptBillingID); attemptID != "" {
 			return attemptID
 		}

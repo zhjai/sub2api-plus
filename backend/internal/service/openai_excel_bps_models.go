@@ -10,39 +10,11 @@ import (
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 )
 
-// BPS has no native Codex discovery endpoint. Only explicit public mappings
-// and concrete group selections describe its local catalog; subscription names
-// and the global OpenAI defaults are not evidence of upstream model access.
-func buildExcelBPSModelsManifest(account *Account, group *Group) (*OpenAIModelsResponse, error) {
-	models := openAIConfiguredCodexModelIDs([]Account{*account})
-	if group != nil && group.ModelAllowlistEnabled() {
-		for _, selected := range group.ModelAllowlist.Models {
-			selected = strings.TrimSpace(selected)
-			if selected != "" && !strings.Contains(selected, "*") && account.IsModelSupported(selected) {
-				models = append(models, selected)
-			}
-		}
-	}
-	if len(models) == 0 {
-		return nil, infraerrors.New(http.StatusServiceUnavailable, "OPENAI_BPS_MODELS_NOT_CONFIGURED", "Configure explicit model mappings for the BPS account or select concrete models in the group model allowlist")
-	}
-	models = FilterCodexModelIDsForGroup(dedupeAndSortModelIDs(models), group)
-	body, err := buildCodexModelsManifestForAccounts(PlatformOpenAI, models, []Account{*account}, group, nil, true)
-	if err != nil {
-		return nil, err
-	}
-	return &OpenAIModelsResponse{Body: body, ETag: codexModelsManifestBodyETag(body)}, nil
-}
-
-// FetchGroupAccountCodexModelsManifest preserves live discovery for native
-// accounts and uses explicit local configuration for a BPS source. Projection
-// happens exactly once: a generated BPS slug is already a public alias.
+// FetchGroupAccountCodexModelsManifest discovers upstream IDs for either grant
+// and applies public-name projection exactly once.
 func (s *OpenAIGatewayService) FetchGroupAccountCodexModelsManifest(ctx context.Context, account *Account, group *Group, clientVersion string) (*OpenAIModelsResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
-	}
-	if account.IsExcelOAuth() {
-		return buildExcelBPSModelsManifest(account, group)
 	}
 	manifest, err := s.FetchCodexModelsManifest(ctx, account, clientVersion, "")
 	if err != nil {
@@ -55,18 +27,6 @@ func (s *OpenAIGatewayService) FetchGroupAccountCodexModelsManifest(ctx context.
 		return nil, err
 	}
 	return manifest, nil
-}
-
-func buildExcelBPSModelsList(account *Account, group *Group) (*OpenAIModelsResponse, error) {
-	manifest, err := buildExcelBPSModelsManifest(account, group)
-	if err != nil {
-		return nil, err
-	}
-	body, err := standardOpenAIModelsBody(manifest.Body, true)
-	if err != nil {
-		return nil, err
-	}
-	return &OpenAIModelsResponse{Body: body, ETag: codexModelsManifestBodyETag(body)}, nil
 }
 
 // Composite live manifests need the same BPS/native transport intersection as

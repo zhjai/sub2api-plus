@@ -2882,6 +2882,9 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 	if !excelBPSModelConfigurationEligible(ctx, account, req.RequestedModel) {
 		return false, "bps_models_not_configured"
 	}
+	if account.IsExcelOAuth() && !account.IsExcelBPSEnabledForModel(req.RequestedModel) {
+		return false, "bps_channel_unavailable"
+	}
 
 	if source, ok := CompositeRouteSourceFromContext(ctx); ok && source == CompositeRouteSourceAccount {
 		if publicModel, modelOK := RequestedPublicModelFromContext(ctx); modelOK && !explicitModelMappingClaims(*account, publicModel) {

@@ -1,47 +1,49 @@
 package basispoints
 
-import (
-	"strings"
+import "github.com/tidwall/gjson"
 
-	"github.com/tidwall/gjson"
-)
-
-// NativeFallbackReason reports declarations requiring the native Codex channel
-// under the default fallback policy. This describes the bridge's capabilities,
-// not whether the BPS upstream could support them through another protocol.
+// NativeFallbackReason reports whole-turn capabilities absent from this bridge.
+// tool_choice:none disables declarations only, not existing hosted dependencies.
 func NativeFallbackReason(body []byte) string {
 	if !gjson.ValidBytes(body) {
 		return ""
 	}
 	choice := gjson.GetBytes(body, "tool_choice")
-	if choice.Type == gjson.String && choice.String() == "none" {
-		return ""
-	}
-	switch choice.Get("type").String() {
-	case "web_search", "web_search_preview", "web_search_preview_2025_03_11", "web_search_2025_08_26", "image_generation":
+	if isUnsupportedHostedTool(choice.Get("type").String()) {
 		return "tool_choice"
 	}
-	if tools := gjson.GetBytes(body, "tools"); tools.IsArray() {
-		fallback := ""
-		tools.ForEach(func(_, tool gjson.Result) bool {
-			kind := strings.ToLower(strings.TrimSpace(tool.Get("type").String()))
-			switch kind {
-			case "image_generation":
-				fallback = "image_generation"
-				return false
-			case "web_search", "web_search_preview", "web_search_preview_2025_03_11", "web_search_2025_08_26":
-				if tool.Get("external_web_access").Bool() || tool.Get("search_context_size").String() == "high" {
-					fallback = "web_search"
-					return false
+	var inspect func(gjson.Result) string
+	inspect = func(items gjson.Result) string {
+		for _, item := range items.Array() {
+			kind := item.Get("type").String()
+			if isUnsupportedHostedTool(kind) {
+				return kind
+			}
+			if kind == "namespace" {
+				if found := inspect(item.Get("tools")); found != "" {
+					return found
 				}
 			}
-			return true
-		})
-		if fallback != "" {
-			return fallback
+		}
+		return ""
+	}
+	disabled := choice.Type == gjson.String && choice.String() == "none"
+	if !disabled {
+		if found := inspect(gjson.GetBytes(body, "tools")); found != "" {
+			return found
 		}
 	}
-	// Inline data images are handled by Sub2API's local relay before Prepare;
-	// leave them on BPS so the relay can rewrite them to signed HTTPS URLs.
+	for _, item := range gjson.GetBytes(body, "input").Array() {
+		switch item.Get("type").String() {
+		case "web_search_call", "image_generation_call", "file_search_call", "computer_call", "computer_call_output", "code_interpreter_call":
+			return "input.hosted_tool_dependency"
+		case "additional_tools", "tool_search_output":
+			if !disabled {
+				if found := inspect(item.Get("tools")); found != "" {
+					return found
+				}
+			}
+		}
+	}
 	return ""
 }

@@ -2611,7 +2611,7 @@
                 class="text-xs leading-relaxed text-emerald-900 dark:text-emerald-200"
                 data-testid="create-bps-sync-unavailable"
               >
-                {{ t('admin.accounts.bpsAccount.models.syncUnavailable') }}
+                {{ t('admin.accounts.bpsAccount.models.syncSaveFirstHint') }}
               </p>
               <button
                 type="button"
@@ -3409,7 +3409,16 @@
         </p>
       </div>
 
-      <!-- OpenAI 自动透传开关（OAuth/API Key；BPS 不适用） -->
+      <!-- Dual-grant channel explanation: native controls below apply only to the native primary channel -->
+      <div
+        v-if="form.platform === 'openai' && accountCategory === 'oauth-based' && !isOpenAIBPSOAuth && (Boolean(stagedIndependentBPSCredentials) || bpsChannelOptions.enabled)"
+        data-testid="create-dual-grant-channel-note"
+        class="rounded-lg border border-blue-200 bg-blue-50/80 px-3.5 py-2.5 text-xs leading-relaxed text-blue-900 dark:border-blue-800/50 dark:bg-blue-950/30 dark:text-blue-200"
+      >
+        {{ t('admin.accounts.bpsAccount.options.dualChannelNativeNote') }}
+      </div>
+
+      <!-- OpenAI 自动透传开关（OAuth/API Key；BPS 专属账号隐藏，双授权仅作用于原生通道） -->
       <div
         v-if="form.platform === 'openai' && !isOpenAIBPSOAuth"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
@@ -3491,13 +3500,119 @@
         </div>
       </div>
 
-      <!-- OpenAI BPS (official Excel OAuth) dedicated options -->
+      <!-- OpenAI BPS channel & independent Excel OAuth grant options -->
       <OpenAIBPSOptionsSection
-        v-if="isOpenAIBPSOAuth"
+        v-if="supportsCreateOpenAIBPS"
         id-prefix="create"
-        v-model:skip-historical-encrypted="bpsSkipHistoricalEncrypted"
-        v-model:hosted-tools-policy="bpsHostedToolsPolicy"
-      />
+        :options="bpsChannelOptions"
+        :is-bps-only="isOpenAIBPSOAuth"
+        :has-saved-account="false"
+        :has-saved-independent-grant="false"
+        :staged-grant-state="stagedIndependentBPSCredentials ? 'attached' : 'none'"
+        :groups="groups"
+        :proxies="proxies"
+        :candidate-models="createBPSCandidateModels"
+        :can-sync-models="false"
+        :validation-error="bpsValidationError"
+        @update:options="onUpdateCreateBPSOptions"
+        @attach-grant="toggleIndependentBPSGrantPanel"
+        @remove-grant="clearStagedIndependentBPSGrant"
+        @cancel-staged-grant="clearStagedIndependentBPSGrant"
+      >
+        <template #independent-grant-extra>
+          <div
+            v-if="stagedIndependentBPSGrantSummary && !isOpenAIBPSOAuth"
+            data-testid="create-bps-staged-grant-summary"
+            class="mt-2 flex flex-wrap items-center gap-2 text-xs text-gray-600 dark:text-gray-300"
+          >
+            <span v-if="stagedIndependentBPSGrantSummary.email" class="font-medium">
+              {{ stagedIndependentBPSGrantSummary.email }}
+            </span>
+            <span
+              v-if="stagedIndependentBPSGrantSummary.planType"
+              class="rounded bg-gray-100 px-1.5 py-0.5 text-[11px] uppercase text-gray-700 dark:bg-dark-600 dark:text-gray-200"
+            >
+              {{ stagedIndependentBPSGrantSummary.planType }}
+            </span>
+            <span
+              v-if="stagedIndependentBPSGrantSummary.workspace"
+              class="font-mono text-[11px] text-gray-500 dark:text-gray-400"
+            >
+              {{ stagedIndependentBPSGrantSummary.workspace }}
+            </span>
+          </div>
+
+          <div
+            v-if="showIndependentBPSGrantPanel && !isOpenAIBPSOAuth"
+            data-testid="create-bps-independent-grant-panel"
+            class="mt-3 space-y-3 rounded-lg border border-emerald-200 bg-white p-3 dark:border-emerald-800/60 dark:bg-dark-800"
+          >
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <p class="text-xs text-gray-600 dark:text-gray-300">
+                {{ t('admin.accounts.bpsAccount.grant.reauthIndependentHint') }}
+              </p>
+              <div class="flex items-center gap-2">
+                <button
+                  type="button"
+                  data-testid="create-bps-independent-grant-reset"
+                  class="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 dark:border-dark-500 dark:bg-dark-700 dark:text-gray-200"
+                  @click="resetIndependentBPSGrantFlow"
+                >
+                  {{ t('admin.accounts.bpsAccount.grant.resetSelectedGrant') }}
+                </button>
+                <button
+                  type="button"
+                  data-testid="create-bps-independent-grant-close"
+                  class="rounded-md border border-gray-200 px-2 py-1 text-xs text-gray-500 hover:bg-gray-50 dark:border-dark-600 dark:text-gray-400"
+                  @click="showIndependentBPSGrantPanel = false"
+                >
+                  {{ t('common.close') }}
+                </button>
+              </div>
+            </div>
+
+            <OAuthAuthorizationFlow
+              ref="bpsIndependentFlowRef"
+              add-method="oauth"
+              :auth-url="bpsIndependentOAuth.authUrl.value"
+              :session-id="bpsIndependentOAuth.sessionId.value"
+              :loading="bpsIndependentOAuth.loading.value"
+              :error="bpsIndependentOAuth.error.value"
+              :show-help="false"
+              :show-proxy-warning="false"
+              :allow-multiple="false"
+              :show-cookie-option="false"
+              :show-refresh-token-option="true"
+              :show-mobile-refresh-token-option="false"
+              :show-session-token-option="false"
+              :show-access-token-option="false"
+              :show-codex-session-import-option="false"
+              :show-agent-identity-option="false"
+              :show-codex-pat-option="false"
+              oauth-client="excel"
+              :show-sso-option="false"
+              :show-email-password-option="false"
+              :show-manual-option="true"
+              initial-input-method="manual"
+              platform="openai"
+              @generate-url="handleGenerateIndependentBPSUrl"
+              @validate-refresh-token="handleValidateIndependentBPSRT"
+            />
+
+            <div v-if="bpsIndependentFlowInputMethod === 'manual'" class="flex justify-end">
+              <button
+                type="button"
+                data-testid="create-bps-independent-grant-exchange"
+                class="btn btn-primary btn-sm"
+                :disabled="!canExchangeIndependentBPSCode"
+                @click="handleExchangeIndependentBPSCode"
+              >
+                {{ t('admin.accounts.oauth.completeAuth') }}
+              </button>
+            </div>
+          </div>
+        </template>
+      </OpenAIBPSOptionsSection>
 
       <!-- OpenAI account upstream client fingerprint timezone (API Key + OAuth including BPS) -->
       <UpstreamClientTimezoneField
@@ -3635,7 +3750,7 @@
       </div>
 
       <div
-        v-if="form.platform === 'openai' && accountCategory === 'oauth-based' && !isOpenAIBPSOAuth"
+        v-if="form.platform === 'openai' && accountCategory === 'oauth-based'"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="flex items-center justify-between">
@@ -3647,6 +3762,7 @@
           </div>
           <button
             type="button"
+            data-testid="create-codex-cli-only-toggle"
             @click="codexCLIOnlyEnabled = !codexCLIOnlyEnabled"
             :class="[
               'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2',
@@ -3673,6 +3789,7 @@
           </div>
           <button
             type="button"
+            data-testid="create-codex-cli-only-app-server-toggle"
             @click="codexCLIOnlyAppServerEnabled = !codexCLIOnlyAppServerEnabled"
             :class="[
               'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2',
@@ -4312,12 +4429,17 @@ import CodexPrivacyModeField from './CodexPrivacyModeField.vue'
 import OpenAIBPSOptionsSection from './OpenAIBPSOptionsSection.vue'
 import UpstreamClientTimezoneField from './UpstreamClientTimezoneField.vue'
 import {
-  DEFAULT_OPENAI_BPS_OPTIONS,
-  applyOpenAIBPSOptions,
+  applyOpenAIBPSChannelOptions,
+  filterActiveBPSProxies,
+  filterEligibleBPSTargetGroups,
   hasExplicitOpenAIBPSModels,
   mergeRecommendedBPSMappings,
   mergeRecommendedBPSWhitelist,
-  type OpenAIBPSHostedToolsPolicy
+  normalizeOpenAIBPSModels,
+  readOpenAIBPSChannelOptions,
+  validateOpenAIBPSChannelOptions,
+  type OpenAIBPSChannelOptions,
+  type OpenAIBPSValidationErrorCode
 } from '@/utils/openaiBPS'
 import {
   applyUpstreamClientTimezone,
@@ -4332,6 +4454,7 @@ import {
 } from '@/composables/useAccountOAuth'
 import { useOpenAIOAuth } from '@/composables/useOpenAIOAuth'
 import {
+  OPENAI_EXCEL_BPS_CREDENTIALS_KEY,
   OPENAI_EXCEL_OAUTH_CLIENT_ID,
   openAIExcelCallbackErrorKey,
   parseOpenAIExcelCallback,
@@ -4553,6 +4676,7 @@ const hideAccountLongContextBilling = computed(() => {
 // OAuth composables
 const oauth = useAccountOAuth() // For Anthropic OAuth
 const openaiOAuth = useOpenAIOAuth() // For OpenAI OAuth
+const bpsIndependentOAuth = useOpenAIOAuth() // Isolated OpenAI Excel BPS OAuth grant session
 const geminiOAuth = useGeminiOAuth() // For Gemini OAuth
 const antigravityOAuth = useAntigravityOAuth() // For Antigravity OAuth
 const grokOAuth = useGrokOAuth() // For Grok OAuth
@@ -4592,6 +4716,7 @@ const currentOAuthError = computed(() => {
 
 // Refs
 const oauthFlowRef = ref<OAuthFlowExposed | null>(null)
+const bpsIndependentFlowRef = ref<OAuthFlowExposed | null>(null)
 
 // Model mapping type
 interface ModelMapping {
@@ -4930,9 +5055,128 @@ const openaiPassthroughEnabled = ref(false)
 const openaiOpaqueUpstreamEnabled = ref(false)
 // OpenAI Codex namespace 工具摊平兼容开关（仅 OAuth），缺省关闭即原样保留
 const openaiFlattenNamespacesEnabled = ref(false)
-// BPS dedicated options & OpenAI upstream client fingerprint timezone state
-const bpsSkipHistoricalEncrypted = ref<boolean>(DEFAULT_OPENAI_BPS_OPTIONS.skipHistoricalEncrypted)
-const bpsHostedToolsPolicy = ref<OpenAIBPSHostedToolsPolicy>(DEFAULT_OPENAI_BPS_OPTIONS.hostedToolsPolicy)
+// BPS dedicated channel options, staged independent Excel grant & OpenAI upstream client fingerprint timezone state
+const bpsChannelOptions = ref<OpenAIBPSChannelOptions>(
+  readOpenAIBPSChannelOptions(undefined, { isBPSOnly: false })
+)
+const bpsValidationError = ref<OpenAIBPSValidationErrorCode | null>(null)
+const showIndependentBPSGrantPanel = ref(false)
+const stagedIndependentBPSCredentials = ref<Record<string, unknown> | null>(null)
+
+const supportsCreateOpenAIBPS = computed(
+  () => form.platform === 'openai' && accountCategory.value === 'oauth-based'
+)
+
+const createBPSCandidateModels = computed(() =>
+  normalizeOpenAIBPSModels([
+    ...allowedModels.value,
+    ...modelMappings.value.map((row) => row.to)
+  ])
+)
+
+const stagedIndependentBPSGrantSummary = computed(() => {
+  const creds = stagedIndependentBPSCredentials.value
+  if (!creds) return null
+  const text = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
+  return {
+    email: text(creds.email),
+    planType: text(creds.plan_type),
+    workspace: text(creds.chatgpt_account_id)
+  }
+})
+
+const bpsIndependentFlowInputMethod = computed(
+  () => bpsIndependentFlowRef.value?.inputMethod || 'manual'
+)
+
+const canExchangeIndependentBPSCode = computed(() => {
+  const authCode = bpsIndependentFlowRef.value?.authCode || ''
+  return (
+    parseOpenAIExcelCallback(authCode, bpsIndependentOAuth.oauthState.value).ok &&
+    Boolean(bpsIndependentOAuth.sessionId.value) &&
+    !bpsIndependentOAuth.loading.value
+  )
+})
+
+const onUpdateCreateBPSOptions = (next: OpenAIBPSChannelOptions) => {
+  bpsChannelOptions.value = next
+  bpsValidationError.value = null
+}
+
+const resetIndependentBPSGrantFlow = () => {
+  bpsIndependentOAuth.resetState()
+  bpsIndependentFlowRef.value?.reset()
+}
+
+const toggleIndependentBPSGrantPanel = () => {
+  showIndependentBPSGrantPanel.value = !showIndependentBPSGrantPanel.value
+}
+
+const clearStagedIndependentBPSGrant = () => {
+  stagedIndependentBPSCredentials.value = null
+  showIndependentBPSGrantPanel.value = false
+  resetIndependentBPSGrantFlow()
+}
+
+const buildStagedExcelBPSCredentials = (tokenInfo: NonNullable<Awaited<ReturnType<typeof bpsIndependentOAuth.exchangeAuthCode>>>) => {
+  if (typeof bpsIndependentOAuth.buildIndependentExcelBPSCredentials === 'function') {
+    return bpsIndependentOAuth.buildIndependentExcelBPSCredentials(tokenInfo)
+  }
+  return {
+    ...bpsIndependentOAuth.buildCredentials(tokenInfo),
+    client_id: OPENAI_EXCEL_OAUTH_CLIENT_ID
+  }
+}
+
+const handleGenerateIndependentBPSUrl = async () => {
+  await bpsIndependentOAuth.generateAuthUrl(form.proxy_id, undefined, 'excel')
+}
+
+const handleExchangeIndependentBPSCode = async () => {
+  const authCode = bpsIndependentFlowRef.value?.authCode || ''
+  const callback = parseOpenAIExcelCallback(authCode, bpsIndependentOAuth.oauthState.value)
+  if (!callback.ok) {
+    bpsIndependentOAuth.error.value = t(openAIExcelCallbackErrorKey(callback.error), {
+      error: callback.detail || ''
+    })
+    appStore.showError(bpsIndependentOAuth.error.value)
+    return
+  }
+  const tokenInfo = await bpsIndependentOAuth.exchangeAuthCode(
+    callback.code,
+    bpsIndependentOAuth.sessionId.value,
+    callback.state,
+    form.proxy_id
+  )
+  if (!tokenInfo) return
+  stagedIndependentBPSCredentials.value = buildStagedExcelBPSCredentials(tokenInfo)
+  showIndependentBPSGrantPanel.value = false
+  resetIndependentBPSGrantFlow()
+  appStore.showSuccess(t('admin.accounts.bpsAccount.grant.stagedReadyHint'))
+}
+
+const handleValidateIndependentBPSRT = async (refreshTokenInput: string) => {
+  const rt = refreshTokenInput
+    .split('\n')
+    .map((line) => line.trim())
+    .find(Boolean)
+  if (!rt) {
+    bpsIndependentOAuth.error.value = t('admin.accounts.oauth.openai.pleaseEnterRefreshToken')
+    return
+  }
+  const tokenInfo = await bpsIndependentOAuth.validateRefreshToken(
+    rt,
+    form.proxy_id,
+    OPENAI_EXCEL_OAUTH_CLIENT_ID,
+    'excel'
+  )
+  if (!tokenInfo) return
+  stagedIndependentBPSCredentials.value = buildStagedExcelBPSCredentials(tokenInfo)
+  showIndependentBPSGrantPanel.value = false
+  resetIndependentBPSGrantFlow()
+  appStore.showSuccess(t('admin.accounts.bpsAccount.grant.stagedReadyHint'))
+}
+
 const upstreamClientTimezoneMode = ref<UpstreamClientTimezoneMode>('off')
 const upstreamClientTimezoneManual = ref<string>('')
 const upstreamClientTimezoneValidationError = ref<UpstreamClientTimezoneError | null>(null)
@@ -5015,12 +5259,10 @@ const codexFingerprintModeOptions = computed(() => [
 const effectiveCreateCodexFingerprintMode = computed<CodexFingerprintMode>(() =>
   accountCategory.value === 'oauth-based' && !isOpenAIBPSOAuth.value ? codexFingerprintMode.value : 'off'
 )
-// 客户端指纹保护（extra.codex_privacy_mode）：OpenAI OAuth 与 API Key 新建均可选，缺省关闭。
-// 新建页没有 preserve_client 控件，冲突只可能来自指纹收敛。BPS 账号不提供（Codex 身份专用）。
+// 客户端指纹保护（extra.codex_privacy_mode）：OpenAI OAuth（含 BPS）与 API Key 新建均可选，缺省关闭。
 const codexPrivacyEligible = computed(() =>
   form.platform === 'openai' &&
-  (accountCategory.value === 'oauth-based' || accountCategory.value === 'apikey') &&
-  !isOpenAIBPSOAuth.value
+  (accountCategory.value === 'oauth-based' || accountCategory.value === 'apikey')
 )
 const codexPrivacyFieldRef = ref<InstanceType<typeof CodexPrivacyModeField> | null>(null)
 const {
@@ -5278,9 +5520,9 @@ const openAIWSModeHintKey = computed(() =>
 const effectiveOpenAIPassthroughEnabled = computed(() =>
   openaiPassthroughEnabled.value && !isOpenAIBPSOAuth.value
 )
-// Codex CLI-only 是 Codex 客户端限制，BPS 账号不提供。
+// 本地 CLI-only 入站客户端门禁同时适用于原生 Codex 与 BPS OAuth。
 const effectiveCodexCLIOnlyEnabled = computed(() =>
-  codexCLIOnlyEnabled.value && !isOpenAIBPSOAuth.value
+  accountCategory.value === 'oauth-based' && codexCLIOnlyEnabled.value
 )
 
 const isOpenAIModelRestrictionDisabled = computed(() =>
@@ -5484,6 +5726,23 @@ watch(
 // a new BPS account never silently inherits the native Codex catalog.
 watch(openaiOAuthClient, (nextClient, prevClient) => {
   openaiOAuth.resetState()
+  bpsValidationError.value = null
+  if (nextClient === 'excel') {
+    stagedIndependentBPSCredentials.value = null
+    showIndependentBPSGrantPanel.value = false
+    resetIndependentBPSGrantFlow()
+    bpsChannelOptions.value = {
+      ...bpsChannelOptions.value,
+      enabled: true,
+      modelsMode: bpsChannelOptions.value.models.length > 0 ? 'selected' : 'all'
+    }
+  } else if (prevClient === 'excel') {
+    bpsChannelOptions.value = {
+      ...bpsChannelOptions.value,
+      enabled: false,
+      modelsMode: 'selected'
+    }
+  }
   if (form.platform !== 'openai') return
   const defaultOpenAIModels = getModelsByPlatform('openai')
   const isDefaultOpenAIWhitelist =
@@ -5496,7 +5755,11 @@ watch(openaiOAuthClient, (nextClient, prevClient) => {
   }
 })
 watch(accountCategory, (category) => {
-  if (category !== 'oauth-based') openaiOAuthClient.value = 'codex'
+  if (category !== 'oauth-based') {
+    openaiOAuthClient.value = 'codex'
+    clearStagedIndependentBPSGrant()
+    bpsValidationError.value = null
+  }
 })
 
 // Reset platform-specific settings when platform changes
@@ -5581,8 +5844,9 @@ watch(
       openaiPassthroughEnabled.value = false
       openaiOpaqueUpstreamEnabled.value = false
       openaiFlattenNamespacesEnabled.value = false
-      bpsSkipHistoricalEncrypted.value = DEFAULT_OPENAI_BPS_OPTIONS.skipHistoricalEncrypted
-      bpsHostedToolsPolicy.value = DEFAULT_OPENAI_BPS_OPTIONS.hostedToolsPolicy
+      bpsChannelOptions.value = readOpenAIBPSChannelOptions(undefined, { isBPSOnly: false })
+      bpsValidationError.value = null
+      clearStagedIndependentBPSGrant()
       upstreamClientTimezoneMode.value = 'off'
       upstreamClientTimezoneManual.value = ''
       upstreamClientTimezoneValidationError.value = null
@@ -6062,8 +6326,10 @@ const resetForm = () => {
   openaiPassthroughEnabled.value = false
   openaiOpaqueUpstreamEnabled.value = false
   openaiFlattenNamespacesEnabled.value = false
-  bpsSkipHistoricalEncrypted.value = DEFAULT_OPENAI_BPS_OPTIONS.skipHistoricalEncrypted
-  bpsHostedToolsPolicy.value = DEFAULT_OPENAI_BPS_OPTIONS.hostedToolsPolicy
+  bpsChannelOptions.value = readOpenAIBPSChannelOptions(undefined, { isBPSOnly: false })
+  bpsValidationError.value = null
+  stagedIndependentBPSCredentials.value = null
+  showIndependentBPSGrantPanel.value = false
   upstreamClientTimezoneMode.value = 'off'
   upstreamClientTimezoneManual.value = ''
   upstreamClientTimezoneValidationError.value = null
@@ -6120,10 +6386,12 @@ const resetForm = () => {
   geminiTierAIStudio.value = 'aistudio_free'
   oauth.resetState()
   openaiOAuth.resetState()
+  bpsIndependentOAuth.resetState()
   geminiOAuth.resetState()
   antigravityOAuth.resetState()
   grokOAuth.resetState()
   oauthFlowRef.value?.reset()
+  bpsIndependentFlowRef.value?.reset()
   antigravityMixedChannelConfirmed.value = false
   upstreamModelsPreviewed.value = false
   clearMixedChannelDialog()
@@ -6221,14 +6489,14 @@ const buildOpenAIExtra = (base?: Record<string, unknown>): Record<string, unknow
     delete extra.images_url_to_b64_json
   }
 
-  applyOpenAIBPSOptions(
+  applyOpenAIBPSChannelOptions(
     extra,
-    isOpenAIBPSOAuth.value
-      ? {
-          skipHistoricalEncrypted: bpsSkipHistoricalEncrypted.value,
-          hostedToolsPolicy: bpsHostedToolsPolicy.value
-        }
-      : null
+    accountCategory.value === 'oauth-based' ? bpsChannelOptions.value : null,
+    undefined,
+    {
+      isBPSOnly: isOpenAIBPSOAuth.value,
+      hasIndependentGrant: !isOpenAIBPSOAuth.value && Boolean(stagedIndependentBPSCredentials.value)
+    }
   )
   applyUpstreamClientTimezone(extra, {
     mode: upstreamClientTimezoneMode.value,
@@ -6375,6 +6643,17 @@ const handleSubmit = async () => {
     appStore.showError(t('admin.accounts.openai.codexPrivacy.conflictToast'))
     void codexPrivacyFieldRef.value?.revealConflict()
     return
+  }
+  if (supportsCreateOpenAIBPS.value) {
+    const bpsErr = validateOpenAIBPSChannelOptions(bpsChannelOptions.value, {
+      eligibleGroupIds: new Set(filterEligibleBPSTargetGroups(props.groups).map((g) => g.id)),
+      activeProxyIds: new Set(filterActiveBPSProxies(props.proxies).map((p) => p.id))
+    })
+    bpsValidationError.value = bpsErr
+    if (bpsErr) {
+      appStore.showError(t(`admin.accounts.bpsAccount.options.validation.${bpsErr}`))
+      return
+    }
   }
   if (supportsCreateUpstreamClientTimezone.value) {
     const tzError = validateUpstreamClientTimezone({
@@ -6685,10 +6964,12 @@ const goBackToBasicInfo = () => {
   step.value = 1
   oauth.resetState()
   openaiOAuth.resetState()
+  bpsIndependentOAuth.resetState()
   geminiOAuth.resetState()
   antigravityOAuth.resetState()
   grokOAuth.resetState()
   oauthFlowRef.value?.reset()
+  bpsIndependentFlowRef.value?.reset()
 }
 
 const handleGenerateUrl = async () => {
@@ -7128,6 +7409,9 @@ const handleOpenAIExchange = async (authCode: string) => {
 
     // Excel credentials keep the Excel client_id returned with the token pair.
     const credentials = oauthClient.buildCredentials(tokenInfo)
+    if (form.platform === 'openai' && !isOpenAIBPSOAuth.value && stagedIndependentBPSCredentials.value) {
+      credentials[OPENAI_EXCEL_BPS_CREDENTIALS_KEY] = { ...stagedIndependentBPSCredentials.value }
+    }
     const oauthExtra = oauthClient.buildExtraInfo(tokenInfo) as Record<string, unknown> | undefined
     const extra = buildOpenAIExtra(oauthExtra)
     const shouldCreateOpenAI = form.platform === 'openai'
@@ -7264,6 +7548,12 @@ const handleOpenAIImportCodexSession = async (content: string) => {
     return
   }
 
+  if (stagedIndependentBPSCredentials.value || bpsChannelOptions.value.enabled) {
+    oauthClient.error.value = t('admin.accounts.bpsAccount.grant.ineligibleHint')
+    appStore.showError(oauthClient.error.value)
+    return
+  }
+
   const credentialExtras = buildOpenAICodexImportCredentialExtras()
   if (credentialExtras === null) {
     return
@@ -7343,6 +7633,12 @@ const handleOpenAIImportCodexPAT = async (accessToken: string) => {
   const trimmed = accessToken.trim()
   if (!trimmed) {
     oauthClient.error.value = t('admin.accounts.oauth.openai.codexPatEmpty')
+    return
+  }
+
+  if (stagedIndependentBPSCredentials.value || bpsChannelOptions.value.enabled) {
+    oauthClient.error.value = t('admin.accounts.bpsAccount.grant.ineligibleHint')
+    appStore.showError(oauthClient.error.value)
     return
   }
 
@@ -7431,6 +7727,9 @@ const handleOpenAIBatchRT = async (refreshTokenInput: string, clientId?: string)
         const credentials = oauthClient.buildCredentials(tokenInfo)
         if (clientId) {
           credentials.client_id = clientId
+        }
+        if (shouldCreateOpenAI && !isOpenAIBPSOAuth.value && stagedIndependentBPSCredentials.value) {
+          credentials[OPENAI_EXCEL_BPS_CREDENTIALS_KEY] = { ...stagedIndependentBPSCredentials.value }
         }
         const oauthExtra = oauthClient.buildExtraInfo(tokenInfo) as Record<string, unknown> | undefined
         const extra = buildOpenAIExtra(oauthExtra)

@@ -269,7 +269,22 @@ func (h *OpenAIOAuthHandler) RefreshAccountToken(c *gin.Context) {
 		return
 	}
 
-	// Use OpenAI OAuth service to refresh token
+	if c.Query("profile") == "excel" && !account.IsExcelOAuth() {
+		refresher, ok := h.adminService.(interface {
+			RefreshIndependentExcelBPSGrant(context.Context, int64, *service.OpenAIOAuthService) (*service.Account, error)
+		})
+		if !ok {
+			response.BadRequest(c, "Independent BPS refresh is unavailable")
+			return
+		}
+		updated, refreshErr := refresher.RefreshIndependentExcelBPSGrant(c.Request.Context(), accountID, h.openaiOAuthService)
+		if refreshErr != nil {
+			response.ErrorFrom(c, refreshErr)
+			return
+		}
+		response.Success(c, dto.AccountFromService(updated))
+		return
+	}
 	tokenInfo, err := h.openaiOAuthService.RefreshAccountToken(c.Request.Context(), account)
 	if err != nil {
 		response.ErrorFrom(c, err)
@@ -286,6 +301,9 @@ func (h *OpenAIOAuthHandler) RefreshAccountToken(c *gin.Context) {
 		}
 	}
 	newCredentials = service.NormalizeOpenAIPersonalAccessTokenCredentials(account, tokenInfo, newCredentials)
+	// This refresh owns only the primary grant. The repository preserves the
+	// latest independent BPS grant under its row lock.
+	delete(newCredentials, service.ExcelBPSCredentialsKey)
 
 	updatedAccount, err := h.adminService.UpdateAccount(c.Request.Context(), accountID, &service.UpdateAccountInput{
 		Credentials: newCredentials,

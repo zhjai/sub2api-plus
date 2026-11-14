@@ -915,7 +915,7 @@
       </div>
 
       <!-- OpenAI OAuth Codex CLI only -->
-      <div v-if="allOpenAIOAuth" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+      <div v-if="allOpenAIOAuthCLIOnlyCapable" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <div class="mb-3 flex items-center justify-between">
           <label
             id="bulk-edit-openai-codex-cli-only-label"
@@ -959,7 +959,7 @@
       </div>
 
       <!-- OpenAI OAuth: Codex app-server -->
-      <div v-if="allOpenAIOAuth" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+      <div v-if="allOpenAIOAuthCLIOnlyCapable" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <div class="mb-3 flex items-center justify-between">
           <label
             id="bulk-edit-openai-codex-app-server-label"
@@ -1632,6 +1632,16 @@ const allOpenAIOAuth = computed(() => {
   )
 })
 
+const allOpenAIOAuthCLIOnlyCapable = computed(() => {
+  return (
+    isSubtypeMetadataComplete.value &&
+    targetSelectedPlatforms.value.length === 1 &&
+    targetSelectedPlatforms.value[0] === 'openai' &&
+    targetSelectedTypes.value.length > 0 &&
+    targetSelectedTypes.value.every(t => t === 'oauth' || t === 'setup-token')
+  )
+})
+
 // 严格 OAuth（不含 setup-token、不含 BPS）：namespace 摊平兼容开关只对原生 Codex OAuth 账号生效
 const allOpenAIOAuthOnly = computed(() => {
   return (
@@ -2134,7 +2144,7 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     updates.upstream_billing_probe_enabled = upstreamBillingAutoProbeMode.value === 'enabled'
   }
 
-  if (enableCodexCLIOnly.value && allOpenAIOAuth.value) {
+  if (enableCodexCLIOnly.value && allOpenAIOAuthCLIOnlyCapable.value) {
     const extra = ensureExtra()
     extra.codex_cli_only = codexCLIOnlyEnabled.value
   }
@@ -2145,7 +2155,7 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     enableCodexCLIOnlyAppServer.value &&
     enableCodexCLIOnly.value &&
     codexCLIOnlyEnabled.value &&
-    allOpenAIOAuth.value
+    allOpenAIOAuthCLIOnlyCapable.value
   ) {
     const extra = ensureExtra()
     extra.codex_cli_only_allow_app_server = codexCLIOnlyAppServerEnabled.value
@@ -2283,8 +2293,8 @@ const handleSubmit = async () => {
     (enableOpenAIWSMode.value && allOpenAIOAuth.value) ||
     (enableOpenAIAPIKeyWSMode.value && allOpenAIAPIKey.value) ||
     enableUpstreamBillingAutoProbe.value ||
-    (enableCodexCLIOnly.value && allOpenAIOAuth.value) ||
-    (enableCodexCLIOnlyAppServer.value && allOpenAIOAuth.value) ||
+    (enableCodexCLIOnly.value && allOpenAIOAuthCLIOnlyCapable.value) ||
+    (enableCodexCLIOnlyAppServer.value && allOpenAIOAuthCLIOnlyCapable.value) ||
     (enableCodexFingerprintMode.value && allOpenAIOAuth.value) ||
     (enableOpenAICompactMode.value && allOpenAINativePassthroughCapable.value) ||
     (enableOpenAICompactModelMapping.value && allOpenAINativePassthroughCapable.value) ||

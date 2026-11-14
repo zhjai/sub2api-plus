@@ -56,6 +56,9 @@ func TestReadableReasoningHistoryPreservesTextAndCiphertext(t *testing.T) {
 			if item["type"] == "reasoning" {
 				require.Equal(t, ciphertext, item["encrypted_content"])
 				foundCiphertext = true
+				parts := mustTestValue[[]any](t, item["summary"])
+				require.Equal(t, summary, parts[0].(object)["text"])
+				foundText = true
 			}
 			if item["role"] == "assistant" {
 				parts := mustTestValue[[]any](t, item["content"])

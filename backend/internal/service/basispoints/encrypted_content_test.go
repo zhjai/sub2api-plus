@@ -24,13 +24,13 @@ func TestStripEncryptedContentReplacesMessageAndToolParts(t *testing.T) {
 		t.Fatal(err)
 	}
 	wire := string(out)
-	for _, secret := range []string{"AGENT_CIPHERTEXT", "USER_CIPHERTEXT", "ASSISTANT_CIPHERTEXT", "TOOL_CIPHERTEXT", "CUSTOM_CIPHERTEXT"} {
+	for _, secret := range []string{"AGENT_CIPHERTEXT", "USER_CIPHERTEXT", "ASSISTANT_CIPHERTEXT", "TOOL_CIPHERTEXT"} {
 		if strings.Contains(wire, secret) {
 			t.Fatalf("encrypted part %s was forwarded", secret)
 		}
 	}
-	// Reasoning, tool arguments, plain text and large integers are not touched.
-	for _, kept := range []string{"REASONING_CIPHERTEXT", "ARGUMENT_TEXT", "encrypted_content stays literal text", "plaintext result", "9007199254740993"} {
+	// Unpaired tool dependencies, tool arguments, plain text and large integers stay intact.
+	for _, kept := range []string{"REASONING_CIPHERTEXT", "CUSTOM_CIPHERTEXT", "ARGUMENT_TEXT", "encrypted_content stays literal text", "plaintext result", "9007199254740993"} {
 		if !strings.Contains(wire, kept) {
 			t.Fatalf("expected %s to be preserved: %s", kept, wire)
 		}
@@ -57,7 +57,7 @@ func TestStripEncryptedContentReplacesMessageAndToolParts(t *testing.T) {
 	for _, check := range []struct {
 		item, index int
 		kind        string
-	}{{0, 1, "input_text"}, {2, 0, "input_text"}, {3, 0, "output_text"}, {6, 1, "input_text"}, {7, 0, "input_text"}} {
+	}{{0, 1, "input_text"}, {2, 0, "input_text"}, {3, 0, "output_text"}, {6, 1, "input_text"}} {
 		got := part(check.item, check.index)
 		if text(got["type"]) != check.kind || text(got["text"]) != encryptedContentOmitted {
 			t.Fatalf("input[%d] part %d: got %v", check.item, check.index, got)

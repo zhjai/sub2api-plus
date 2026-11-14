@@ -719,6 +719,8 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		return state, advanced
 	}
 	var lastFailoverErr *service.UpstreamFailoverError
+	bpsInferenceAttempted := false
+	var bpsOpaqueOrigin *service.Account
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 	var passthroughFailoverState openAIPassthroughFailoverState
 
@@ -879,6 +881,37 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			zap.Float64("load_skew", scheduleDecision.LoadSkew),
 		)
 		account := selection.Account
+		if !bpsInferenceAttempted {
+			if bpsOpaqueOrigin != nil && !service.ExcelBPSCompatibleContextAccount(bpsOpaqueOrigin, account) {
+				if selection.ReleaseFunc != nil {
+					selection.ReleaseFunc()
+					selection.ReleaseFunc = nil
+				}
+				failedAccountIDs[account.ID] = struct{}{}
+				continue
+			}
+			routedAccount, capability := service.ExcelBPSPreSendRoute(c.Request.Context(), account, forwardModel, forwardBody)
+			if capability != nil {
+				if capability.RequiresCompatibleState && bpsOpaqueOrigin == nil {
+					bpsOpaqueOrigin = account
+				}
+				if h.gatewayService.ExcelBPSCanUseLastResort(c.Request.Context(), apiKey.GroupID, account, forwardModel, forwardBody) {
+					c.Request = c.Request.WithContext(service.WithExcelBPSLastResort(c.Request.Context()))
+					c.Header("X-Sub2API-BPS-Context-Loss", "manual-last-resort-omission")
+				} else {
+					if selection.ReleaseFunc != nil {
+						selection.ReleaseFunc()
+						selection.ReleaseFunc = nil
+					}
+					failedAccountIDs[account.ID] = struct{}{}
+					lastFailoverErr = &service.UpstreamFailoverError{StatusCode: http.StatusBadRequest, ClientStatusCode: http.StatusBadRequest, Stage: service.GatewayFailureStageInference, Scope: service.GatewayFailureScopeRequest, Reason: service.GatewayFailureReason(capability.Code), ClientMessage: capability.Error()}
+					continue
+				}
+			} else if routedAccount != nil {
+				account = routedAccount
+				selection.Account = routedAccount
+			}
+		}
 		if previousResponseOwnerBound && previousResponseOwner != nil &&
 			previousResponseOwner.IsOpenAIOpaqueUpstream() && account.ID != previousResponseOwner.ID {
 			if selection.ReleaseFunc != nil {
@@ -980,6 +1013,8 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		// reasoning item（含耦合的 id/summary），避免非透传上游 400 拒绝 Kiro reasoning 形态。
 		attemptBody := h.deriveOpenAIForwardAttemptBody(reqLog, forwardBody, account, &passthroughFailoverState)
 		result, err := func() (*service.OpenAIForwardResult, error) {
+			bpsInferenceAttempted = true
+			c.Request = c.Request.WithContext(service.WithExcelBPSInferenceStarted(c.Request.Context()))
 			defer func() {
 				if accountReleaseFunc != nil {
 					accountReleaseFunc()
@@ -1004,7 +1039,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		}
 		// BPS result owns cumulative usage, including correction turns. Keep
 		// cyber diagnostics but avoid a second independent billing submission.
-		bpsForwardOwnsUsage := account.IsExcelOAuth() && result != nil
+		bpsForwardOwnsUsage := result != nil && service.OpenAIUsageAttemptUsesBPS(account, result)
 		h.recordCyberPolicyIfMarked(c, apiKey, account, subscription, reqModel, err != nil && !bpsForwardOwnsUsage, cyberBlockBodyHTTP, clientRequestedUsageFields(c, channelMapping, reqModel, ""), service.HashUsageRequestPayload(body))
 		forwardDurationMs := time.Since(forwardStart).Milliseconds()
 		upstreamLatencyMs, _ := getContextInt64(c, service.OpsUpstreamLatencyMsKey)
@@ -1093,7 +1128,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			} else {
 				var failoverErr *service.UpstreamFailoverError
 				if errors.As(err, &failoverErr) {
-					if account.IsExcelOAuth() {
+					if bpsForwardOwnsUsage {
 						submitResponsesUsage(result)
 					}
 					if failoverErr.Reason == service.OpenAIExecProtocolLeakReason {

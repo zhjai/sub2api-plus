@@ -238,7 +238,8 @@ type OpenAIForwardResult struct {
 	// UpstreamHeaders 是直接上游的响应头，用于按账户配置解析上游请求标识。
 	UpstreamHeaders http.Header
 	Usage           OpenAIUsage
-	Model           string // 原始模型（用于响应和日志显示）
+	UpstreamUsage   *OpenAIUsage // original BPS measurement before local cache billing normalization
+	Model           string       // 原始模型（用于响应和日志显示）
 	// BillingModel is the model used for cost calculation.
 	// When non-empty, CalculateCost uses this instead of Model.
 	// This is set by the Anthropic Messages conversion path where
@@ -560,6 +561,10 @@ type OpenAIGatewayService struct {
 	openaiProxyStreamCircuitOnce   sync.Once
 	openaiWSPassthroughDialerOnce  sync.Once
 	openaiModelTransientOnce       sync.Once
+	excelBPSMaintenanceOnce        sync.Once
+	excelBPSMaintenanceCancel      context.CancelFunc
+	excelBPSMaintenanceWorkers     sync.WaitGroup
+	excelBPSProxyPools             sync.Map
 	agentIdentityTaskMu            sync.Mutex
 	openaiWSPool                   *openAIWSConnPool
 	openaiWSStateStore             OpenAIWSStateStore
@@ -585,6 +590,7 @@ type OpenAIGatewayService struct {
 	responseHeaderFilter                *responseheaders.CompiledHeaderFilter
 	codexSnapshotThrottle               *accountWriteThrottle
 	openAIModelsCache                   openAIModelsCache
+	excelBPSModelsCache                 openAIModelsCache
 	openaiCompatSessionResponses        sync.Map
 	openaiCompatAnthropicDigestSessions sync.Map
 	// openaiSessionEscapes is a short-lived process-local guard used between a
@@ -798,6 +804,10 @@ func (s *OpenAIGatewayService) billingDeps() *billingDeps {
 // CloseOpenAIWSPool 关闭 OpenAI WebSocket 连接池的后台 worker 和空闲连接。
 // 应在应用优雅关闭时调用。
 func (s *OpenAIGatewayService) CloseOpenAIWSPool() {
+	if s != nil && s.excelBPSMaintenanceCancel != nil {
+		s.excelBPSMaintenanceCancel()
+		s.excelBPSMaintenanceWorkers.Wait()
+	}
 	if s != nil && s.openaiWSPool != nil {
 		s.openaiWSPool.Close()
 	}

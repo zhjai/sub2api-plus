@@ -1738,7 +1738,7 @@ func (s *OpenAIGatewayService) FetchCodexModelsManifest(ctx context.Context, acc
 		return nil, infraerrors.Newf(http.StatusInternalServerError, "OPENAI_CODEX_MODELS_CREDENTIALS_FAILED", "resolve credential account: %v", err)
 	}
 	if credAccount.IsExcelOAuth() {
-		return nil, excelBPSUnsupported(nil)
+		return s.fetchExcelBPSCodexManifest(ctx, credAccount, ifNoneMatch)
 	}
 
 	clientVersion = strings.TrimSpace(clientVersion)

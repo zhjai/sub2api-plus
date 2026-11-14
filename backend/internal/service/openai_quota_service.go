@@ -164,7 +164,7 @@ func NewOpenAIQuotaService(
 // OAuth account. Returns infraerrors so the handler layer can map them to
 // stable error codes / HTTP statuses.
 func (s *OpenAIQuotaService) QueryUsage(ctx context.Context, accountID int64) (*OpenAIQuotaUsage, error) {
-	accessToken, chatGPTAccountID, proxyURL, fedRAMP, err := s.prepareUpstreamCall(ctx, accountID)
+	accessToken, chatGPTAccountID, proxyURL, fedRAMP, err := s.prepareQuotaUpstreamCall(ctx, accountID, true)
 	if err != nil {
 		return nil, err
 	}
@@ -213,6 +213,11 @@ func (s *OpenAIQuotaService) QueryUsage(ctx context.Context, accountID int64) (*
 	}
 
 	payload.FetchedAt = time.Now().Unix()
+	// A BPS-only grant may read the account usage endpoint. That does not
+	// establish eligibility for native reset cards or their mutation endpoints.
+	if account, loadErr := s.accountRepo.GetByID(ctx, accountID); loadErr == nil && account != nil && account.IsExcelOAuth() {
+		return &payload, nil
+	}
 	details := s.queryResetCreditDetails(callCtx, client, accessToken, chatGPTAccountID, fedRAMP, accountID)
 	if details != nil {
 		payload.autoResetCandidates = details.AutoResetCandidates
@@ -442,6 +447,12 @@ func (s *OpenAIQuotaService) resetCredit(ctx context.Context, accountID int64, c
 // token via the shared TokenProvider, and resolves the chatgpt-account-id and
 // proxy URL. Centralized so QueryUsage / ResetCredit share validation.
 func (s *OpenAIQuotaService) prepareUpstreamCall(ctx context.Context, accountID int64) (accessToken, chatGPTAccountID, proxyURL string, fedRAMP bool, err error) {
+	return s.prepareQuotaUpstreamCall(ctx, accountID, false)
+}
+
+// BPS read-only usage access is checked by the actual upstream. Native credit
+// mutations keep their separate grant guard.
+func (s *OpenAIQuotaService) prepareQuotaUpstreamCall(ctx context.Context, accountID int64, allowBPSUsage bool) (accessToken, chatGPTAccountID, proxyURL string, fedRAMP bool, err error) {
 	if s == nil || s.accountRepo == nil || s.privacyClientFactory == nil {
 		return "", "", "", false, infraerrors.New(http.StatusInternalServerError, "OPENAI_QUOTA_NOT_CONFIGURED", "openai quota service is not configured")
 	}
@@ -459,8 +470,8 @@ func (s *OpenAIQuotaService) prepareUpstreamCall(ctx context.Context, accountID 
 	if account.Type != AccountTypeOAuth {
 		return "", "", "", false, infraerrors.New(http.StatusBadRequest, "OPENAI_QUOTA_INVALID_TYPE", "account is not an OAuth account")
 	}
-	if account.IsExcelOAuth() {
-		return "", "", "", false, infraerrors.BadRequest("OPENAI_BPS_QUOTA_UNAVAILABLE", "BPS accounts do not provide Codex quota, reset credits or referrals; view local usage statistics instead")
+	if account.IsExcelOAuth() && !allowBPSUsage {
+		return "", "", "", false, infraerrors.BadRequest("OPENAI_BPS_QUOTA_UNAVAILABLE", "BPS-only credentials cannot consume native Codex reset credits or referrals")
 	}
 
 	// Spark shadow accounts do not hold their own credentials; resolve to the
@@ -478,6 +489,9 @@ func (s *OpenAIQuotaService) prepareUpstreamCall(ctx context.Context, accountID 
 	if chatGPTAccountID == "" {
 		// Fall back to organization_id — some legacy accounts only persisted poid.
 		chatGPTAccountID = strings.TrimSpace(account.GetCredential("organization_id"))
+	}
+	if chatGPTAccountID == "" && account.IsExcelOAuth() {
+		chatGPTAccountID = excelOAuthAccountID(account.GetOpenAIAccessToken())
 	}
 	if chatGPTAccountID == "" {
 		return "", "", "", false, infraerrors.New(http.StatusBadRequest, "OPENAI_QUOTA_MISSING_ACCOUNT_ID", "chatgpt_account_id is missing; please re-authorize this account")
@@ -598,7 +612,12 @@ func (s *OpenAIQuotaService) redactQuotaErrorBody(ctx context.Context, accountID
 	if err != nil || account == nil {
 		return body
 	}
-	return string(redactAgentIdentitySensitiveBodyForAccount(ctx, s.accountRepo, account, []byte(body)))
+	raw := redactAgentIdentitySensitiveBodyForAccount(ctx, s.accountRepo, account, []byte(body))
+	raw = redactExcelBPSCredentialBody(raw, account, account.GetOpenAIAccessToken())
+	if grant := account.ExcelBPSCredentialAccount(); grant != nil {
+		raw = redactExcelBPSCredentialBody(raw, grant, grant.GetOpenAIAccessToken())
+	}
+	return string(raw)
 }
 
 // buildCodexCommonHeaders sets the request headers expected by the chatgpt.com

@@ -91,6 +91,8 @@ describe('BulkEditAccountModal and AccountTestModal BPS protections', () => {
     expect(wrapper.find('[data-testid="bulk-edit-openai-ws-mode-enable"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="bulk-edit-codex-fingerprint-mode-enable"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="bulk-edit-openai-passthrough-enable"]').exists()).toBe(false)
+    // Local CLI-only applies to BPS too when subtype metadata is complete
+    expect(wrapper.find('#bulk-edit-openai-codex-cli-only-enabled').exists()).toBe(true)
     expect(wrapper.text()).not.toContain('admin.accounts.supportsAllModels')
 
     // Priority + proxy + group remain editable for BPS selections without emitting native extra keys

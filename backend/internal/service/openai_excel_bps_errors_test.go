@@ -136,8 +136,13 @@ func TestBPS403DoesNotChangeNative403OrRevoked401(t *testing.T) {
 	require.Equal(t, 3, counter.calls)
 	require.Equal(t, 1, repo.errors)
 	gateway, account, repo, counter = bps403Fixture(t)
+	stateRepo := &parityBPSStateRepo{}
+	gateway.accountRepo = stateRepo
 	require.True(t, gateway.handleOpenAIAccountUpstreamError(context.Background(), account, 401, nil, []byte(`{"error":{"code":"token_revoked","message":"Token revoked"}}`), "gpt-6-astra"))
-	require.Equal(t, 1, repo.errors)
+	require.Zero(t, repo.errors)
+	require.Equal(t, 1, stateRepo.writes)
+	require.False(t, account.IsExcelBPSEnabled())
+	require.True(t, account.Schedulable)
 	require.Zero(t, counter.calls)
 }
 func TestBPS403NeverShortensExistingCooldown(t *testing.T) {

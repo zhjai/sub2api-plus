@@ -27,6 +27,9 @@ func (s *OpenAIGatewayService) FetchOpenAIModelsList(ctx context.Context, accoun
 	if err != nil {
 		return nil, fmt.Errorf("resolve model list credentials: %w", err)
 	}
+	if credentialAccount.IsExcelOAuth() {
+		return s.FetchExcelBPSModelsList(ctx, credentialAccount)
+	}
 	if credentialAccount.IsOpenAIOAuth() {
 		clientVersion := CodexCanonicalClientVersion()
 		if s.settingService != nil {
@@ -295,9 +298,6 @@ func ApplyPinnedCodexModelsMapping(response *OpenAIModelsResponse, account *Acco
 // An authoritative empty catalog is success, including after group filtering.
 func (s *OpenAIGatewayService) FetchPinnedOpenAIModelsList(ctx context.Context, group *Group, maxAccountSwitches int, ifNoneMatch string) (*OpenAIModelsResponse, *Account, error) {
 	fetch := func(ctx context.Context, account *Account) (*OpenAIModelsResponse, error) {
-		if account.IsExcelOAuth() {
-			return buildExcelBPSModelsList(account, group)
-		}
 		response, err := s.FetchOpenAIModelsList(ctx, account)
 		if err != nil {
 			return nil, err

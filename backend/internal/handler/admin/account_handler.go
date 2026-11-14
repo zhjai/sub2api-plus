@@ -1582,6 +1582,9 @@ func (h *AccountHandler) refreshSingleAccount(ctx context.Context, account *serv
 		}
 	}
 
+	if account.IsOpenAI() {
+		delete(newCredentials, service.ExcelBPSCredentialsKey)
+	}
 	updatedAccount, err := h.adminService.UpdateAccount(ctx, account.ID, &service.UpdateAccountInput{
 		Credentials: newCredentials,
 	})
@@ -1695,9 +1698,13 @@ func (h *AccountHandler) ApplyOAuthCredentials(c *gin.Context) {
 	}
 
 	// Re-auth returns authentication fields, not the account's model settings.
+	_, explicitBPSGrant := req.Credentials[service.ExcelBPSCredentialsKey]
 	req.Credentials = service.MergeCredentials(existing.Credentials, req.Credentials)
 	// Drop SSO/password residue; re-auth must leave only OAuth tokens on disk.
 	req.Credentials = service.SanitizeStoredCredentials(existing.Platform, req.Credentials)
+	if !explicitBPSGrant {
+		delete(req.Credentials, service.ExcelBPSCredentialsKey)
+	}
 
 	updatedAccount, err := h.adminService.UpdateAccount(ctx, accountID, &service.UpdateAccountInput{
 		Type:        req.Type,
@@ -2319,11 +2326,17 @@ func (h *AccountHandler) BatchUpdateCredentials(c *gin.Context) {
 			response.Error(c, 404, fmt.Sprintf("Account %d not found", accountID))
 			return
 		}
-		if account.Credentials == nil {
-			account.Credentials = make(map[string]any)
+		// UpdateAccount replaces non-sensitive credential fields. Keep those
+		// settings, while leaving the independent grant implicit so the locked
+		// repository update preserves its latest rotation instead of this copy.
+		credentials := make(map[string]any, len(account.Credentials)+1)
+		for key, value := range account.Credentials {
+			if key != service.ExcelBPSCredentialsKey {
+				credentials[key] = value
+			}
 		}
-		account.Credentials[req.Field] = req.Value
-		updates = append(updates, accountUpdate{ID: accountID, Credentials: account.Credentials})
+		credentials[req.Field] = req.Value
+		updates = append(updates, accountUpdate{ID: account.ID, Credentials: credentials})
 	}
 
 	// 阶段二：依次更新，返回每个账号的成功/失败明细，便于调用方重试
@@ -3135,6 +3148,21 @@ func (h *AccountHandler) SyncUpstreamModels(c *gin.Context) {
 
 	if h.accountTestService == nil {
 		response.InternalError(c, "Account test service is not configured")
+		return
+	}
+	// A dual-grant account has two independent model catalogs. The BPS model
+	// selector explicitly queries the Excel grant without enabling its route.
+	switch profile := strings.ToLower(strings.TrimSpace(c.Query("profile"))); profile {
+	case "", "codex":
+	case "excel":
+		grant := account.ExcelBPSCredentialAccount()
+		if grant == nil {
+			response.BadRequest(c, "This account has no BPS authorization; attach the BPS grant before synchronizing its models")
+			return
+		}
+		account = grant
+	default:
+		response.BadRequest(c, "Invalid model catalog profile; use codex or excel")
 		return
 	}
 

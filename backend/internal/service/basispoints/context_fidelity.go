@@ -56,7 +56,9 @@ func namespaceDescriptions(entry object) []string {
 func reasoningHistoryItems(item object, index int) ([]any, error) {
 	var result []any
 	if encrypted := text(item["encrypted_content"]); encrypted != "" {
-		result = append(result, object{"type": "reasoning", "summary": []any{}, "encrypted_content": encrypted})
+		// Keep the complete opaque item, including issuer IDs and summaries.
+		// Rebuilding a subset can break continuation even when ciphertext survives.
+		return []any{item}, nil
 	}
 	if item["summary"] == nil {
 		return result, nil

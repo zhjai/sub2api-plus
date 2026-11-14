@@ -203,7 +203,7 @@ func CompactWindow(response map[string]any) ([]any, []any, error) {
 				return nil, nil, fmt.Errorf("image compaction returned an empty state")
 			}
 			markers = append(markers, m)
-		case "message":
+		case "message", "reasoning":
 		default:
 			return nil, nil, fmt.Errorf("unexpected image compaction output item")
 		}

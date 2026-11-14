@@ -2,11 +2,18 @@ import { defineComponent } from 'vue'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { createAccountMock, showErrorMock, exchangeAuthCodeMock, generateAuthUrlMock } = vi.hoisted(() => ({
+const {
+  createAccountMock,
+  showErrorMock,
+  exchangeAuthCodeMock,
+  generateAuthUrlMock,
+  validateRefreshTokenMock
+} = vi.hoisted(() => ({
   createAccountMock: vi.fn(),
   showErrorMock: vi.fn(),
   exchangeAuthCodeMock: vi.fn(),
-  generateAuthUrlMock: vi.fn()
+  generateAuthUrlMock: vi.fn(),
+  validateRefreshTokenMock: vi.fn()
 }))
 
 vi.mock('@/stores/app', () => ({
@@ -51,32 +58,42 @@ vi.mock('@/api/admin/accounts', () => ({
 vi.mock('@/composables/useOpenAIOAuth', async () => {
   const { ref } = await import('vue')
   const { OPENAI_EXCEL_OAUTH_CLIENT_ID } = await import('@/utils/openaiOAuthClient')
-  const sessionId = ref('sess-excel-1')
-  const oauthState = ref('state-excel-1')
-  const loading = ref(false)
-  const error = ref('')
-  const authUrl = ref('https://auth.openai.com/oauth/authorize')
   return {
-    useOpenAIOAuth: () => ({
-      sessionId,
-      oauthState,
-      loading,
-      error,
-      authUrl,
-      generateAuthUrl: generateAuthUrlMock,
-      exchangeAuthCode: exchangeAuthCodeMock,
-      validateRefreshToken: vi.fn(),
-      buildCredentials: () => ({
-        access_token: 'at-bps',
-        refresh_token: 'rt-bps',
-        client_id: OPENAI_EXCEL_OAUTH_CLIENT_ID,
-        chatgpt_account_id: 'ws-excel'
-      }),
-      buildExtraInfo: () => ({ email: 'bps@example.com' }),
-      resetState: () => {
-        error.value = ''
+    useOpenAIOAuth: () => {
+      const sessionId = ref('sess-excel-1')
+      const oauthState = ref('state-excel-1')
+      const loading = ref(false)
+      const error = ref('')
+      const authUrl = ref('https://auth.openai.com/oauth/authorize')
+      return {
+        sessionId,
+        oauthState,
+        loading,
+        error,
+        authUrl,
+        generateAuthUrl: generateAuthUrlMock,
+        exchangeAuthCode: exchangeAuthCodeMock,
+        validateRefreshToken: validateRefreshTokenMock,
+        buildCredentials: (tokenInfo: Record<string, unknown>) => ({
+          access_token: (tokenInfo?.access_token as string) || 'at-bps',
+          refresh_token: (tokenInfo?.refresh_token as string) || 'rt-bps',
+          ...(tokenInfo?.client_id ? { client_id: tokenInfo.client_id } : { client_id: OPENAI_EXCEL_OAUTH_CLIENT_ID }),
+          chatgpt_account_id: (tokenInfo?.chatgpt_account_id as string) || 'ws-excel'
+        }),
+        buildIndependentExcelBPSCredentials: (tokenInfo: Record<string, unknown>) => ({
+          access_token: (tokenInfo?.access_token as string) || 'nested-excel-at-secret',
+          refresh_token: (tokenInfo?.refresh_token as string) || 'nested-excel-rt-secret',
+          client_id: OPENAI_EXCEL_OAUTH_CLIENT_ID,
+          chatgpt_account_id: (tokenInfo?.chatgpt_account_id as string) || 'ws-independent-bps',
+          plan_type: (tokenInfo?.plan_type as string) || 'plus',
+          email: (tokenInfo?.email as string) || 'bps-grant@example.com'
+        }),
+        buildExtraInfo: () => ({ email: 'bps@example.com' }),
+        resetState: () => {
+          error.value = ''
+        }
       }
-    })
+    }
   }
 })
 
@@ -90,6 +107,7 @@ vi.mock('vue-i18n', async () => {
 
 import CreateAccountModal from '../CreateAccountModal.vue'
 import {
+  OPENAI_EXCEL_BPS_CREDENTIALS_KEY,
   OPENAI_EXCEL_CALLBACK_ORIGIN,
   OPENAI_EXCEL_CALLBACK_PATH,
   OPENAI_EXCEL_OAUTH_CLIENT_ID
@@ -117,6 +135,7 @@ const SelectStub = defineComponent({
 
 const OAuthAuthorizationFlowStub = defineComponent({
   name: 'OAuthAuthorizationFlow',
+  emits: ['generate-url', 'validate-refresh-token'],
   data: () => ({
     authCode: `${OPENAI_EXCEL_CALLBACK_ORIGIN}${OPENAI_EXCEL_CALLBACK_PATH}?code=code-1&state=state-excel-1`,
     oauthState: 'state-excel-1',
@@ -125,7 +144,8 @@ const OAuthAuthorizationFlowStub = defineComponent({
   methods: {
     reset() {}
   },
-  template: '<div data-testid="oauth-step-two" />'
+  template:
+    '<div data-testid="oauth-step-two"><button type="button" data-testid="stub-validate-rt" @click="$emit(\'validate-refresh-token\', \'rt-excel-grant\')" /></div>'
 })
 
 async function selectButtonByText(wrapper: VueWrapper<any>, label: string) {
@@ -152,15 +172,26 @@ function mountCreateModal() {
   })
 }
 
-describe('CreateAccountModal BPS options, explicit models, and upstream client timezone', () => {
+describe('CreateAccountModal BPS options, dual-grant attachment, and upstream client timezone', () => {
   beforeEach(() => {
     createAccountMock.mockReset().mockResolvedValue({ id: 901, platform: 'openai', type: 'oauth' })
-    exchangeAuthCodeMock.mockReset().mockResolvedValue({ access_token: 'at-bps' })
+    exchangeAuthCodeMock.mockReset().mockResolvedValue({
+      access_token: 'at-bps',
+      client_id: OPENAI_EXCEL_OAUTH_CLIENT_ID
+    })
     generateAuthUrlMock.mockReset().mockResolvedValue('https://auth.openai.com/oauth/authorize')
+    validateRefreshTokenMock.mockReset().mockResolvedValue({
+      access_token: 'nested-excel-at-secret',
+      refresh_token: 'nested-excel-rt-secret',
+      client_id: OPENAI_EXCEL_OAUTH_CLIENT_ID,
+      chatgpt_account_id: 'ws-independent-bps',
+      plan_type: 'plus',
+      email: 'bps-grant@example.com'
+    })
     showErrorMock.mockReset()
   })
 
-  it('clears auto-filled Codex models when selecting Excel (BPS), hides flattenNamespaces, and creates BPS account with dedicated options + timezone', async () => {
+  it('clears auto-filled Codex models when selecting Excel (BPS), exposes CLI-only & codex_privacy, shows save-first sync notice, and creates BPS account', async () => {
     const wrapper = mountCreateModal()
     await selectButtonByText(wrapper, 'OpenAI')
 
@@ -173,8 +204,10 @@ describe('CreateAccountModal BPS options, explicit models, and upstream client t
 
     expect(wrapper.find('[data-testid="create-openai-flatten-namespaces-toggle"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="openai-bps-options-section"]').exists()).toBe(true)
+    // Unsaved OAuth preview is unsupported -> save-first notice shown instead of fake static sync
     expect(wrapper.find('[data-testid="create-bps-sync-unavailable"]').exists()).toBe(true)
-    // Untouched Codex default models were cleared -> explicit model hint is visible, never supportsAllModels
+    // Local CLI-only and fingerprint privacy are exposed for BPS-only too
+    expect(wrapper.find('[data-testid="codex-privacy"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="create-bps-explicit-models-hint"]').exists()).toBe(true)
     expect(wrapper.text()).not.toContain('admin.accounts.supportsAllModels')
 
@@ -184,7 +217,7 @@ describe('CreateAccountModal BPS options, explicit models, and upstream client t
 
     // Configure BPS options + upstream client timezone
     await wrapper.get('[data-testid="openai-bps-skip-historical-encrypted-toggle"]').trigger('click')
-    await wrapper.get('[data-testid="openai-bps-hosted-tools-policy-select"]').setValue('reject')
+    await wrapper.get('[data-testid="codex-privacy-toggle"]').trigger('click')
     await wrapper.get('[data-testid="create-upstream-client-timezone-mode"]').setValue('manual')
     await wrapper.get('form#create-account-form input[type="text"]').setValue('bps-new-01')
 
@@ -213,11 +246,77 @@ describe('CreateAccountModal BPS options, explicit models, and upstream client t
       'gpt-6-astra': 'gpt-6-astra',
       'gpt-6.1-sol': 'gpt-6.1-sol'
     })
+    // Legacy BPS-only absent openai_excel_bps implies enabled=true; hostedToolsPolicy default 'reject' is omitted unless changed
+    expect(payload?.extra?.openai_excel_bps).not.toBe(false)
     expect(payload?.extra?.openai_bps_skip_historical_encrypted).toBe(true)
-    expect(payload?.extra?.openai_bps_hosted_tools_policy).toBe('reject')
+    expect(payload?.extra?.codex_privacy_mode).toBe('randomized')
     expect(payload?.extra?.upstream_client_timezone_mode).toBe('auto')
     expect(payload?.extra).not.toHaveProperty('upstream_client_timezone')
     expect(payload?.extra).not.toHaveProperty('openai_responses_flatten_namespaces')
+  })
+
+  it('attaches an independent Excel BPS grant on native Codex OAuth create without overwriting primary credentials, displaying raw tokens, or auto-enabling BPS', async () => {
+    exchangeAuthCodeMock.mockResolvedValueOnce({
+      access_token: 'native-primary-at',
+      refresh_token: 'native-primary-rt',
+      client_id: 'app_EMoamEEZ73f0CkXaXp7hrann',
+      chatgpt_account_id: 'ws-native-primary'
+    })
+
+    const wrapper = mountCreateModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('codex-dual-01')
+
+    // Enable session proxy with empty pool -> blocks advancing to Step 2 with setup error
+    await wrapper.get('[data-testid="openai-bps-session-proxy-toggle"]').trigger('click')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="oauth-step-two"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="openai-bps-validation-error"]').text()).toContain(
+      'admin.accounts.bpsAccount.options.validation.session_proxy_pool_empty'
+    )
+    // Turn session proxy back off
+    await wrapper.get('[data-testid="openai-bps-session-proxy-toggle"]').trigger('click')
+
+    // Open inline independent grant attachment panel and validate Excel RT via profile='excel'
+    await wrapper.get('[data-testid="openai-bps-attach-grant-btn"]').trigger('click')
+    expect(wrapper.find('[data-testid="create-bps-independent-grant-panel"]').exists()).toBe(true)
+    await wrapper.get('[data-testid="stub-validate-rt"]').trigger('click')
+    await flushPromises()
+
+    expect(validateRefreshTokenMock).toHaveBeenCalledWith(
+      'rt-excel-grant',
+      null,
+      OPENAI_EXCEL_OAUTH_CLIENT_ID,
+      'excel'
+    )
+    expect(wrapper.find('[data-testid="openai-bps-staged-attach-banner"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="create-bps-staged-grant-summary"]').text()).toContain('bps-grant@example.com')
+    // Never display raw tokens in UI
+    expect(wrapper.text()).not.toContain('nested-excel-at-secret')
+    expect(wrapper.text()).not.toContain('nested-excel-rt-secret')
+
+    // Proceed to Step 2 and complete primary Codex OAuth
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+    await selectButtonByText(wrapper, 'admin.accounts.oauth.completeAuth')
+    await flushPromises()
+
+    expect(createAccountMock).toHaveBeenCalledTimes(1)
+    const payload = createAccountMock.mock.calls[0]?.[0]
+    expect(payload?.credentials?.client_id).toBe('app_EMoamEEZ73f0CkXaXp7hrann')
+    expect(payload?.credentials?.access_token).toBe('native-primary-at')
+    expect(payload?.credentials?.[OPENAI_EXCEL_BPS_CREDENTIALS_KEY]).toMatchObject({
+      access_token: 'nested-excel-at-secret',
+      refresh_token: 'nested-excel-rt-secret',
+      client_id: OPENAI_EXCEL_OAUTH_CLIENT_ID,
+      chatgpt_account_id: 'ws-independent-bps'
+    })
+    // Adding an independent BPS grant alone NEVER enables the BPS route (native absent => false)!
+    expect(payload?.extra?.openai_excel_bps).not.toBe(true)
+    expect(payload?.extra?.openai_excel_bps).toBeUndefined()
+    // Secret grant never leaks into extra
+    expect(payload?.extra).not.toHaveProperty(OPENAI_EXCEL_BPS_CREDENTIALS_KEY)
   })
 
   it('supports manual upstream client timezone on OpenAI API Key accounts', async () => {

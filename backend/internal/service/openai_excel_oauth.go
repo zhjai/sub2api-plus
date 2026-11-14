@@ -119,10 +119,10 @@ func validateExcelOAuthBulkCredentialPatch(account *Account, patch map[string]an
 			carriesExcelToken = carriesExcelToken || aud.String() == openai.ExcelClientID
 		}
 	}
-	if !account.IsExcelOAuth() && !candidate.IsExcelOAuth() && !carriesExcelToken {
+	if _, nested := patch[ExcelBPSCredentialsKey]; !nested && !account.IsExcelOAuth() && !candidate.IsExcelOAuth() && !carriesExcelToken {
 		return nil
 	}
-	for _, key := range []string{"client_id", "access_token", "refresh_token", "id_token", "chatgpt_account_id", "chatgpt_user_id", "organization_id", "auth_mode"} {
+	for _, key := range []string{ExcelBPSCredentialsKey, "client_id", "access_token", "refresh_token", "id_token", "chatgpt_account_id", "chatgpt_user_id", "organization_id", "auth_mode"} {
 		if _, exists := patch[key]; exists {
 			return infraerrors.BadRequest("OPENAI_EXCEL_OAUTH_BULK_GRANT_UNSUPPORTED", "BPS login credentials cannot be changed in bulk; reauthorize or refresh each account separately")
 		}

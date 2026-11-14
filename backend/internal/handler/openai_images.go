@@ -233,6 +233,20 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 		)
 
 		account := selection.Account
+		// Resolve BPS capability before acquiring a waiting slot or starting a
+		// response. Unsupported parameters are never dropped or sent as a probe.
+		routedAccount, routeErr := service.ResolveOpenAIImagesAccountRoute(account, parsed, channelMapping.MappedModel)
+		if routeErr != nil {
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			failedAccountIDs[account.ID] = struct{}{}
+			lastFailoverErr = &service.UpstreamFailoverError{StatusCode: http.StatusBadRequest,
+				ResponseBody: []byte(`{"error":{"type":"invalid_request_error","code":"basispoints_image_capability_unavailable","message":"No eligible image route preserves the requested parameters"}}`)}
+			continue
+		}
+		account = routedAccount
+		selection.Account = account
 		sessionHash = ensureOpenAIPoolModeSessionHash(sessionHash, account)
 		reqLog.Debug("openai.images.account_selected", zap.Int64("account_id", account.ID), zap.String("account_name", account.Name))
 		setOpsSelectedAccount(c, account.ID, account.Platform)
@@ -390,7 +404,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 		}
 		if result != nil {
 			// 排除 spark 影子:其 codex_* 仅由 QueryUsage(/wham/usage bengalfox)更新(外审第7轮 P1)。
-			if account.Type == service.AccountTypeOAuth && !account.IsShadow() {
+			if account.Type == service.AccountTypeOAuth && !account.IsShadow() && !account.IsExcelOAuth() {
 				h.gatewayService.UpdateCodexUsageSnapshotFromHeaders(c.Request.Context(), account.ID, result.ResponseHeaders)
 			}
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, requestModel, false, result), true, result.FirstTokenMs)

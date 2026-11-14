@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import {
+  OPENAI_EXCEL_BPS_CREDENTIALS_KEY,
   OPENAI_EXCEL_CALLBACK_ORIGIN,
   OPENAI_EXCEL_CALLBACK_PATH,
   OPENAI_EXCEL_OAUTH_CLIENT_ID,
+  hasAnyOpenAIBPSGrant,
+  hasIndependentOpenAIBPSGrant,
+  isNativeOpenAIOAuthEligibleForBPSGrant,
   isOpenAIBPSAccount,
   parseOpenAIExcelCallback,
   resolveOpenAIOAuthClient,
@@ -43,5 +47,47 @@ describe('Excel OAuth callback validation', () => {
     expect(isOpenAIBPSAccount({ platform: 'openai', type: 'oauth', credentials })).toBe(true)
     expect(isOpenAIBPSAccount({ platform: 'openai', type: 'apikey', credentials })).toBe(false)
     expect(resolveOpenAIOAuthClient({ client_id: 'codex-client' })).toBe('codex')
+  })
+
+  it('distinguishes primary BPS-only accounts from native OAuth accounts with an independent nested BPS grant', () => {
+    const dualAccount = {
+      platform: 'openai',
+      type: 'oauth',
+      credentials: {
+        client_id: 'codex-client',
+        [OPENAI_EXCEL_BPS_CREDENTIALS_KEY]: {
+          client_id: OPENAI_EXCEL_OAUTH_CLIENT_ID,
+          access_token: 'nested-excel-at'
+        }
+      }
+    }
+    expect(isOpenAIBPSAccount(dualAccount)).toBe(false)
+    expect(isNativeOpenAIOAuthEligibleForBPSGrant(dualAccount)).toBe(true)
+    expect(hasIndependentOpenAIBPSGrant(dualAccount)).toBe(true)
+    expect(hasAnyOpenAIBPSGrant(dualAccount)).toBe(true)
+
+    const redactedDual = {
+      platform: 'openai',
+      type: 'oauth',
+      credentials: {},
+      credentials_status: { has_excel_bps_credentials: true }
+    }
+    expect(hasIndependentOpenAIBPSGrant(redactedDual)).toBe(true)
+
+    expect(
+      isNativeOpenAIOAuthEligibleForBPSGrant({
+        platform: 'openai',
+        type: 'oauth',
+        parent_account_id: 7,
+        credentials: {}
+      })
+    ).toBe(false)
+    expect(
+      isNativeOpenAIOAuthEligibleForBPSGrant({
+        platform: 'openai',
+        type: 'oauth',
+        credentials: { auth_mode: 'AgentIdentity' }
+      })
+    ).toBe(false)
   })
 })

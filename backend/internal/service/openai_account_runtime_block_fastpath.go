@@ -111,6 +111,13 @@ func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Cont
 	}
 	stateCtx, cancel := openAIAccountStateContext(ctx)
 	defer cancel()
+	if account != nil && account.IsExcelOAuth() && statusCode != http.StatusForbidden {
+		// BPS authentication and rate windows belong to this grant, not the
+		// independent primary authorization on a dual account.
+		if statusCode == http.StatusUnauthorized || statusCode == http.StatusTooManyRequests || isOpenAIHTTPUpstreamAccessStateError(statusCode, "", responseBody) {
+			return s.handleExcelBPSGrantError(stateCtx, account, statusCode, headers)
+		}
+	}
 	// Handle Excel 403 before native access-state/team/custom-policy branches.
 	// In particular, a model cooldown must not become an account runtime block.
 	if statusCode == http.StatusForbidden && account.IsExcelOAuth() {

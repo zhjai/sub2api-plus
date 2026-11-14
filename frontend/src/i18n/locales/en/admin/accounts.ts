@@ -1392,7 +1392,7 @@ export default {
             bpsTitle: 'BPS OAuth',
             bpsDesc: 'Official Excel login, for BPS only',
             scopeNote:
-              'BPS accounts handle HTTP Responses requests only (streaming or JSON), including client function and custom tools. Native compact, WebSocket, images, Chat Completions and Messages are not available. Send the full conversation history; previous_response_id is not supported. OpenAI decides which models each workspace can use, so access to any model is not guaranteed.',
+              'BPS supports HTTP Responses (streaming or JSON, including client function and custom tools), genuine upstream Compact, and a limited non-streaming gpt-image-2 PNG generation and single-image-edit subset (opaque/auto background, without masks, remote image URLs, or streaming partials). WebSocket, Chat Completions, and Messages remain unsupported; image, hosted-tool, or encrypted-context requests outside this subset require routing to a compatible native grant or another compatible account rather than assuming native Codex equivalence. Send the full conversation history (including for Compact); previous_response_id and unresolved item_reference continuations are not supported. OpenAI determines workspace entitlement, so access to any model (including gpt-image-2) is not guaranteed.',
             title: 'BPS authorization (official Excel login)',
             followSteps: 'Sign in through the official Excel login, then paste the callback URL here:',
             openUrlDesc: 'Open the link in a new tab, sign in to OpenAI and choose the workspace.',
@@ -1423,7 +1423,7 @@ export default {
             reauthNote: 'This account uses the BPS (Excel) login client. Reauthorization stays on that client.',
             identityTitle: 'BPS account',
             identityDesc:
-              'Authorized through the official Excel login client. Codex identity, native WebSocket, Codex CLI-only, hosted image tool, passthrough and compact settings do not apply to this account and are hidden.',
+              'Authorized through the official Excel login client. Native Codex-only controls (Codex fingerprint convergence, native WebSocket, Responses passthrough, namespace flattening, and the native Compact mode toggle) do not apply to BPS-only accounts and are hidden.',
             clientIdLabel: 'Login client',
             workspaceLabel: 'Workspace',
             emailLabel: 'Email'
@@ -2038,47 +2038,183 @@ export default {
 
       bpsAccount: {
         badge: 'BPS',
-        badgeTitle: 'OpenAI BPS (official Excel OAuth) channel: HTTP /responses text and client tools only',
+        badgeTitle:
+          'OpenAI BPS (official Excel OAuth) channel: HTTP /responses (including client tools and upstream Compact) plus a limited non-streaming gpt-image-2 PNG generation/single-image-edit subset',
+        badges: {
+          bpsOnlyActive: 'BPS',
+          bpsOnlyDisabled: 'BPS Off',
+          bpsOnly403: 'BPS · 403',
+          bpsOnlyGrantInvalid: 'BPS · Grant Invalid',
+          bpsOnlyTokenExpired: 'BPS · Token Expired',
+          dualActive: 'Codex + BPS',
+          dualStandby: 'BPS Standby',
+          dual403: 'BPS · 403',
+          dualGrantInvalid: 'BPS · Grant Invalid',
+          dualMissingGrant: 'BPS · No Grant',
+          tooltipBpsOnlyActive: 'BPS-only (official Excel OAuth) account: BPS HTTP /responses route is active',
+          tooltipBpsOnlyDisabled: 'BPS-only (official Excel OAuth) account: BPS route is manually disabled',
+          tooltipDualActive: 'Dual-grant account: native Codex OAuth + independent Excel BPS grant attached and BPS route enabled',
+          tooltipDualStandby: 'Independent Excel BPS grant attached on standby: BPS route is disabled; all traffic uses native Codex',
+          tooltip403Disabled: 'BPS route auto-disabled after upstream HTTP 403; native Codex channel on dual-grant accounts remains schedulable',
+          tooltipGrantInvalid: 'Upstream BPS grant validation failed (distinct from local token expiry): check entitlement or reauthorize BPS grant',
+          tooltipTokenExpired: 'Local BPS access token has expired (will refresh via refresh_token or reauth; distinct from upstream entitlement failure)',
+          tooltipMissingGrant: 'BPS route toggle is enabled, but no independent Excel BPS grant is attached yet'
+        },
+        grant: {
+          sectionTitle: 'Independent BPS (Excel OAuth) Grant',
+          sectionDesc:
+            'Attach an optional independent Excel BPS OAuth grant alongside the primary native Codex OAuth credentials (stored only in credentials.excel_bps_credentials, never in extra and never exposing raw tokens).',
+          statusNotAttached: 'No independent BPS grant attached',
+          statusAttachedStandby: 'Independent BPS grant attached (standby, route disabled)',
+          statusAttachedActive: 'Independent BPS grant attached (BPS route enabled)',
+          statusStagedAttach: 'New BPS grant staged (unsaved)',
+          statusStagedRemove: 'Independent BPS grant removal staged',
+          statusGrantInvalid: 'Upstream BPS grant validation failed',
+          statusPrimaryExpired: 'Local BPS access token expired',
+          neverAutoEnablesHint:
+            'Attaching or refreshing an independent BPS grant never enables the BPS route automatically; explicitly turn on "Enable BPS Route" below to route mapped models through BPS.',
+          noTokensDisplayedHint: 'Security: raw access_token / refresh_token / id_token values are never displayed.',
+          attachAction: 'Attach BPS Grant',
+          reauthAction: 'Reauthorize BPS Grant',
+          refreshAction: 'Refresh BPS Grant',
+          refreshingAction: 'Refreshing BPS...',
+          removeAction: 'Remove BPS Grant',
+          cancelStagedAction: 'Discard Staged Change',
+          refreshSuccess: 'Independent BPS grant refreshed successfully',
+          refreshFailed: 'Failed to refresh independent BPS grant',
+          stagedReadyHint: 'New independent BPS grant is staged in this form; click Save below to validate and persist without overwriting native credentials.',
+          stagedRemoveHint: 'Independent BPS grant is marked for removal on Save (primary native credentials remain intact).',
+          reauthTargetLabel: 'Select OAuth Grant to Update',
+          reauthTargetPrimary: 'Primary Native Grant (Codex OAuth)',
+          reauthTargetPrimaryDesc: 'Updates primary Codex CLI OAuth credentials while preserving any attached independent BPS grant.',
+          reauthTargetExcel: 'Independent BPS Grant (Excel OAuth)',
+          reauthTargetExcelDesc: 'Attaches or updates credentials.excel_bps_credentials only—never overwrites primary native credentials or enables BPS automatically.',
+          reauthIsolatedResetHint: 'Clearing or resetting OAuth state affects only the currently selected grant.',
+          reauthExcelSavedSuccess: 'Independent BPS (Excel OAuth) grant validated and saved',
+          ineligibleHint:
+            'Independent BPS (Excel OAuth) grants are supported only on standard native Codex OAuth accounts; session import, Agent Identity, and PAT creation flows cannot attach an independent BPS grant.',
+          reauthIndependentHint:
+            'Authorize or refresh an independent Excel BPS OAuth grant (never overwrites primary Codex credentials or enables BPS automatically).',
+          resetSelectedGrant: 'Reset Grant Flow',
+          dualNativeScopeHint:
+            'Dual-grant channel scope: WebSocket, Responses passthrough, namespace flattening, fingerprint convergence, and Compact settings below apply to the native Codex grant only; requests routed to BPS always use HTTP /responses and never become WebSocket.'
+        },
+        runtime: {
+          disabled403Title: 'BPS Route Auto-Disabled on Upstream 403',
+          disabled403Desc:
+            'The BPS route stopped accepting BPS traffic after an upstream HTTP 403 (native primary channel on dual-grant accounts remains active). Wait for scheduled recovery probing, or turn off "Enable BPS Route", save, and re-enable to reset manually.',
+          disabled403Meta: 'Disabled at: {disabledAt} · Reason: {reason} · Probe model: {model} · Last probe: {lastProbeAt}',
+          disabled403MovedGroup: 'Automatically moved to target group #{groupId}',
+          disabled403ManualResetHint: 'Tip: To clear the automatic 403 disable state immediately, toggle BPS route off, save, and then reauthorize or re-enable.',
+          grantInvalidTitle: 'Upstream BPS Grant Validation Failed (Not Local Expiry)',
+          grantInvalidDesc:
+            'Upstream rejected the BPS grant (e.g. workspace mismatch, ineligible plan, or revoked entitlement). Unlike local access_token expiry, please reauthorize the BPS grant.',
+          primaryExpiredTitle: 'Local BPS Access Token Expired',
+          primaryExpiredDesc:
+            'The cached access_token timestamp is past expiry; it refreshes automatically when a valid refresh_token exists and does not imply revoked upstream BPS entitlement.',
+          rateLimitedTitle: 'BPS Route Rate-Limited',
+          rateLimitedDesc: 'Cooldown active until {until}'
+        },
         usage: {
           title: 'Local usage',
-          hint: 'Counts requests, tokens, and billing windows recorded locally by this gateway; BPS does not expose upstream quota utilization, remaining counts, or credit reset probes.',
+          hint: 'Shows independent local gateway BPS totals alongside read-only upstream quota windows when available (without triggering model-generation probes).',
           refresh: 'Refresh',
           refreshing: 'Refreshing...',
           noRequests: '0 requests',
           empty: 'No local window data yet',
           refreshedAt: 'Refreshed at {time}',
-          loadFailed: 'Failed to load local usage'
+          loadFailed: 'Failed to load local usage',
+          quotaUnknown: 'Upstream quota unknown (no authoritative window returned)',
+          sourceWham: 'Source: ChatGPT /wham/usage account window',
+          sourceSnapshot: 'Source: Account response snapshot (not a guaranteed BPS-specific balance)',
+          sourceDisclaimer: 'Note: Upstream windows reflect account-level snapshots, not a guaranteed BPS-specific dedicated balance.',
+          quotaUpdatedAt: 'Snapshot {time}',
+          quotaRefreshError: 'Quota refresh failed (retaining previous snapshot): {error}',
+          dualLocalLabel: 'BPS local'
         },
         options: {
-          sectionTitle: 'BPS Protocol & Tool Policy',
+          sectionTitle: 'BPS Channel Options & Protocol Policy',
           clientToolsHint:
             'Client tools (function / custom) are forwarded over HTTP /responses without Codex namespace flattening, and never fall back to native Codex transport.',
+          routeEnabled: 'Enable BPS Route (openai_excel_bps)',
+          routeEnabledDesc: 'Explicitly controls whether mapped upstream models can route through the BPS HTTP /responses channel (never auto-activated on native degradation).',
+          routeEnabledDualNote: 'Attaching an independent BPS grant alone never enables this toggle; while off, the grant stays on standby.',
+          dualChannelNativeNote:
+            'Dual-grant channel scope: Passthrough, namespace flattening, WebSocket, fingerprint convergence, and Compact settings below apply only to the native primary Codex channel; BPS routes always use HTTP /responses and never become WebSocket.',
+          modelsTitle: 'BPS Mapped Upstream Models (openai_excel_bps_models)',
+          modelsDesc:
+            'Select which resolved upstream models route through the BPS channel; distinct from the account-level Model Whitelist / Model Mapping (model_mapping) above.',
+          modelsDistinctNote:
+            'Routing order: account whitelist/model_mapping resolves the upstream model first, then this list decides whether that upstream model uses BPS or the native channel.',
+          modelsModeAll: 'All allowed upstream models (legacy absent compatibility)',
+          modelsModeSelected: 'Selected upstream models only',
+          modelsEmptySelectedHint: 'Current list is empty ([]): zero models will be routed to the BPS channel.',
+          modelsPlaceholder: 'Enter upstream model ID for BPS routing (e.g. gpt-6-astra)',
+          modelsAddButton: 'Add BPS Model',
+          modelsPrefillSuggested: 'Prefill suggestions (gpt-6-astra, gpt-6.1-sol)',
+          modelsSuggestedBadge: 'Suggestions only (not guaranteed entitlement)',
+          protectionSectionTitle: '403 Protection, Recovery & Billing',
+          autoDisableOn403: 'Auto-disable BPS route on upstream 403',
+          autoDisableOn403Desc: 'Disables only the BPS route upon upstream HTTP 403 (native primary channel on dual-grant accounts stays active).',
+          autoRecoverOn403: 'Scheduled probe auto-recovery after 403',
+          autoRecoverOn403Desc: 'Periodically probes BPS availability in the background and clears the 403 disable state once healthy.',
+          recoveryIntervalMinutes: '403 recovery probe interval (minutes)',
+          recoveryIntervalHint: 'Integer between 1 and 10080 minutes (default: 60).',
+          autoMoveOn403: 'Auto-move account group on 403',
+          autoMoveOn403Desc: 'Moves the account to a designated active OpenAI or composite group when BPS hits HTTP 403.',
+          targetGroupLabel: '403 target group',
+          targetGroupPlaceholder: 'Select an active OpenAI / composite group',
+          targetGroupEmptyHint: 'No active OpenAI or composite groups available; create one before enabling auto-move.',
+          cacheCreationAsInput: 'Bill cache creation as standard input (cache_creation_as_input)',
+          cacheCreationAsInputDesc: 'Counts cache-creation tokens on the BPS channel at standard input token rates (enabled by default for new configs).',
+          sessionProxyEnabled: 'Enable BPS session proxy pool',
+          sessionProxyDesc:
+            'Select active Proxy nodes for per-session BPS egress; an empty pool is a setup error and never falls back to silent direct connections.',
+          sessionProxyEmptyPoolError: 'Setup error: BPS session proxy pool is enabled with no active proxy nodes selected (silent direct fallback is disabled).',
+          sessionProxyNoActiveNodes: 'No active proxy nodes available. Add and activate proxy nodes in Proxy Management first.',
+          sessionProxySelectedCount: '{count} active proxy node(s) selected',
           skipHistoricalEncrypted: 'Ignore historical encrypted content',
           skipHistoricalEncryptedDesc:
-            'Replaces unreadable historical encrypted reasoning blocks from earlier turns with a placeholder marker before forwarding.',
+            'Replaces unreadable historical encrypted reasoning blocks from earlier turns with a placeholder marker before forwarding (off by default).',
           skipHistoricalEncryptedWarning:
             'Only unreadable historical encrypted items from older turns are replaced with a marker; encrypted tasks in the current turn are still rejected, and ciphertext is never decrypted.',
           hostedToolsPolicy: 'Unsupported hosted tools policy',
           hostedToolsPolicyDesc:
-            'How to handle hosted tools unsupported on the BPS channel (such as web_search or code_interpreter).',
+            'Complete pre-send routing to native/other channels takes precedence; this policy applies only when a request lands on BPS (defaults to Reject request).',
           hostedToolsOmit: 'Omit & notice',
-          hostedToolsReject: 'Reject request'
+          hostedToolsReject: 'Reject request',
+          hostedToolsOmitLastResortWarning:
+            'Manual last resort: "Omit & notice" strips unsupported hosted tools (such as web_search or code_interpreter) from the request; keep "Reject request" unless stripping is explicitly desired.',
+          validation: {
+            recovery_interval_out_of_range: 'BPS 403 recovery interval must be an integer between 1 and 10080 minutes',
+            target_group_required: 'Select a valid target group when Auto-move on 403 is enabled',
+            target_group_invalid: 'Selected 403 target group is invalid; choose an active OpenAI or composite group',
+            session_proxy_pool_empty: 'Select at least one active proxy node when BPS session proxy pool is enabled (empty pool is not allowed)',
+            session_proxy_pool_too_large: 'BPS session proxy pool supports at most 128 proxy nodes',
+            session_proxy_inactive: 'BPS session proxy pool contains inactive or missing proxy nodes; select active nodes only',
+            too_many_models: 'BPS mapped upstream models list supports at most 100 models',
+            invalid_model_name: 'BPS model names must be non-empty and at most 256 characters'
+          }
         },
         models: {
           configureRequired:
-            'No explicit account models configured yet: specify supported models via whitelist or model mapping (group allowlists still serve as the public manifest fallback, while BPS never assumes all models are supported or syncs the native Codex catalog).',
+            'No explicit account models configured yet: specify supported models via whitelist or model mapping (group allowlists still serve as the public manifest fallback; suggested models are suggestions only).',
           prefillRecommended: 'Prefill suggested models (gpt-6-astra, gpt-6.1-sol)',
           prefillRecommendedHint:
             'Suggested model IDs only; actual availability depends on upstream account entitlement, and unconfigured models are not implicitly enabled.',
           prefillAdded: 'Added {count} suggested model(s)',
           prefillAlreadyPresent: 'All suggested models are already configured',
           syncUnavailable:
-            'Native Codex upstream catalog sync is unavailable for BPS accounts; select models or configure mappings manually.',
+            'Unsaved OAuth preview sync is unsupported for BPS: save the account first, then sync real upstream BPS models (bps_access) in Edit Account.',
+          syncSaveFirstHint:
+            'Note: Unsaved OAuth credentials cannot preview BPS model entitlement. Save the account first, then use "Sync from Upstream" in Edit Account to discover authorized BPS models via bps_access (recommended choices are suggestions only).',
+          syncSavedHint:
+            'Saved BPS accounts can use "Sync from Upstream" (bps_access) to discover authorized BPS models; suggested models remain optional suggestions.',
           testCatalogLoadFailed: 'Failed to load testable models'
         },
         bulk: {
           nativeControlsHiddenHint:
-            'Selection includes BPS (Excel OAuth) accounts: native Codex-only controls (passthrough, namespace flattening, WebSocket, fingerprint convergence, Compact) are hidden; model mappings, priority, groups, and proxy remain editable.',
+            'Selection includes BPS-only (Excel OAuth) accounts: native Codex-only controls (passthrough, namespace flattening, WebSocket, fingerprint convergence, Compact) are hidden; Codex CLI restriction, model mappings, priority, groups, and proxy remain editable.',
           incompleteSubtypeHiddenHint:
             'Some target accounts are on unloaded pages or beyond the current preview, so their authorization subtype cannot be verified: native Codex-only controls (passthrough, namespace flattening, WebSocket, Codex CLI restriction, fingerprint convergence, Compact) are conservatively hidden; model mappings, priority, groups, and proxy remain editable.'
         }

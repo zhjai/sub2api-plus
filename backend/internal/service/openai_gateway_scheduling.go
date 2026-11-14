@@ -341,7 +341,9 @@ func (e openAINoAvailableSelectionError) Unwrap() error {
 // 0 = explicitly unsupported, 1 = unknown / not yet probed, 2 = explicitly supported.
 func openAICompactSupportTier(account *Account) int {
 	if account.IsExcelOAuth() {
-		return 0
+		// BPS uses its real compaction trigger; upstream support remains unknown
+		// until a successful response, rather than a blanket protocol exclusion.
+		return 1
 	}
 	if account == nil {
 		return 0
@@ -397,6 +399,9 @@ func isOpenAICompatibleAccountEligibleForRequestBeforeProfit(ctx context.Context
 type openAIPreviousResponseAdmissionKey struct{}
 
 func openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx context.Context, account *Account, platform string, requestedModel string, requireCompact bool, requiredCapability OpenAIEndpointCapability) string {
+	if account != nil && account.IsExcelOAuth() && !account.IsExcelBPSEnabledForModel(requestedModel) {
+		return "bps_channel_unavailable"
+	}
 	platform = NormalizeOpenAICompatiblePlatform(platform)
 	if account == nil {
 		return "account_nil"

@@ -1753,7 +1753,7 @@ export interface SyncUpstreamModelsResult {
   models: string[]
   metadata?: Record<string, UpstreamModelMetadata>
   warnings?: UpstreamModelSyncWarning[]
-  discovery_source?: 'upstream' | 'configured_fallback'
+  discovery_source?: 'upstream' | 'configured_fallback' | 'bps_access'
   grok_model_diagnostics?: GrokModelDiagnostics
 }
 
@@ -1780,7 +1780,18 @@ export interface UpstreamModelMetadata {
  * @param id - Account ID
  * @returns List of model IDs returned by the upstream
  */
-export async function syncUpstreamModels(id: number): Promise<SyncUpstreamModelsResult> {
+export async function syncUpstreamModels(
+  id: number,
+  profile?: 'codex' | 'excel'
+): Promise<SyncUpstreamModelsResult> {
+  if (profile) {
+    const { data } = await apiClient.post<SyncUpstreamModelsResult>(
+      `/admin/accounts/${id}/models/sync-upstream`,
+      {},
+      { params: { profile } }
+    )
+    return data
+  }
   const { data } = await apiClient.post<SyncUpstreamModelsResult>(`/admin/accounts/${id}/models/sync-upstream`)
   return data
 }
@@ -1941,7 +1952,8 @@ export async function refreshOpenAIToken(
   refreshToken: string,
   proxyId?: number | null,
   endpoint: string = '/admin/openai/refresh-token',
-  clientId?: string
+  clientId?: string,
+  profile?: 'codex' | 'excel'
 ): Promise<Record<string, unknown>> {
   const payload: { refresh_token: string; proxy_id?: number; client_id?: string } = {
     refresh_token: refreshToken
@@ -1952,7 +1964,28 @@ export async function refreshOpenAIToken(
   if (clientId) {
     payload.client_id = clientId
   }
-  const { data } = await apiClient.post<Record<string, unknown>>(endpoint, payload)
+  const config = profile === 'excel' ? { params: { profile: 'excel' } } : undefined
+  const { data } = config
+    ? await apiClient.post<Record<string, unknown>>(endpoint, payload, config)
+    : await apiClient.post<Record<string, unknown>>(endpoint, payload)
+  return data
+}
+
+/**
+ * Refresh token for a saved OpenAI OAuth account.
+ * Passing `profile === 'excel'` refreshes only the account's independent `excel_bps_credentials`
+ * grant without mutating its primary native Codex credentials.
+ */
+export async function refreshOpenAIAccountToken(
+  id: number,
+  profile?: 'codex' | 'excel'
+): Promise<Account> {
+  const config = profile === 'excel' ? { params: { profile: 'excel' } } : undefined
+  const { data } = await apiClient.post<Account>(
+    `/admin/openai/accounts/${id}/refresh`,
+    undefined,
+    config
+  )
   return data
 }
 
@@ -2309,6 +2342,7 @@ export const accountsAPI = {
   generateAuthUrl,
   exchangeCode,
   refreshOpenAIToken,
+  refreshOpenAIAccountToken,
   batchCreate,
   batchUpdateCredentials,
   bulkUpdate,

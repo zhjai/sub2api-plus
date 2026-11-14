@@ -33,6 +33,35 @@ describe('BPS account and upstream client timezone i18n parity (zh/en)', () => {
     expect(enAccounts.accounts.bpsAccount.bulk.incompleteSubtypeHiddenHint).toContain('authorization subtype cannot be verified')
   })
 
+  it('maintains accurate bilingual BPS OAuth scope copy for upstream Compact, limited gpt-image-2 subset, routing boundaries, and history requirements', () => {
+    const zhOAuthPaths = collectLeafPaths(zhAccounts.accounts.oauth.openai.bps as Record<string, unknown>)
+    const enOAuthPaths = collectLeafPaths(enAccounts.accounts.oauth.openai.bps as Record<string, unknown>)
+    expect(zhOAuthPaths).toEqual(enOAuthPaths)
+
+    const zhScope = zhAccounts.accounts.oauth.openai.bps.scopeNote
+    const enScope = enAccounts.accounts.oauth.openai.bps.scopeNote
+
+    expect(zhScope).toContain('真实上游 Compact')
+    expect(zhScope).toContain('gpt-image-2')
+    expect(zhScope).toContain('PNG')
+    expect(zhScope).toContain('单图编辑')
+    expect(zhScope).toContain('不支持 WebSocket')
+    expect(zhScope).toContain('previous_response_id')
+    expect(zhScope).toContain('兼容的原生授权或其他兼容账号')
+    expect(zhScope).toContain('不保证任何模型')
+    expect(zhScope).not.toContain('不支持原生 compact、WebSocket、图片')
+
+    expect(enScope).toContain('genuine upstream Compact')
+    expect(enScope).toContain('gpt-image-2')
+    expect(enScope).toContain('PNG')
+    expect(enScope).toContain('single-image-edit')
+    expect(enScope).toContain('WebSocket')
+    expect(enScope).toContain('previous_response_id')
+    expect(enScope).toContain('compatible native grant or another compatible account')
+    expect(enScope).toContain('not guaranteed')
+    expect(enScope).not.toContain('Native compact, WebSocket, images, Chat Completions and Messages are not available')
+  })
+
   it('maintains identical non-empty key trees for upstreamClientTimezone in zh and en without false anonymity claims', () => {
     const zhPaths = collectLeafPaths(zhAccounts.accounts.upstreamClientTimezone as Record<string, unknown>)
     const enPaths = collectLeafPaths(enAccounts.accounts.upstreamClientTimezone as Record<string, unknown>)

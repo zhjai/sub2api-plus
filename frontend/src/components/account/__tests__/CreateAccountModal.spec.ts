@@ -201,13 +201,13 @@ async function openCodexImportStep(toggleClicks = 0) {
 }
 
 describe('CreateAccountModal OpenAI long-context billing', () => {
-  it('offers BPS login while hiding Codex-only imports and WebSocket controls', async () => {
+  it('offers BPS login with CLI-only & fingerprint privacy while hiding Codex-only imports and WebSocket controls', async () => {
     const wrapper = mountModal()
     await selectButtonByText(wrapper, 'OpenAI')
     await wrapper.get('[data-testid="openai-oauth-client-excel"]').trigger('click')
     expect(wrapper.find('[data-testid="openai-bps-scope-note"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="create-openai-ws-mode"]').exists()).toBe(false)
-    expect(wrapper.findComponent(CodexPrivacyModeField).exists()).toBe(false)
+    expect(wrapper.findComponent(CodexPrivacyModeField).exists()).toBe(true)
     await wrapper.get('form#create-account-form input[type="text"]').setValue('BPS login')
     await wrapper.get('form#create-account-form').trigger('submit.prevent')
     const flow = wrapper.findComponent(OAuthAuthorizationFlowStub)
@@ -218,20 +218,21 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     wrapper.unmount()
   })
 
-  it('hides passthrough, Codex CLI-only and compact for BPS and restores them for Codex OAuth', async () => {
+  it('hides passthrough, fingerprint convergence and compact for BPS while keeping CLI-only, and restores native controls for Codex OAuth', async () => {
     const wrapper = mountModal()
     await selectButtonByText(wrapper, 'OpenAI')
     const codexOnlyLabels = [
       'admin.accounts.openai.oauthPassthrough',
-      'admin.accounts.openai.codexCLIOnly',
       'admin.accounts.openai.compactMode',
       'admin.accounts.openai.codexFingerprintMode'
     ]
     for (const label of codexOnlyLabels) expect(wrapper.text()).toContain(label)
+    expect(wrapper.text()).toContain('admin.accounts.openai.codexCLIOnly')
 
     await wrapper.get('[data-testid="openai-oauth-client-excel"]').trigger('click')
     for (const label of codexOnlyLabels) expect(wrapper.text()).not.toContain(label)
-    // Generic model restriction stays available for BPS.
+    // Local CLI-only and generic model restriction stay available for BPS.
+    expect(wrapper.text()).toContain('admin.accounts.openai.codexCLIOnly')
     expect(wrapper.find('[data-testid="model-whitelist-selector"]').exists()).toBe(true)
 
     await wrapper.get('[data-testid="openai-oauth-client-codex"]').trigger('click')

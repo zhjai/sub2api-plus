@@ -223,8 +223,8 @@ func (s *AccountTestService) FetchUpstreamSupportedModels(ctx context.Context, a
 // snapshot. When no model is complete, the existing account snapshot is left
 // untouched.
 func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, account *Account) (*UpstreamModelCatalog, error) {
-	if account.IsExcelOAuth() {
-		return nil, newUpstreamModelSyncUnsupportedError("BPS model synchronization is unavailable; configure explicit BPS model mappings", nil)
+	if account != nil && account.IsExcelOAuth() {
+		return s.syncExcelBPSModelCatalog(ctx, account)
 	}
 	fetched, err := s.fetchUpstreamModelListWithObservation(ctx, account)
 	var (
@@ -823,6 +823,28 @@ func (s *AccountTestService) fetchUpstreamModelListRequest(ctx context.Context, 
 		return nil, nil, nil, newUpstreamModelSyncConfigError("Account is required", nil)
 	}
 
+	if account.IsExcelOAuth() {
+		if s.openaiGatewayService == nil {
+			return nil, nil, nil, newUpstreamModelSyncConfigError("BPS model discovery service is unavailable", nil)
+		}
+		response, err := s.openaiGatewayService.FetchExcelBPSModelsList(ctx, account)
+		if err != nil {
+			return nil, nil, nil, newUpstreamModelSyncUpstreamError("BPS model discovery failed", err)
+		}
+		var catalog struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(response.Body, &catalog); err != nil {
+			return nil, nil, nil, newUpstreamModelSyncUpstreamError("BPS model catalog is invalid", err)
+		}
+		ids := make([]string, 0, len(catalog.Data))
+		for _, model := range catalog.Data {
+			ids = append(ids, model.ID)
+		}
+		return ids, response.Body, nil, nil
+	}
 	if account.Platform == PlatformAntigravity && account.Type != AccountTypeAPIKey {
 		models, body, err := s.fetchAntigravityOAuthUpstreamModels(ctx, account)
 		return models, body, nil, err

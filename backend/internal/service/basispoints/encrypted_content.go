@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-const encryptedContentOmitted = "[Encrypted content omitted: only the native Codex channel can read it, so it cannot be forwarded through Excel / BPS.]"
+const encryptedContentOmitted = "[Encrypted content omitted: the user allowed last-resort historical omission; prior facts may be missing.]"
 
 // StripEncryptedContent replaces encrypted message and tool-result parts with a
 // fixed notice before validation. Codex multi-agent histories carry sub-agent
@@ -23,8 +23,15 @@ func StripEncryptedContent(raw []byte) ([]byte, error) {
 	}
 	input, _ := source["input"].([]any)
 	changed := false
-	for _, rawItem := range input {
+	boundary := historicalBoundary(input)
+	for itemIndex, rawItem := range input {
 		item, _ := rawItem.(object)
+		// Never erase active tasks, instructions, unpaired tool dependencies, or
+		// necessary compaction state. Only a caller that exhausted complete
+		// routes and obtained the explicit account opt-in may call this helper.
+		if !safelyHistoricalItem(input, itemIndex, boundary) {
+			continue
+		}
 		field := "content"
 		switch text(item["type"]) {
 		case "", "message", "agent_message":

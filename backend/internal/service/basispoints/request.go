@@ -93,12 +93,22 @@ func prepare(raw []byte, scope string, replay *ReplayCache, nativeToolImages map
 }
 
 func prepareWithInheritedCatalog(raw []byte, scope string, replay *ReplayCache, nativeToolImages map[string]bool, inherited bool) ([]byte, *Bridge, error) {
+	if IsCompactionRequest(raw) {
+		var err error
+		raw, err = PrepareCompaction(raw)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
 	var source object
 	if err := decode(raw, &source); err != nil || source == nil {
 		return nil, nil, fmt.Errorf("invalid Basispoints request JSON")
 	}
 	if err := validateNewAgentMessage(source["input"]); err != nil {
 		return nil, nil, err
+	}
+	if capability := InspectRequestCapabilities(raw); capability != nil && capability.Code == "basispoints_encrypted_arguments" {
+		return nil, nil, capability
 	}
 	model := strings.TrimSpace(text(source["model"]))
 	if model == "" {

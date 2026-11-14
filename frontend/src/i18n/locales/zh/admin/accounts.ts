@@ -1488,7 +1488,7 @@ export default {
             bpsTitle: 'BPS OAuth',
             bpsDesc: '官方 Excel 登录，仅用于 BPS',
             scopeNote:
-              'BPS 账号仅处理 HTTP Responses 请求（流式或 JSON），支持客户端 function/custom 工具；不支持原生 compact、WebSocket、图片、Chat Completions 和 Messages。请发送完整对话历史，不支持 previous_response_id。各工作区可用的模型由 OpenAI 决定，不保证任何模型可用。',
+              'BPS 通道支持 HTTP Responses（流式或 JSON，含客户端 function/custom 工具）、真实上游 Compact，以及受限的 gpt-image-2 非流式 PNG 文生图与单图编辑子集（opaque/auto 背景，不含遮罩、远程图片 URL 或流式分片）。不支持 WebSocket、Chat Completions 与 Messages；超出子集的图片、托管工具或加密上下文需路由至兼容的原生授权或其他兼容账号，不等同于原生 Codex 通道。普通请求与 Compact 均需发送完整对话历史，不支持 previous_response_id 或未展开的 item_reference。各工作区实际可用模型与能力由 OpenAI 决定，不保证任何模型（含 gpt-image-2）可用。',
             title: 'BPS 授权（官方 Excel 登录）',
             followSteps: '通过官方 Excel 登录完成授权，然后把回调 URL 粘贴回来：',
             openUrlDesc: '在新标签页打开链接，登录 OpenAI 并选择工作区。',
@@ -1519,7 +1519,7 @@ export default {
             reauthNote: '该账号使用 BPS（Excel）登录客户端，重新授权仍使用该客户端。',
             identityTitle: 'BPS 账号',
             identityDesc:
-              '通过官方 Excel 登录客户端授权。Codex 身份、原生 WebSocket、Codex CLI 限制、托管图片工具、自动透传和 compact 设置不适用于该账号，已隐藏。',
+              '通过官方 Excel 登录客户端授权。原生 Codex 专属设置（Codex 指纹收敛、原生 WebSocket、Responses 自动透传、namespace 摊平及原生 Compact 模式开关）不适用于纯 BPS 账号，已隐藏。',
             clientIdLabel: '登录客户端',
             workspaceLabel: '工作区',
             emailLabel: '邮箱'
@@ -2009,47 +2009,183 @@ export default {
 
       bpsAccount: {
         badge: 'BPS',
-        badgeTitle: 'OpenAI BPS（官方 Excel OAuth）通道：仅支持 HTTP /responses 文本与客户端工具请求',
+        badgeTitle:
+          'OpenAI BPS（官方 Excel OAuth）通道：支持 HTTP /responses（含客户端工具与真实上游 Compact）及受限的 gpt-image-2 非流式 PNG 生图/单图编辑子集',
+        badges: {
+          bpsOnlyActive: 'BPS',
+          bpsOnlyDisabled: 'BPS 已停用',
+          bpsOnly403: 'BPS · 403',
+          bpsOnlyGrantInvalid: 'BPS · 授权失效',
+          bpsOnlyTokenExpired: 'BPS · 令牌过期',
+          dualActive: 'Codex + BPS',
+          dualStandby: 'BPS 待命',
+          dual403: 'BPS · 403',
+          dualGrantInvalid: 'BPS · 授权失效',
+          dualMissingGrant: 'BPS · 缺少授权',
+          tooltipBpsOnlyActive: '纯 BPS（官方 Excel OAuth）账号：BPS HTTP /responses 路由已启用',
+          tooltipBpsOnlyDisabled: '纯 BPS（官方 Excel OAuth）账号：BPS 路由已被手动关闭',
+          tooltipDualActive: '双授权账号：原生 Codex OAuth + 独立 Excel BPS 授权均就绪，BPS 路由已启用',
+          tooltipDualStandby: '已挂载独立 Excel BPS 授权（待命）：BPS 路由未启用，全部流量走原生 Codex 通道',
+          tooltip403Disabled: 'BPS 通道因上游 403 自动停用；双授权账号的原生 Codex 通道仍可正常调度',
+          tooltipGrantInvalid: 'BPS 上游权限校验失败（非本地令牌过期）：请检查订阅资格或重新授权 BPS 凭据',
+          tooltipTokenExpired: 'BPS 本地访问令牌已到期（将在下次刷新或重新授权时更新，不代表上游权限被永久吊销）',
+          tooltipMissingGrant: '已开启 BPS 路由开关，但尚未挂载独立 Excel BPS 授权凭据'
+        },
+        grant: {
+          sectionTitle: '独立 BPS（Excel OAuth）授权凭据',
+          sectionDesc:
+            '在保留原生主 Codex OAuth 凭据的同时挂载独立的 Excel BPS 授权（仅加密存储于 credentials.excel_bps_credentials，绝不写入 extra 或展示明文令牌）。',
+          statusNotAttached: '未挂载独立 BPS 授权',
+          statusAttachedStandby: '已挂载独立 BPS 授权（待命，未启用路由）',
+          statusAttachedActive: '已挂载独立 BPS 授权（BPS 路由已启用）',
+          statusStagedAttach: '待保存新 BPS 授权',
+          statusStagedRemove: '待移除独立 BPS 授权',
+          statusGrantInvalid: 'BPS 上游授权校验异常',
+          statusPrimaryExpired: 'BPS 本地令牌已过期',
+          neverAutoEnablesHint:
+            '挂载或刷新独立 BPS 授权本身绝不会自动开启 BPS 路由；需在下方显式开启“启用 BPS 通道”才会将匹配模型路由至 BPS。',
+          noTokensDisplayedHint: '安全保护：界面不回显 access_token / refresh_token / id_token 明文。',
+          attachAction: '挂载独立 BPS 授权',
+          reauthAction: '重新授权 BPS 凭据',
+          refreshAction: '刷新 BPS 令牌',
+          refreshingAction: '正在刷新 BPS...',
+          removeAction: '移除独立 BPS 授权',
+          cancelStagedAction: '撤销未保存更改',
+          refreshSuccess: '独立 BPS 授权令牌刷新成功',
+          refreshFailed: '刷新独立 BPS 授权失败',
+          stagedReadyHint: '已在当前表单暂存新的独立 BPS 授权，点击底部保存后由后端校验并持久化（不会覆盖原生主凭据）。',
+          stagedRemoveHint: '已标记移除独立 BPS 授权，点击底部保存后生效（原生主凭据保持不变）。',
+          reauthTargetLabel: '选择要更新的授权通道',
+          reauthTargetPrimary: '原生主授权（Codex OAuth）',
+          reauthTargetPrimaryDesc: '更新主账号 Codex CLI OAuth 令牌，保留已挂载的独立 BPS 授权。',
+          reauthTargetExcel: '独立 BPS 授权（Excel OAuth）',
+          reauthTargetExcelDesc: '仅挂载或更新 credentials.excel_bps_credentials，绝不覆盖原生主凭据，也不会自动启用 BPS 路由。',
+          reauthIsolatedResetHint: '清空或重置操作仅作用于当前选中的授权通道，不会影响另一套凭据。',
+          reauthExcelSavedSuccess: '独立 BPS（Excel OAuth）授权已校验并保存',
+          ineligibleHint:
+            '独立 BPS（Excel OAuth）授权仅适用于标准原生 Codex OAuth 账号；批量导入会话、Agent Identity 或 PAT 创建流程不支持同时挂载独立 BPS 授权。',
+          reauthIndependentHint:
+            '使用官方 Excel OAuth 获取或刷新独立 BPS 授权（不会覆盖主 Codex 凭据，也不会自动启用 BPS 路由）。',
+          resetSelectedGrant: '重置当前授权流程',
+          dualNativeScopeHint:
+            '双授权说明：下方 WebSocket、Responses 透传、namespace 摊平、指纹收敛与 Compact 设置仅作用于原生主 Codex 授权通道；路由至 BPS 的请求始终走独立 HTTP /responses 协议，不会转换为 WebSocket。'
+        },
+        runtime: {
+          disabled403Title: 'BPS 通道因上游 403 已自动停用',
+          disabled403Desc:
+            'BPS 路由在收到上游 403 后已暂停接收 BPS 流量（双授权账号的原生主通道不受影响）。可等待定时恢复探测，或先关闭“启用 BPS 通道”保存后再重新开启以手动重置。',
+          disabled403Meta: '停用时间：{disabledAt} · 原因：{reason} · 探测模型：{model} · 最近探测：{lastProbeAt}',
+          disabled403MovedGroup: '已自动迁移至目标分组 #{groupId}',
+          disabled403ManualResetHint: '提示：如需立即清除 403 自动停用状态，可关闭 BPS 通道开关并保存，随后重新授权或重新开启。',
+          grantInvalidTitle: 'BPS 上游授权校验失败（区别于本地令牌过期）',
+          grantInvalidDesc:
+            '上游拒绝了当前 BPS 授权（例如工作区不匹配、订阅等级不满足或上游吊销）。这与本地 access_token 到期不同，请重新授权 BPS 凭据。',
+          primaryExpiredTitle: 'BPS 本地访问令牌已过期',
+          primaryExpiredDesc:
+            '本地缓存的 access_token 已超过有效期；系统在存在有效 refresh_token 时会自动续期，不等同于上游 BPS 资格失效。',
+          rateLimitedTitle: 'BPS 通道处于限流冷却期',
+          rateLimitedDesc: '限流恢复时间：{until}'
+        },
         usage: {
           title: '本地用量',
-          hint: '统计本系统记录的请求、Token 与计费窗口；BPS 不提供上游配额利用率、剩余次数或额度重置探测。',
+          hint: '展示本网关独立统计的 BPS 本地窗口用量，以及存在真实上游窗口时的只读配额快照（不会发起模型生成探测）。',
           refresh: '刷新',
           refreshing: '刷新中...',
           noRequests: '0 次请求',
           empty: '暂无本地窗口记录',
           refreshedAt: '已刷新 {time}',
-          loadFailed: '加载本地用量失败'
+          loadFailed: '加载本地用量失败',
+          quotaUnknown: '上游配额未知（未返回权威窗口利用率）',
+          sourceWham: '来源：ChatGPT /wham/usage 账号窗口',
+          sourceSnapshot: '来源：账号响应头快照（非 BPS 专属保证余额）',
+          sourceDisclaimer: '注：上游配额反映所属账号窗口快照，并非 BPS 通道专属保证独立余额。',
+          quotaUpdatedAt: '快照时间 {time}',
+          quotaRefreshError: '配额刷新失败（保留上次快照）：{error}',
+          dualLocalLabel: 'BPS 本地'
         },
         options: {
-          sectionTitle: 'BPS 协议与工具策略',
+          sectionTitle: 'BPS 通道配置与协议策略',
           clientToolsHint:
             '支持通过 HTTP /responses 转发客户端工具（function / custom），无需开启 Codex namespace 摊平，也不会回退到原生 Codex 通道。',
+          routeEnabled: '启用 BPS 通道（openai_excel_bps）',
+          routeEnabledDesc: '显式控制是否允许将匹配的上游模型路由至 BPS HTTP /responses 通道（不会因原生通道降级而自动激活）。',
+          routeEnabledDualNote: '仅挂载独立 BPS 授权不会启用此开关；未启用时独立授权保持待命。',
+          dualChannelNativeNote:
+            '双授权通道说明：下方透传、namespace 摊平、WebSocket、指纹收敛与 Compact 设置仅作用于原生主 Codex 通道；BPS 路由始终使用独立 HTTP /responses，不会变为 WebSocket。',
+          modelsTitle: 'BPS 路由上游模型范围（openai_excel_bps_models）',
+          modelsDesc:
+            '指定映射后允许进入 BPS 通道的上游模型列表；与上方账号级的“模型白名单 / 模型映射（model_mapping）”相互独立。',
+          modelsDistinctNote:
+            '调度顺序：先按账号白名单/模型映射解析出目标上游模型，再依据此处范围决定该上游模型走 BPS 还是原生通道。',
+          modelsModeAll: '全部已允许上游模型（兼容旧版缺省语义）',
+          modelsModeSelected: '仅指定上游模型列表',
+          modelsEmptySelectedHint: '当前列表为空（[]）：表示没有任何模型会被路由到 BPS 通道。',
+          modelsPlaceholder: '输入要路由至 BPS 的上游模型 ID（如 gpt-6-astra）',
+          modelsAddButton: '添加路由模型',
+          modelsPrefillSuggested: '填入推荐候选（gpt-6-astra、gpt-6.1-sol）',
+          modelsSuggestedBadge: '建议候选（非静态授权保证）',
+          protectionSectionTitle: '403 保护、恢复与计费选项',
+          autoDisableOn403: '遇到上游 403 自动停用 BPS 通道',
+          autoDisableOn403Desc: '收到上游 403 拒绝时仅自动停用 BPS 路由（双授权账号的原生主通道保持可用）。',
+          autoRecoverOn403: '403 停用后定时探测自动恢复',
+          autoRecoverOn403Desc: '按设定分钟间隔后台探测 BPS 可用性，恢复正常后自动解除 403 停用标记。',
+          recoveryIntervalMinutes: '403 恢复探测间隔（分钟）',
+          recoveryIntervalHint: '有效范围 1 - 10080 分钟（默认 60 分钟）。',
+          autoMoveOn403: '遇到 403 自动迁移账号分组',
+          autoMoveOn403Desc: '触发 BPS 403 时将账号迁移至指定的活跃 OpenAI 或混合（composite）分组。',
+          targetGroupLabel: '403 目标迁移分组',
+          targetGroupPlaceholder: '请选择活跃的 OpenAI / 混合分组',
+          targetGroupEmptyHint: '当前没有可选的活跃 OpenAI 或混合分组，请先创建对应分组后再开启自动迁移。',
+          cacheCreationAsInput: '缓存创建按普通输入计费（cache_creation_as_input）',
+          cacheCreationAsInputDesc: '将 BPS 通道上的缓存创建 Token 按普通输入费率归并计费（新配置默认开启）。',
+          sessionProxyEnabled: '启用 BPS 会话级独立代理池',
+          sessionProxyDesc:
+            '从系统现有活跃代理节点中选择 BPS 专用会话出口池；开启后池不能为空，系统绝不会在空池时静默直连。',
+          sessionProxyEmptyPoolError: '配置错误：已开启 BPS 会话代理池，但未选择任何活跃代理节点（禁止空池静默直连）。',
+          sessionProxyNoActiveNodes: '暂无活跃代理节点可选，请先在代理管理中添加并启用代理节点。',
+          sessionProxySelectedCount: '已选 {count} 个活跃代理节点',
           skipHistoricalEncrypted: '忽略历史加密内容',
           skipHistoricalEncryptedDesc:
-            '将旧对话轮次中无法识别的历史加密推理块替换为占位标记后继续转发。',
+            '将旧对话轮次中无法识别的历史加密推理块替换为占位标记后继续转发（默认关闭）。',
           skipHistoricalEncryptedWarning:
             '仅将旧轮次中不可读的历史加密内容替换为标记；当前轮次携带的加密任务仍会被直接拒绝，且本开关不会解密任何密文。',
           hostedToolsPolicy: '不支持的托管工具处理策略',
           hostedToolsPolicyDesc:
-            '当请求包含 BPS 通道不支持的托管工具（如 web_search、code_interpreter 等）时的处理方式。',
+            '发送前若存在支持托管工具的其他路由将优先调度至对应通道；仅在必须落入 BPS 时按本策略处理（默认拒绝请求）。',
           hostedToolsOmit: '省略并提示',
-          hostedToolsReject: '拒绝请求'
+          hostedToolsReject: '拒绝请求',
+          hostedToolsOmitLastResortWarning:
+            '手动兜底提示：“省略并提示”仅作为最后手段，会剥离请求中的 web_search / code_interpreter 等托管工具；建议保持默认“拒绝请求”并由前置路由分流。',
+          validation: {
+            recovery_interval_out_of_range: 'BPS 403 恢复探测间隔必须为 1 到 10080 之间的整数分钟',
+            target_group_required: '开启 403 自动迁移分组时，必须选择一个有效的目标分组',
+            target_group_invalid: '所选 403 目标分组不可用，请选择活跃的 OpenAI 或混合（composite）分组',
+            session_proxy_pool_empty: '开启 BPS 会话代理池时必须至少选择 1 个活跃代理节点（不允许空池直连）',
+            session_proxy_pool_too_large: 'BPS 会话代理池最多只能选择 128 个代理节点',
+            session_proxy_inactive: 'BPS 会话代理池包含已停用或不存在的代理节点，请重新选择活跃节点',
+            too_many_models: 'BPS 路由上游模型列表最多支持 100 个模型',
+            invalid_model_name: 'BPS 路由模型名称不能为空且长度不能超过 256 个字符'
+          }
         },
         models: {
           configureRequired:
-            '尚未配置显式账号模型：请通过白名单或模型映射明确填写可用模型（分组允许列表仍可作为公开清单兜底，但 BPS 不会假定支持全部模型，也不会同步原生 Codex 目录）。',
+            '尚未配置显式账号模型：请通过白名单或模型映射明确填写可用模型（分组允许列表仍可作为公开清单兜底，推荐模型仅为建议候选）。',
           prefillRecommended: '填入推荐模型（gpt-6-astra、gpt-6.1-sol）',
           prefillRecommendedHint:
             '仅为常见候选建议，实际可用性取决于当前账号的上游权限；不会自动放行其他未配置模型。',
           prefillAdded: '已填入 {count} 个推荐模型',
           prefillAlreadyPresent: '推荐模型已全部在当前列表中',
           syncUnavailable:
-            'BPS 账号不支持原生 Codex 上游模型目录同步，请手动选择或配置模型映射。',
+            '未保存的新建 BPS 账号暂不支持预览同步上游模型：请先保存账号，再在编辑弹窗中执行真实上游 BPS 模型同步（bps_access）。',
+          syncSaveFirstHint:
+            '提示：未保存的 OAuth 凭据不支持静态预览模型权限。请先完成创建并保存账号，随后在“编辑账号”中使用“从上游同步”获取真实 BPS 可用模型（推荐模型仅作建议参考）。',
+          syncSavedHint:
+            '已保存的 BPS 账号支持点击“从上游同步”通过 bps_access 探测真实授权模型；推荐模型按钮仅提供候选建议。',
           testCatalogLoadFailed: '加载可用测试模型失败'
         },
         bulk: {
           nativeControlsHiddenHint:
-            '所选账号包含 BPS（Excel OAuth）账号：原生 Codex 专属开关（透传、namespace 摊平、WebSocket、指纹收敛、Compact）已隐藏；模型映射、优先级、分组与代理仍可正常批量修改。',
+            '所选账号包含纯 BPS（Excel OAuth）账号：原生 Codex 专属开关（透传、namespace 摊平、WebSocket、指纹收敛、Compact）已隐藏；仅限 Codex CLI、模型映射、优先级、分组与代理仍可正常批量修改。',
           incompleteSubtypeHiddenHint:
             '部分目标账号位于未加载分页或超出当前预览范围，无法确认其授权子类型：原生 Codex 专属开关（透传、namespace 摊平、WebSocket、仅限 Codex CLI、指纹收敛、Compact）已保守隐藏；模型映射、优先级、分组与代理仍可正常批量修改。'
         }

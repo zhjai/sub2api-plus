@@ -63,6 +63,28 @@ func TestInlineHistoryRetainsOtherMessageIDs(t *testing.T) {
 	}
 }
 
+func TestFakeTTFTMessageIDPreservesInlineContentAndToolIdentity(t *testing.T) {
+	const id = "item_fake_ttft_dmu2m5w8cwn1"
+	source := testSource()
+	source["input"] = []any{object{"type": "message", "id": id, "role": "assistant", "content": []any{object{"type": "output_text", "text": "Literal " + id, "annotations": []any{}}}}}
+	prepared, _ := mustPrepare(t, source, "synthetic-ttft", nil)
+	items := mustTestValue[[]any](t, prepared["input"])
+	got := mustTestValue[object](t, items[len(items)-1])
+	if _, exists := got["id"]; exists {
+		t.Fatal("upstream-only fake TTFT identifier reached BPS inline message")
+	}
+	if !reflect.DeepEqual(got["content"], mustTestValue[object](t, mustTestValue[[]any](t, source["input"])[0])["content"]) {
+		t.Fatal("message content was modified")
+	}
+	for _, kind := range []string{"function_call", "custom_tool_call", "function_call_output", "reasoning"} {
+		item := object{"type": kind, "id": id, "call_id": id, "arguments": "opaque"}
+		normalized, err := normalizeHistoryMessage(item, 0)
+		if err != nil || !reflect.DeepEqual(item, normalized) {
+			t.Fatalf("%s identity changed", kind)
+		}
+	}
+}
+
 func TestCompatibilityMessageIDDoesNotAuthorizeItemReferences(t *testing.T) {
 	source := testSource()
 	source["input"] = []any{object{"type": "message", "role": "assistant", "id": "item_0123456789abcdef01234567", "content": "History"}, object{"type": "item_reference", "id": "item_0123456789abcdef01234567"}}

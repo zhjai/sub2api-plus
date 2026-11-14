@@ -63,7 +63,7 @@ func TestBPSAvailableModelsNeverFallsBackToGlobalDefaults(t *testing.T) {
 	require.NotContains(t, recorder.Body.String(), "gpt-image")
 }
 
-func TestBPSAvailableModelsPreservesConfigurationErrorsAndExplicitAliases(t *testing.T) {
+func TestBPSAvailableModelsMappingCannotReplaceUnavailableDiscovery(t *testing.T) {
 	handler := &AccountHandler{accountTestService: &service.AccountTestService{}}
 	account := &service.Account{ID: 42, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth, Credentials: map[string]any{"client_id": openai.ExcelClientID}}
 	recorder := httptest.NewRecorder()
@@ -71,13 +71,13 @@ func TestBPSAvailableModelsPreservesConfigurationErrorsAndExplicitAliases(t *tes
 	c.Request = httptest.NewRequest(http.MethodGet, "/models", nil)
 	handler.respondAvailableModels(c, account)
 	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
-	require.Contains(t, recorder.Body.String(), "OPENAI_BPS_MODELS_NOT_CONFIGURED")
+	require.Contains(t, recorder.Body.String(), "OpenAI model discovery service is unavailable")
 	account.Credentials["model_mapping"] = map[string]any{"my-bps": "gpt-6-astra"}
 	recorder = httptest.NewRecorder()
 	c, _ = gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodGet, "/models", nil)
 	handler.respondAvailableModels(c, account)
-	require.Equal(t, http.StatusOK, recorder.Code)
-	require.Contains(t, recorder.Body.String(), "my-bps")
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.NotContains(t, recorder.Body.String(), "my-bps")
 	require.NotContains(t, recorder.Body.String(), "gpt-image")
 }

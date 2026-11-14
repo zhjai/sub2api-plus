@@ -46,13 +46,16 @@ type bpsFailureHandlerUpstream struct {
 	service.HTTPUpstream
 	mu            sync.Mutex
 	accounts      []int64
+	paths         []string
 	failureStatus int
+	success       bool
 }
 
 func (*bpsFailureHandlerUpstream) SupportsSingleSend() bool { return true }
 func (u *bpsFailureHandlerUpstream) Do(req *http.Request, _ string, id int64, _ int) (*http.Response, error) {
 	u.mu.Lock()
 	u.accounts = append(u.accounts, id)
+	u.paths = append(u.paths, req.URL.Path)
 	attempt := len(u.accounts)
 	u.mu.Unlock()
 	if u.failureStatus == -1 {
@@ -70,11 +73,17 @@ func (u *bpsFailureHandlerUpstream) Do(req *http.Request, _ string, id int64, _ 
 			wire = `data: {"type":"response.completed","response":{"id":"resp_fallback","status":"completed","model":"gpt-6-astra","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fallback succeeded"}]}],"usage":{"input_tokens":7,"output_tokens":3}}}` + "\n\n"
 		}
 	}
+	if u.success {
+		wire = `data: {"type":"response.completed","response":{"id":"resp_native_success","status":"completed","model":"gpt-6-astra","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fallback succeeded"}]}],"usage":{"input_tokens":7,"output_tokens":3}}}` + "\n\n"
+	}
 	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}, "X-Request-Id": {fmt.Sprintf("bps-fixture-%d", attempt)}}, Body: io.NopCloser(strings.NewReader(wire))}, nil
 }
 
 func runBPSFailureFidelityHandler(t *testing.T, stream bool, failureStatus int, native ...bool) {
 	isNative := len(native) > 0 && native[0]
+	isDual := len(native) > 1 && native[1]
+	isNativeFallback := len(native) > 2 && native[2]
+	useNativeBilling := isNative || isNativeFallback
 	t.Helper()
 	claims, err := json.Marshal(map[string]any{"client_id": openai.ExcelClientID, "exp": time.Now().Add(time.Hour).Unix(), "https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "synthetic-workspace", "chatgpt_plan_type": "plus"}})
 	require.NoError(t, err)
@@ -82,6 +91,15 @@ func runBPSFailureFidelityHandler(t *testing.T, stream bool, failureStatus int, 
 	accounts := []service.Account{}
 	for i := 0; i < 2; i++ {
 		accounts = append(accounts, service.Account{ID: int64(9930 + i), Name: "bps-fixture", Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth, Status: service.StatusActive, Schedulable: true, Concurrency: 2, Priority: i + 1, Credentials: map[string]any{"client_id": openai.ExcelClientID, "access_token": token, "chatgpt_account_id": "synthetic-workspace", "model_mapping": map[string]any{"gpt-6-astra": "gpt-6-astra"}}})
+	}
+	if isDual {
+		for i := range accounts {
+			grant := accounts[i].Credentials
+			accounts[i].Credentials = map[string]any{"access_token": "synthetic-native-token", "chatgpt_account_id": "synthetic-workspace", "model_mapping": map[string]any{"gpt-6-astra": "gpt-6-astra"}, service.ExcelBPSCredentialsKey: grant}
+			accounts[i].Extra = map[string]any{service.ExcelBPSEnabledKey: true}
+			require.False(t, accounts[i].IsExcelOAuth(), "handler must retain the native primary identity")
+			require.NotNil(t, accounts[i].BPSAccountForModel("gpt-6-astra"))
+		}
 	}
 	if isNative {
 		for i := range accounts {
@@ -91,7 +109,7 @@ func runBPSFailureFidelityHandler(t *testing.T, stream bool, failureStatus int, 
 	}
 	repo := &bpsFailureHandlerRepo{openAIWSFailoverHandlerAccountRepoStub: openAIWSFailoverHandlerAccountRepoStub{accounts: accounts}}
 	usage := &openAIWSUsageHandlerUsageLogRepoStub{created: make(chan *service.UsageLog, 4)}
-	upstream := &bpsFailureHandlerUpstream{failureStatus: failureStatus}
+	upstream := &bpsFailureHandlerUpstream{failureStatus: failureStatus, success: isNativeFallback}
 	cfg := &config.Config{RunMode: config.RunModeSimple}
 	cfg.Default.RateMultiplier = 1
 	cfg.Gateway.MaxAccountSwitches = 2
@@ -103,6 +121,9 @@ func runBPSFailureFidelityHandler(t *testing.T, stream bool, failureStatus int, 
 	h := NewOpenAIGatewayHandler(gateway, concurrency, billing, &service.APIKeyService{}, nil, nil, nil, nil, cfg)
 	groupID := int64(9932)
 	body := `{"model":"gpt-6-astra","input":"hello","tools":[{"type":"function","name":"shell"}],"stream":` + map[bool]string{false: "false", true: "true"}[stream] + `}`
+	if isNativeFallback {
+		body = strings.Replace(body, `{"type":"function","name":"shell"}`, `{"type":"web_search"}`, 1)
+	}
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest("POST", "/openai/v1/responses", strings.NewReader(body))
@@ -115,13 +136,20 @@ func runBPSFailureFidelityHandler(t *testing.T, stream bool, failureStatus int, 
 	h.Responses(c)
 	upstream.mu.Lock()
 	called := append([]int64(nil), upstream.accounts...)
+	paths := append([]string(nil), upstream.paths...)
 	upstream.mu.Unlock()
 	wantCalls := 1
-	if failureStatus > 0 && failureStatus != 400 {
+	if failureStatus > 0 && failureStatus != 400 && !isNativeFallback {
 		wantCalls = 2
 	}
 	require.Len(t, called, wantCalls)
-	if failureStatus == 0 {
+	for _, path := range paths {
+		require.Equal(t, !useNativeBilling, strings.HasPrefix(path, "/basispoints/"), "fixture must exercise the intended actual upstream channel")
+	}
+	if isNativeFallback {
+		require.Equal(t, http.StatusOK, rec.Code)
+		require.Contains(t, rec.Body.String(), "fallback succeeded")
+	} else if failureStatus == 0 {
 		require.Zero(t, repo.healthWrites.Load())
 		require.Empty(t, repo.rateLimitedIDs)
 		require.Contains(t, rec.Body.String(), "basispoints_protocol_error")
@@ -138,7 +166,7 @@ func runBPSFailureFidelityHandler(t *testing.T, stream bool, failureStatus int, 
 	}
 	require.NotContains(t, rec.Body.String(), `"type":"function_call"`)
 	firstRecorded := 0
-	if isNative {
+	if useNativeBilling && !isNativeFallback {
 		firstRecorded = 1
 	} // Existing native failover attempts must not enter BPS accounting.
 	billingIDs := map[string]bool{}
@@ -146,7 +174,7 @@ func runBPSFailureFidelityHandler(t *testing.T, stream bool, failureStatus int, 
 		select {
 		case logged := <-usage.created:
 			require.Equal(t, called[attempt], logged.AccountID)
-			if isNative {
+			if useNativeBilling {
 				require.Equal(t, "client:shared-client-id", logged.RequestID)
 			} else if failureStatus != -1 {
 				require.True(t, strings.HasPrefix(logged.RequestID, "bps:"))
@@ -156,7 +184,7 @@ func runBPSFailureFidelityHandler(t *testing.T, stream bool, failureStatus int, 
 			if failureStatus == -1 {
 				require.Zero(t, logged.InputTokens)
 				require.Zero(t, logged.OutputTokens)
-			} else if attempt == 0 {
+			} else if attempt == 0 && !isNativeFallback {
 				require.Equal(t, 19, logged.InputTokens)
 				require.Equal(t, 5, logged.OutputTokens)
 			} else {
@@ -208,4 +236,21 @@ func TestOpenAIResponses_BPSCyberFailureHasOneUsageOwner(t *testing.T) {
 
 func TestOpenAIResponses_BPSCyberWithoutResultRetainsUsageFallback(t *testing.T) {
 	runBPSFailureFidelityHandler(t, false, -1)
+}
+
+func TestOpenAIResponses_DualGrantBPSUsageOwnership(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, status := range []int{0, 400, 429, 503} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("status=%d/stream=%v", status, stream), func(t *testing.T) { runBPSFailureFidelityHandler(t, stream, status, false, true) })
+		}
+	}
+}
+
+func TestOpenAIResponses_DualGrantNativeFallbackKeepsNativeUsageIdentity(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprint(stream), func(t *testing.T) {
+			runBPSFailureFidelityHandler(t, stream, http.StatusServiceUnavailable, false, true, true)
+		})
+	}
 }

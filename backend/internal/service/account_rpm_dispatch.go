@@ -30,6 +30,9 @@ func accountRPMDispatchRequest(req *http.Request, cache GatewayCache, repo accou
 		return nil, err
 	}
 	admit := func(ctx context.Context) error {
+		if err := validateExcelBPSRecoveryDispatch(ctx, repo, account); err != nil {
+			return err
+		}
 		if automatic, _ := ctx.Value(openAIEvalAutomaticKey{}).(bool); automatic {
 			if repo == nil || account == nil {
 				return &OpenAIEvalRequestError{Code: "account_lookup_unavailable", Message: "automatic test account lookup is unavailable"}

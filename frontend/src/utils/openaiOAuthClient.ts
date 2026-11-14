@@ -16,25 +16,37 @@ export type OpenAIOAuthClient = 'codex' | 'excel'
 /** Official Excel add-in OAuth client. Saved accounts with this client_id are BPS-only. */
 export const OPENAI_EXCEL_OAUTH_CLIENT_ID = 'app_fnr0pYvVwwFDocDumLG3H2Bp'
 
+/** Nested credential map key storing an optional independent Excel (BPS) OAuth grant on native OpenAI OAuth accounts. */
+export const OPENAI_EXCEL_BPS_CREDENTIALS_KEY = 'excel_bps_credentials'
+
 /** Fixed official redirect for the Excel client. */
 export const OPENAI_EXCEL_CALLBACK_ORIGIN = 'https://bps.openai.com'
 export const OPENAI_EXCEL_CALLBACK_PATH =
   '/basispoints/extension/360590d7-f8f9-4d88-bf75-0edfe0a4b9f3/auth/callback'
 
+export interface OpenAIBPSAccountLike {
+  platform?: string | null
+  type?: string | null
+  parent_account_id?: number | null
+  credentials?: Record<string, unknown> | null
+  credentials_status?: Record<string, boolean> | null
+  extra?: unknown
+}
+
 export function isOpenAIExcelClientId(clientId: unknown): boolean {
   return typeof clientId === 'string' && clientId.trim() === OPENAI_EXCEL_OAUTH_CLIENT_ID
 }
 
-/** Picks the login profile from saved account credentials. Anything other than the Excel client is Codex. */
+/** Picks the primary login profile from saved account credentials. Anything other than the Excel client is Codex. */
 export function resolveOpenAIOAuthClient(
   credentials: Record<string, unknown> | null | undefined
 ): OpenAIOAuthClient {
   return isOpenAIExcelClientId(credentials?.client_id) ? 'excel' : 'codex'
 }
 
-/** True for an ordinary OpenAI OAuth account whose saved client is the Excel (BPS) client. */
+/** True ONLY for an OpenAI OAuth account whose PRIMARY saved client is the Excel (BPS) client. */
 export function isOpenAIBPSAccount(
-  account: { platform?: string; type?: string; credentials?: Record<string, unknown> | null } | null | undefined
+  account: OpenAIBPSAccountLike | null | undefined
 ): boolean {
   return (
     !!account &&
@@ -42,6 +54,38 @@ export function isOpenAIBPSAccount(
     account.type === 'oauth' &&
     isOpenAIExcelClientId(account.credentials?.client_id)
   )
+}
+
+/** True for a native primary OpenAI OAuth account that can hold an optional independent Excel BPS grant. */
+export function isNativeOpenAIOAuthEligibleForBPSGrant(
+  account: OpenAIBPSAccountLike | null | undefined
+): boolean {
+  if (!account || account.platform !== 'openai' || account.type !== 'oauth') return false
+  if (account.parent_account_id != null) return false
+  if (isOpenAIBPSAccount(account)) return false
+  const authMode = account.credentials?.auth_mode
+  if (typeof authMode === 'string' && authMode.trim().toLowerCase() === 'agentidentity') return false
+  return true
+}
+
+/** True when a native OpenAI OAuth account has an attached independent Excel BPS OAuth grant. */
+export function hasIndependentOpenAIBPSGrant(
+  account: OpenAIBPSAccountLike | null | undefined
+): boolean {
+  if (!isNativeOpenAIOAuthEligibleForBPSGrant(account)) return false
+  if (account?.credentials_status?.has_excel_bps_credentials === true) return true
+  const raw = account?.credentials?.[OPENAI_EXCEL_BPS_CREDENTIALS_KEY]
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false
+  const nested = raw as Record<string, unknown>
+  if (isOpenAIExcelClientId(nested.client_id)) return true
+  return typeof nested.access_token === 'string' && nested.access_token.trim() !== ''
+}
+
+/** True when the account has either a primary BPS-only grant or an independent nested BPS grant. */
+export function hasAnyOpenAIBPSGrant(
+  account: OpenAIBPSAccountLike | null | undefined
+): boolean {
+  return isOpenAIBPSAccount(account) || hasIndependentOpenAIBPSGrant(account)
 }
 
 /**

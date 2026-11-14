@@ -156,6 +156,20 @@
           :show-now-when-idle="true"
           color="emerald"
         />
+        <!-- Dual-grant independent BPS local usage summary when present -->
+        <div
+          v-if="hasDualGrantBPSLocalUsage && usageInfo?.bps_local_usage"
+          class="rounded border border-teal-200/70 bg-teal-50/50 px-1.5 py-1 text-[9px] text-teal-800 dark:border-teal-800/50 dark:bg-teal-950/20 dark:text-teal-300"
+          data-testid="dual-grant-bps-local-usage"
+        >
+          <span class="font-medium">{{ t('admin.accounts.bpsAccount.usage.dualLocalLabel') }}:</span>
+          <span v-if="usageInfo.bps_local_usage.five_hour" class="ml-1">
+            5h {{ formatCompactNumber(usageInfo.bps_local_usage.five_hour.requests, { allowBillions: false }) }} req
+          </span>
+          <span v-if="usageInfo.bps_local_usage.seven_day" class="ml-1">
+            · 7d {{ formatCompactNumber(usageInfo.bps_local_usage.seven_day.requests, { allowBillions: false }) }} req
+          </span>
+        </div>
         <!--
           Upstream codex /wham/usage quota query + reset. The local active-sampling
           refresh button is rendered via the pre-actions slot so the user sees a
@@ -721,7 +735,7 @@ import { formatCompactNumber } from '@/utils/format'
 import { isOfficialGeminiBaseUrl } from '@/utils/geminiExplicitCache'
 import { supportsAccountQuota } from '@/utils/accountQuota'
 import { extractApiErrorMessage } from '@/utils/apiError'
-import { isOpenAIBPSAccount } from '@/utils/openaiOAuthClient'
+import { hasIndependentOpenAIBPSGrant, isOpenAIBPSAccount } from '@/utils/openaiOAuthClient'
 import UsageProgressBar from './UsageProgressBar.vue'
 import AccountQuotaInfo from './AccountQuotaInfo.vue'
 import ClaudeResetCreditsCell from './ClaudeResetCreditsCell.vue'
@@ -783,6 +797,9 @@ const bpsRefreshedAt = ref<Date | null>(null)
 const error = ref<string | null>(null)
 const usageInfo = ref<AccountUsageInfo | null>(null)
 const isOpenAIBPS = computed(() => isOpenAIBPSAccount(props.account))
+const hasDualGrantBPSLocalUsage = computed(
+  () => hasIndependentOpenAIBPSGrant(props.account) && Boolean(usageInfo.value?.bps_local_usage)
+)
 const bpsUsageError = computed(
   () => bpsExplicitError.value || error.value || usageInfo.value?.error || null
 )

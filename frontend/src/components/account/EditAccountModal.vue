@@ -985,7 +985,7 @@
             @sync="requestGrokCatalogSync"
           />
 
-          <!-- BPS (Excel login) explicit model configuration & recommended prefill -->
+          <!-- BPS (Excel login) explicit model configuration, real sync & suggested prefill -->
           <div
             v-if="isOpenAIBPS"
             class="mb-3 space-y-2 rounded-lg border border-emerald-200/80 bg-emerald-50/60 p-3 dark:border-emerald-800/50 dark:bg-emerald-950/20"
@@ -994,9 +994,9 @@
             <div class="flex flex-wrap items-center justify-between gap-2">
               <p
                 class="text-xs leading-relaxed text-emerald-900 dark:text-emerald-200"
-                data-testid="edit-bps-sync-unavailable"
+                data-testid="edit-bps-sync-saved-hint"
               >
-                {{ t('admin.accounts.bpsAccount.models.syncUnavailable') }}
+                {{ t('admin.accounts.bpsAccount.models.syncSavedHint') }}
               </p>
               <button
                 type="button"
@@ -1026,8 +1026,9 @@
             :model-mappings="modelMappings"
             :platform="account?.platform || 'anthropic'"
             :account-id="account?.id"
-            :show-sync-button="!isOpenAIBPS && (account.platform !== 'grok' || !account.id)"
+            :show-sync-button="account.platform !== 'grok' || !account.id"
             :bps-mode="isOpenAIBPS"
+            @upstream-synced-models="onBPSUpstreamSyncedModels"
             @upstream-sync-finished="refreshGrokDiagnostics"
           />
 
@@ -2098,7 +2099,16 @@
         </p>
       </div>
 
-      <!-- OpenAI 自动透传开关（OAuth/API Key；BPS 账号不适用） -->
+      <!-- Dual-grant channel scope explanation: native settings below apply to native Codex grant only -->
+      <div
+        v-if="isEligibleNativeOpenAIOAuth && (effectiveHasIndependentGrant || bpsChannelOptions.enabled)"
+        class="rounded-lg border border-teal-200 bg-teal-50/70 px-3.5 py-2.5 text-xs leading-relaxed text-teal-900 dark:border-teal-800/60 dark:bg-teal-950/30 dark:text-teal-200"
+        data-testid="edit-dual-grant-channel-note"
+      >
+        {{ t('admin.accounts.bpsAccount.grant.dualNativeScopeHint') }}
+      </div>
+
+      <!-- OpenAI 自动透传开关（OAuth/API Key；BPS-only 账号不适用） -->
       <div
         v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey') && !isOpenAIBPS"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
@@ -2180,12 +2190,29 @@
         </div>
       </div>
 
-      <!-- OpenAI BPS (official Excel OAuth) dedicated options -->
+      <!-- OpenAI BPS channel options (BPS-only and eligible native primary OpenAI OAuth accounts) -->
       <OpenAIBPSOptionsSection
-        v-if="isOpenAIBPS"
+        v-if="showOpenAIBPSSection"
         id-prefix="edit"
-        v-model:skip-historical-encrypted="bpsSkipHistoricalEncrypted"
-        v-model:hosted-tools-policy="bpsHostedToolsPolicy"
+        :options="bpsChannelOptions"
+        :is-bps-only="isOpenAIBPS"
+        :has-saved-account="Boolean(account?.id)"
+        :has-saved-independent-grant="hasSavedIndependentGrant"
+        :staged-grant-state="bpsGrantRemovalStaged ? 'removed' : 'none'"
+        :refreshing-grant="refreshingIndependentBPSGrant"
+        :runtime-state="bpsRuntimeState"
+        :groups="selectableGroups"
+        :proxies="proxies"
+        :candidate-models="bpsCandidateModels"
+        :can-sync-models="canSyncBPSModels"
+        :syncing-models="syncingBPSModels"
+        :validation-error="bpsValidationError"
+        @update:options="onUpdateBPSChannelOptions"
+        @attach-grant="showEmbeddedBPSReAuth = true"
+        @refresh-grant="handleRefreshIndependentBPSGrant"
+        @remove-grant="bpsGrantRemovalStaged = true"
+        @cancel-staged-grant="bpsGrantRemovalStaged = false"
+        @sync-models="handleSyncBPSModels"
       />
 
       <!-- OpenAI account upstream client fingerprint timezone (API Key + OAuth including BPS) -->
@@ -2684,8 +2711,9 @@
       </div>
 
       <div
-        v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token') && !isOpenAIBPS"
+        v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token') && !isSparkShadow"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
+        data-testid="edit-codex-cli-only-section"
       >
         <div class="flex items-center justify-between">
           <div>
@@ -2696,6 +2724,7 @@
           </div>
           <button
             type="button"
+            data-testid="edit-codex-cli-only-toggle"
             @click="codexCLIOnlyEnabled = !codexCLIOnlyEnabled"
             :class="[
               'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2',
@@ -2862,9 +2891,9 @@
         </p>
       </div>
 
-      <!-- 客户端指纹保护（OpenAI OAuth / setup-token / API Key；不含 shadow 与 Agent Identity） -->
+      <!-- 客户端指纹保护（OpenAI OAuth 含 BPS / setup-token / API Key；不含 shadow 与 Agent Identity） -->
       <CodexPrivacyModeField
-        v-if="codexPrivacyEligible && !isOpenAIBPS"
+        v-if="codexPrivacyEligible"
         ref="codexPrivacyFieldRef"
         :enabled="codexPrivacyEnabled"
         :conflicts="codexPrivacyConflicts"
@@ -3624,6 +3653,15 @@
     @confirm="handleMixedChannelConfirm"
     @cancel="handleMixedChannelCancel"
   />
+
+  <!-- Embedded ReAuth Modal for attaching/reauthorizing the independent Excel BPS OAuth grant -->
+  <ReAuthAccountModal
+    :show="showEmbeddedBPSReAuth"
+    :account="effectiveAccount"
+    initial-grant-target="excel"
+    @close="showEmbeddedBPSReAuth = false"
+    @reauthorized="handleEmbeddedBPSGrantReauthorized"
+  />
 </template>
 
 <script setup lang="ts">
@@ -3641,15 +3679,28 @@ import {
 import CodexPrivacyModeField from './CodexPrivacyModeField.vue'
 import OpenAIBPSOptionsSection from './OpenAIBPSOptionsSection.vue'
 import UpstreamClientTimezoneField from './UpstreamClientTimezoneField.vue'
-import { OPENAI_EXCEL_OAUTH_CLIENT_ID, isOpenAIBPSAccount } from '@/utils/openaiOAuthClient'
+import ReAuthAccountModal from '@/components/admin/account/ReAuthAccountModal.vue'
 import {
-  DEFAULT_OPENAI_BPS_OPTIONS,
-  applyOpenAIBPSOptions,
+  OPENAI_EXCEL_BPS_CREDENTIALS_KEY,
+  OPENAI_EXCEL_OAUTH_CLIENT_ID,
+  hasIndependentOpenAIBPSGrant,
+  isNativeOpenAIOAuthEligibleForBPSGrant,
+  isOpenAIBPSAccount
+} from '@/utils/openaiOAuthClient'
+import {
+  DEFAULT_OPENAI_BPS_CHANNEL_OPTIONS,
+  applyOpenAIBPSChannelOptions,
+  filterActiveBPSProxies,
+  filterEligibleBPSTargetGroups,
   hasExplicitOpenAIBPSModels,
+  inspectOpenAIBPSAccountState,
   mergeRecommendedBPSMappings,
   mergeRecommendedBPSWhitelist,
-  readOpenAIBPSOptions,
-  type OpenAIBPSHostedToolsPolicy
+  normalizeOpenAIBPSModels,
+  readOpenAIBPSChannelOptions,
+  validateOpenAIBPSChannelOptions,
+  type OpenAIBPSChannelOptions,
+  type OpenAIBPSValidationErrorCode
 } from '@/utils/openaiBPS'
 import {
   applyUpstreamClientTimezone,
@@ -3798,15 +3849,50 @@ const selectableGroups = computed(() => {
 // Spark 影子账号(parent_account_id 非空):代理恒继承母账号,不可独立编辑(外审 B/P1),
 // 故隐藏代理选择器。
 const isSparkShadow = computed(() => props.account?.parent_account_id != null)
-// Ordinary openai/oauth account saved with the official Excel client_id: BPS only.
-// Codex identity, native WebSocket, Codex CLI-only, hosted image tool, passthrough and
-// compact settings do not apply to it and are not shown.
+const localGrantAccountOverride = ref<Account | null>(null)
+const effectiveAccount = computed<Account | null>(() => {
+  if (
+    localGrantAccountOverride.value &&
+    props.account &&
+    localGrantAccountOverride.value.id === props.account.id
+  ) {
+    return localGrantAccountOverride.value
+  }
+  return props.account
+})
+
+// Ordinary openai/oauth account saved with the official Excel client_id: BPS-only.
+// Native Codex WS/passthrough/namespace/fingerprint-convergence/compact settings stay hidden on BPS-only,
+// while local CLI-only and fingerprint privacy apply to BPS-only too.
 const isOpenAIBPS = computed(() =>
-  isOpenAIBPSAccount(props.account as { platform?: string; type?: string; credentials?: Record<string, unknown> | null } | null)
+  isOpenAIBPSAccount(
+    effectiveAccount.value as {
+      platform?: string
+      type?: string
+      credentials?: Record<string, unknown> | null
+    } | null
+  )
 )
+const isEligibleNativeOpenAIOAuth = computed(() =>
+  isNativeOpenAIOAuthEligibleForBPSGrant(effectiveAccount.value)
+)
+const showOpenAIBPSSection = computed(
+  () => isOpenAIBPS.value || isEligibleNativeOpenAIOAuth.value
+)
+const hasSavedIndependentGrant = computed(() =>
+  hasIndependentOpenAIBPSGrant(effectiveAccount.value)
+)
+const bpsGrantRemovalStaged = ref(false)
+const effectiveHasIndependentGrant = computed(
+  () => hasSavedIndependentGrant.value && !bpsGrantRemovalStaged.value
+)
+const showEmbeddedBPSReAuth = ref(false)
+const refreshingIndependentBPSGrant = ref(false)
+const syncedBPSModels = ref<string[]>([])
+
 const openaiBPSIdentity = computed(() => {
-  const creds = (props.account?.credentials as Record<string, unknown> | undefined) || {}
-  const extra = (props.account?.extra as Record<string, unknown> | undefined) || {}
+  const creds = (effectiveAccount.value?.credentials as Record<string, unknown> | undefined) || {}
+  const extra = (effectiveAccount.value?.extra as Record<string, unknown> | undefined) || {}
   const text = (value: unknown) => (typeof value === 'string' ? value.trim() : '')
   return {
     workspace: text(creds.chatgpt_account_id),
@@ -3814,9 +3900,81 @@ const openaiBPSIdentity = computed(() => {
   }
 })
 
-// BPS dedicated options & OpenAI upstream client fingerprint timezone state
-const bpsSkipHistoricalEncrypted = ref<boolean>(DEFAULT_OPENAI_BPS_OPTIONS.skipHistoricalEncrypted)
-const bpsHostedToolsPolicy = ref<OpenAIBPSHostedToolsPolicy>(DEFAULT_OPENAI_BPS_OPTIONS.hostedToolsPolicy)
+// BPS dedicated channel options & OpenAI upstream client fingerprint timezone state
+const bpsChannelOptions = ref<OpenAIBPSChannelOptions>({
+  ...DEFAULT_OPENAI_BPS_CHANNEL_OPTIONS,
+  models: [],
+  sessionProxyIds: []
+})
+const bpsValidationError = ref<OpenAIBPSValidationErrorCode | null>(null)
+const bpsRuntimeState = computed(() => inspectOpenAIBPSAccountState(effectiveAccount.value))
+const bpsCandidateModels = computed(() =>
+  normalizeOpenAIBPSModels([
+    ...syncedBPSModels.value,
+    ...allowedModels.value,
+    ...modelMappings.value.map((row) => row.to)
+  ])
+)
+
+const onUpdateBPSChannelOptions = (next: OpenAIBPSChannelOptions) => {
+  bpsChannelOptions.value = next
+  bpsValidationError.value = null
+}
+
+const onBPSUpstreamSyncedModels = (models: string[]) => {
+  syncedBPSModels.value = normalizeOpenAIBPSModels([...syncedBPSModels.value, ...models])
+}
+
+const syncingBPSModels = ref(false)
+const canSyncBPSModels = computed(() =>
+  Boolean(props.account?.id) &&
+  (isOpenAIBPS.value || (hasSavedIndependentGrant.value && !bpsGrantRemovalStaged.value))
+)
+
+const handleSyncBPSModels = async () => {
+  if (!props.account?.id || syncingBPSModels.value) return
+  syncingBPSModels.value = true
+  try {
+    const result = await adminAPI.accounts.syncUpstreamModels(props.account.id, 'excel')
+    const models = normalizeOpenAIBPSModels(result.models)
+    if (models.length === 0) {
+      appStore.showWarning(t('admin.accounts.syncUpstreamModelsEmpty'))
+      return
+    }
+    syncedBPSModels.value = normalizeOpenAIBPSModels([...syncedBPSModels.value, ...models])
+    appStore.showSuccess(t('admin.accounts.syncUpstreamModelsSuccess', { count: models.length }))
+  } catch (error) {
+    const message = extractApiErrorMessage(error, t('admin.accounts.syncUpstreamModelsFailed'))
+    appStore.showError(t('admin.accounts.syncUpstreamModelsError', { message }))
+  } finally {
+    syncingBPSModels.value = false
+  }
+}
+
+const handleEmbeddedBPSGrantReauthorized = (updatedAccount: Account) => {
+  localGrantAccountOverride.value = updatedAccount
+  bpsGrantRemovalStaged.value = false
+  showEmbeddedBPSReAuth.value = false
+  emit('updated', updatedAccount)
+}
+
+const handleRefreshIndependentBPSGrant = async () => {
+  if (!props.account?.id || refreshingIndependentBPSGrant.value) return
+  refreshingIndependentBPSGrant.value = true
+  try {
+    const refreshed = await adminAPI.accounts.refreshOpenAIAccountToken(props.account.id, 'excel')
+    localGrantAccountOverride.value = refreshed
+    bpsGrantRemovalStaged.value = false
+    appStore.showSuccess(t('admin.accounts.bpsAccount.grant.refreshSuccess'))
+    emit('updated', refreshed)
+  } catch (error) {
+    appStore.showError(
+      extractApiErrorMessage(error, t('admin.accounts.bpsAccount.grant.refreshFailed'))
+    )
+  } finally {
+    refreshingIndependentBPSGrant.value = false
+  }
+}
 const upstreamClientTimezoneMode = ref<UpstreamClientTimezoneMode>('off')
 const upstreamClientTimezoneManual = ref<string>('')
 const upstreamClientTimezoneValidationError = ref<UpstreamClientTimezoneError | null>(null)
@@ -4601,7 +4759,9 @@ const codexFingerprintModeOptions = computed(() => [
 // setup-token / API Key 没有这些控件，按已保存的 extra 校验（与后端 validateCodexPrivacyConfig 一致），
 // 用户点击修正后才在保存时移除，绝不静默改动。
 const codexPrivacyEligible = computed(() => isCodexPrivacyEligible(props.account))
-const codexPrivacyHasConflictControls = computed(() => props.account?.type === 'oauth')
+const codexPrivacyHasConflictControls = computed(
+  () => props.account?.type === 'oauth' && !isOpenAIBPS.value
+)
 const codexPrivacyHiddenFingerprint = ref<CodexFingerprintMode>('off')
 const codexPrivacyHiddenPreserveClient = ref(false)
 const codexPrivacyCleanupLegacy = ref(false)
@@ -4613,7 +4773,6 @@ const {
   serverError: codexPrivacyServerError,
   reset: resetCodexPrivacy,
   load: loadCodexPrivacy,
-  setEnabled: setCodexPrivacyEnabled,
   toggle: toggleCodexPrivacy,
   validateBeforeSave: validateCodexPrivacyBeforeSave,
   writeTo: writeCodexPrivacyTo,
@@ -4644,10 +4803,18 @@ function resetCodexPrivacyState() {
   codexPrivacyCleanupLegacy.value = false
 }
 
-function loadCodexPrivacyState(account: { type?: string; extra?: unknown }) {
+function loadCodexPrivacyState(account: {
+  platform?: string
+  type?: string
+  credentials?: Record<string, unknown> | null
+  extra?: unknown
+}) {
   const extra = (account.extra as Record<string, unknown> | undefined) || undefined
   loadCodexPrivacy(extra)
-  if (account.type !== 'oauth') {
+  if (isOpenAIBPSAccount(account)) {
+    codexPrivacyHiddenFingerprint.value = 'off'
+    codexPrivacyHiddenPreserveClient.value = false
+  } else if (account.type !== 'oauth') {
     codexPrivacyHiddenFingerprint.value = effectiveCodexFingerprintMode(extra?.codex_fingerprint_mode)
     codexPrivacyHiddenPreserveClient.value = extra?.codex_identity_mode === 'preserve_client'
   }
@@ -5133,8 +5300,15 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   restoreCodexIdentityDefault()
   resetCodexPrivacyState()
   codexImageToolMode.value = 'inherit'
-  bpsSkipHistoricalEncrypted.value = DEFAULT_OPENAI_BPS_OPTIONS.skipHistoricalEncrypted
-  bpsHostedToolsPolicy.value = DEFAULT_OPENAI_BPS_OPTIONS.hostedToolsPolicy
+  bpsChannelOptions.value = {
+    ...DEFAULT_OPENAI_BPS_CHANNEL_OPTIONS,
+    models: [],
+    sessionProxyIds: []
+  }
+  bpsValidationError.value = null
+  bpsGrantRemovalStaged.value = false
+  localGrantAccountOverride.value = null
+  syncedBPSModels.value = []
   upstreamClientTimezoneMode.value = 'off'
   upstreamClientTimezoneManual.value = ''
   upstreamClientTimezoneValidationError.value = null
@@ -5211,25 +5385,31 @@ const syncFormFromAccount = (newAccount: Account | null) => {
     upstreamClientTimezoneMode.value = tzState.mode
     upstreamClientTimezoneManual.value = tzState.timezone
     savedUpstreamClientTimezoneState.value = { ...tzState }
-    // BPS (official Excel login) accounts: Codex-only and native-transport settings are
-    // hidden. Hold them at their defaults so a save applies each key's existing "off"
-    // semantics (WS mode written as off, CLI-only false only if it was on, privacy
-    // written as off only if it was stored, the rest removed) and never re-saves a
-    // stale native option. Compact settings are hidden but kept as stored; other extras
-    // and credentials are untouched.
-    if (isOpenAIBPSAccount(newAccount as { platform?: string; type?: string; credentials?: Record<string, unknown> | null })) {
-      const bpsOpts = readOpenAIBPSOptions(extra)
-      bpsSkipHistoricalEncrypted.value = bpsOpts.skipHistoricalEncrypted
-      bpsHostedToolsPolicy.value = bpsOpts.hostedToolsPolicy
+    // BPSchannel options load for both BPS-only and eligible native OpenAI OAuth accounts.
+    // On BPS-only accounts, native-only transport/identity controls stay hidden and held at
+    // off defaults, while local CLI-only (`codex_cli_only`) and fingerprint privacy
+    // (`codex_privacy_mode`) apply to BPS-only too and preserve their saved values.
+    const accountIsBPSOnly = isOpenAIBPSAccount(
+      newAccount as {
+        platform?: string
+        type?: string
+        credentials?: Record<string, unknown> | null
+      }
+    )
+    const accountEligibleNative = isNativeOpenAIOAuthEligibleForBPSGrant(newAccount)
+    if (accountIsBPSOnly || accountEligibleNative) {
+      bpsChannelOptions.value = readOpenAIBPSChannelOptions(extra, {
+        isBPSOnly: accountIsBPSOnly,
+        hasIndependentGrant: hasIndependentOpenAIBPSGrant(newAccount)
+      })
+    }
+    if (accountIsBPSOnly) {
       openaiPassthroughEnabled.value = false
       openaiFlattenNamespacesEnabled.value = false
       openaiOAuthResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
-      codexCLIOnlyEnabled.value = false
-      codexCLIOnlyAppServerEnabled.value = false
       codexImageToolMode.value = 'inherit'
       codexFingerprintMode.value = 'off'
       restoreCodexIdentityDefault()
-      setCodexPrivacyEnabled(false)
       autoPause5hThreshold.value = null
       autoPause7dThreshold.value = null
       autoPause5hDisabled.value = false
@@ -6208,6 +6388,21 @@ const handleSubmit = async () => {
       return
     }
   }
+  if (showOpenAIBPSSection.value) {
+    const eligibleGroupIds = new Set(
+      filterEligibleBPSTargetGroups(selectableGroups.value).map((g) => g.id)
+    )
+    const activeProxyIds = new Set(filterActiveBPSProxies(props.proxies).map((p) => p.id))
+    const bpsErr = validateOpenAIBPSChannelOptions(bpsChannelOptions.value, {
+      eligibleGroupIds,
+      activeProxyIds
+    })
+    bpsValidationError.value = bpsErr
+    if (bpsErr) {
+      appStore.showError(t(`admin.accounts.bpsAccount.options.validation.${bpsErr}`))
+      return
+    }
+  }
 	if (autoResetCreditEnabled.value) {
 		const thresholds = [autoResetCredit5hThreshold.value, autoResetCredit7dThreshold.value]
 		if (thresholds.some((value) => !Number.isFinite(value) || value < 0.1 || value > 100)) {
@@ -6545,9 +6740,14 @@ const handleSubmit = async () => {
       const newCredentials: Record<string, unknown> = { ...currentCredentials }
       if (props.account.platform === 'openai') {
         applyOpenAIModelMappingCredentials(newCredentials)
-        // A BPS account keeps its Excel login client; editing never converts it.
+        // A BPS-only account keeps its Excel login client; editing never converts it.
         if (isOpenAIBPS.value && !isSparkShadow.value) {
           newCredentials.client_id = OPENAI_EXCEL_OAUTH_CLIENT_ID
+        }
+        // Removing an independent BPS grant explicitly sends `excel_bps_credentials: null`
+        // without touching primary native OAuth credentials.
+        if (isEligibleNativeOpenAIOAuth.value && bpsGrantRemovalStaged.value) {
+          newCredentials[OPENAI_EXCEL_BPS_CREDENTIALS_KEY] = null
         }
       } else {
         const modelMapping = buildModelRestrictionMapping()
@@ -6927,15 +7127,14 @@ const handleSubmit = async () => {
         }
       }
 
-      applyOpenAIBPSOptions(
+      applyOpenAIBPSChannelOptions(
         newExtra,
-        isOpenAIBPS.value
-          ? {
-              skipHistoricalEncrypted: bpsSkipHistoricalEncrypted.value,
-              hostedToolsPolicy: bpsHostedToolsPolicy.value
-            }
-          : null,
-        currentExtra
+        showOpenAIBPSSection.value ? bpsChannelOptions.value : null,
+        currentExtra,
+        {
+          isBPSOnly: isOpenAIBPS.value,
+          hasIndependentGrant: effectiveHasIndependentGrant.value
+        }
       )
       if (!isSparkShadow.value) {
         applyUpstreamClientTimezone(

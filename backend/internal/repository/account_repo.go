@@ -553,6 +553,19 @@ func (r *accountRepository) updateLockedAccount(
 	if err != nil {
 		return nil, err
 	}
+	// A BPS grant may have been attached or rotated after the caller loaded
+	// its snapshot. Inspect the current row even when that snapshot has none.
+	if account.IsOpenAI() {
+		current, readErr := client.Account.Get(ctx, account.ID)
+		if readErr != nil {
+			return nil, readErr
+		}
+		extra = service.MergeExcelBPSServerMarkers(extra, current.Extra)
+		service.PreserveExcelBPSIndependentGrant(account, current.Credentials)
+		if err := service.ValidateExcelBPSIndependentWorkspace(account); err != nil {
+			return nil, err
+		}
+	}
 	account.Extra = extra
 	if err := normalizeAccountCodexIdentity(ctx, client, account); err != nil {
 		return nil, err
@@ -918,7 +931,8 @@ func (r *accountRepository) UpdateCredentials(ctx context.Context, id int64, cre
 	result, err := client.ExecContext(ctx, `
 		UPDATE accounts
 		SET
-			credentials = $1::jsonb,
+			credentials = CASE WHEN platform='openai' AND type='oauth' AND credentials ? 'excel_bps_credentials'
+ THEN ($1::jsonb - 'excel_bps_credentials') || jsonb_build_object('excel_bps_credentials',credentials->'excel_bps_credentials') ELSE $1::jsonb END,
 			extra = CASE
 				-- 正确性依赖（非防御）：OpenCode 分支必须先于 Ollama 分支求值。两分支
 				-- 的 WHEN 并不互斥：Ollama 分支的守卫是宽谓词——NOT(ollamaMatch(old)

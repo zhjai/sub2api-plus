@@ -488,6 +488,16 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 }
 
 func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccountInput) (*Account, error) {
+	bpsCandidate := &Account{Platform: input.Platform, Type: input.Type, Credentials: input.Credentials, Extra: input.Extra}
+	if err := ValidateExcelBPSIndependentGrant(bpsCandidate); err != nil {
+		return nil, err
+	}
+	ApplyExcelBPSDefaults(bpsCandidate)
+	input.Extra = StripExcelBPSServerMarkers(bpsCandidate.Extra)
+	if err := s.validateExcelBPSGroupOptions(ctx, bpsCandidate); err != nil {
+		return nil, err
+	}
+
 	if a := (&Account{Platform: input.Platform, Type: input.Type, Credentials: input.Credentials}); a.IsExcelOAuth() {
 		if err := validateExcelOAuthAccount(a, a.GetOpenAIAccessToken()); err != nil {
 			return nil, err
@@ -608,6 +618,7 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		return nil, err
 	}
 	previousCodexIdentity := *account
+	_, account.excelBPSGrantExplicit = input.Credentials[ExcelBPSCredentialsKey]
 	if account.IsExcelOAuth() && input.Type != "" && input.Type != AccountTypeOAuth {
 		return nil, infraerrors.BadRequest("OPENAI_EXCEL_OAUTH_INVALID_GRANT", "BPS login profile cannot be changed; create a separate account for another login client")
 	}
@@ -621,6 +632,13 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		}
 		if input.Type != "" {
 			candidate.Type = input.Type
+		}
+		if _, changesBPSGrant := input.Credentials[ExcelBPSCredentialsKey]; changesBPSGrant {
+			if err := ValidateExcelBPSIndependentGrant(&candidate); err != nil {
+				return nil, err
+			}
+		} else if err := ValidateExcelBPSIndependentWorkspace(&candidate); err != nil {
+			return nil, err
 		}
 		if account.IsExcelOAuth() && !candidate.IsExcelOAuth() {
 			return nil, infraerrors.BadRequest("OPENAI_EXCEL_OAUTH_INVALID_GRANT", "BPS login profile cannot be changed; create a separate account for another login client")
@@ -640,6 +658,13 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	}
 	var normalizedExtra map[string]any
 	if input.Extra != nil {
+		candidate := *account
+		candidate.Extra = input.Extra
+		if err := s.validateExcelBPSGroupOptions(ctx, &candidate); err != nil {
+			return nil, err
+		}
+		input.Extra = MergeExcelBPSServerMarkers(input.Extra, account.Extra)
+
 		normalizedExtra, err = normalizeOpenAILongContextBillingUpdateExtra(account, input)
 		if err != nil {
 			return nil, err
@@ -1045,6 +1070,11 @@ func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, upd
 // BulkUpdateAccounts updates multiple accounts in one request.
 // It merges credentials/extra keys instead of overwriting the whole object.
 func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUpdateAccountsInput) (*BulkUpdateAccountsResult, error) {
+	input.Extra = StripExcelBPSServerMarkers(input.Extra)
+	if err := s.validateExcelBPSGroupOptions(ctx, &Account{Extra: input.Extra}); err != nil {
+		return nil, err
+	}
+
 	if err := ValidateCodexIdentityExtraPatch(input.Extra); err != nil {
 		return nil, err
 	}

@@ -4,6 +4,7 @@ import { useAppStore } from '@/stores/app'
 import { adminAPI } from '@/api/admin'
 import { extractApiErrorMessage, extractI18nErrorMessage } from '@/utils/apiError'
 import {
+  OPENAI_EXCEL_OAUTH_CLIENT_ID,
   isOpenAIExcelClientId,
   readOAuthStateFromAuthUrl,
   tokenMatchesOpenAIOAuthClient,
@@ -159,7 +160,8 @@ export function useOpenAIOAuth() {
   const validateRefreshToken = async (
     refreshToken: string,
     proxyId?: number | null,
-    clientId?: string
+    clientId?: string,
+    profile?: OpenAIOAuthClient
   ): Promise<OpenAITokenInfo | null> => {
     if (!refreshToken.trim()) {
       error.value = 'Missing refresh token'
@@ -171,15 +173,27 @@ export function useOpenAIOAuth() {
 
     try {
       // Use dedicated refresh-token endpoint
-      const tokenInfo = await adminAPI.accounts.refreshOpenAIToken(
-        refreshToken.trim(),
-        proxyId,
-        `${endpointPrefix}/refresh-token`,
-        clientId
-      )
+      const tokenInfo = await (profile === 'excel'
+        ? adminAPI.accounts.refreshOpenAIToken(
+            refreshToken.trim(),
+            proxyId,
+            `${endpointPrefix}/refresh-token`,
+            clientId,
+            'excel'
+          )
+        : adminAPI.accounts.refreshOpenAIToken(
+            refreshToken.trim(),
+            proxyId,
+            `${endpointPrefix}/refresh-token`,
+            clientId
+          ))
       const info = tokenInfo as OpenAITokenInfo
       // An Excel refresh must stay on the Excel client.
-      if (isOpenAIExcelClientId(clientId) && info?.client_id && !isOpenAIExcelClientId(info.client_id)) {
+      if (
+        (isOpenAIExcelClientId(clientId) || profile === 'excel') &&
+        info?.client_id &&
+        !isOpenAIExcelClientId(info.client_id)
+      ) {
         error.value = t('admin.accounts.oauth.openai.bps.clientMismatch')
         appStore.showError(error.value)
         return null
@@ -245,6 +259,15 @@ export function useOpenAIOAuth() {
     return creds
   }
 
+  // Build normalized nested OAuth map for `credentials.excel_bps_credentials` (no model_mapping or extra fields).
+  const buildIndependentExcelBPSCredentials = (
+    tokenInfo: OpenAITokenInfo
+  ): Record<string, unknown> => {
+    const nested = buildCredentials(tokenInfo, OPENAI_EXCEL_OAUTH_CLIENT_ID)
+    nested.client_id = OPENAI_EXCEL_OAUTH_CLIENT_ID
+    return nested
+  }
+
   // Build extra info from token response
   const buildExtraInfo = (tokenInfo: OpenAITokenInfo): Record<string, string> | undefined => {
     const extra: Record<string, string> = {}
@@ -274,6 +297,7 @@ export function useOpenAIOAuth() {
     exchangeAuthCode,
     validateRefreshToken,
     buildCredentials,
+    buildIndependentExcelBPSCredentials,
     buildExtraInfo
   }
 }

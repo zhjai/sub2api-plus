@@ -1529,10 +1529,15 @@ export interface OpenAIBPSLocalUsage {
   seven_day?: WindowStats | null
 }
 
+export type OpenAIBPSQuotaSource = 'chatgpt_wham_usage' | 'account_codex_snapshot'
+
 export interface AccountUsageInfo {
   source?: 'passive' | 'active' | 'bps_local'
   updated_at: string | null
   bps_local_usage?: OpenAIBPSLocalUsage | null
+  quota_source?: OpenAIBPSQuotaSource | string | null
+  quota_updated_at?: string | null
+  quota_refresh_error?: string | null
   five_hour: UsageProgress | null
   seven_day: UsageProgress | null
   seven_day_sonnet: UsageProgress | null

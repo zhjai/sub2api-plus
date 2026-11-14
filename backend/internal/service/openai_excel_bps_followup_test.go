@@ -36,26 +36,39 @@ func (r excelBPSCatalogAccountRepo) GetByID(context.Context, int64) (*Account, e
 	return r.account, nil
 }
 
-func TestOpenAIExcelBPSLocalModelDiscovery(t *testing.T) {
+type excelBPSDiscoveryRepo struct {
+	splitCodexModelsAccountRepo
+	account *Account
+}
+
+func (r excelBPSDiscoveryRepo) GetByID(context.Context, int64) (*Account, error) {
+	return r.account, nil
+}
+
+func TestOpenAIExcelBPSLiveModelDiscovery(t *testing.T) {
 	a := excelBPSAccount(t)
 	a.Status, a.Schedulable = StatusActive, true
-	a.Credentials["model_mapping"] = map[string]any{"public-astra": "gpt-6-astra"}
-	upstream := &httpUpstreamRecorder{}
+	a.Credentials["model_mapping"] = map[string]any{"public-astra": "gpt-6-astra", "missing": "gpt-99"}
+	upstream := &httpUpstreamRecorder{resp: excelBPSMockResponse(200, `{"allowed":true,"model_catalog":{"models":[{"id":"gpt-6-astra","efforts":[{"value":"high"}]}]}}`)}
 	svc := openAIClientToolsTestService(upstream)
-	svc.accountRepo = splitCodexModelsAccountRepo{catalog: map[int64][]Account{77: {*a}}}
-	_, err := svc.FetchOpenAIModelsList(context.Background(), a)
-	require.Error(t, err, "live discovery must not masquerade as configured local models")
-	picker, err := (&AccountTestService{openaiGatewayService: svc}).FetchOpenAIAccountModels(context.Background(), a)
+	svc.accountRepo = excelBPSDiscoveryRepo{splitCodexModelsAccountRepo: splitCodexModelsAccountRepo{catalog: map[int64][]Account{77: {*a}}}, account: a}
+	raw, err := svc.FetchOpenAIModelsList(context.Background(), a)
+	require.NoError(t, err)
+	require.Equal(t, "gpt-6-astra", gjson.GetBytes(raw.Body, "data.0.id").String())
+	tests := &AccountTestService{accountRepo: excelBPSCatalogAccountRepo{account: a}, openaiGatewayService: svc}
+	picker, err := tests.FetchOpenAIAccountModels(context.Background(), a)
 	require.NoError(t, err)
 	require.Len(t, picker, 1)
-	require.Equal(t, "public-astra", picker[0].ID, "BPS aliases must not be projected twice")
-	// Evaluation preflight uses configured BPS models without live discovery.
-	a.Credentials["model_mapping"] = map[string]any{"gpt-6-astra": "gpt-6-astra"}
-	eval := &AccountTestService{accountRepo: excelBPSCatalogAccountRepo{account: a}, openaiGatewayService: svc}
-	target, err := eval.ResolveOpenAIEvalTarget(context.Background(), a.ID, "gpt-6-astra")
+	require.Equal(t, "public-astra", picker[0].ID)
+	target, err := tests.ResolveOpenAIEvalTarget(context.Background(), a.ID, "public-astra")
 	require.NoError(t, err)
-	require.Equal(t, "gpt-6-astra", target.RequestedModel)
-	a.Credentials["model_mapping"] = map[string]any{"public-astra": "gpt-6-astra"}
+	require.Equal(t, "gpt-6-astra", target.UpstreamModel)
+	_, err = tests.ResolveOpenAIEvalTarget(context.Background(), a.ID, "missing")
+	require.Error(t, err)
+	catalog, err := tests.SyncUpstreamModelCatalog(context.Background(), a)
+	require.NoError(t, err)
+	require.Equal(t, []string{"gpt-6-astra"}, catalog.Models)
+	require.Equal(t, []string{"high"}, catalog.Metadata["gpt-6-astra"].SupportedReasoningLevels)
 	group := &Group{ID: 77, Platform: PlatformOpenAI,
 		CodexModelsManifestConfig: GroupCodexModelsManifestConfig{Enabled: true, AccountIDs: []int64{a.ID}},
 		ModelAllowlist:            GroupModelAllowlist{Enabled: true, Models: []string{"public-astra"}}}
@@ -67,23 +80,13 @@ func TestOpenAIExcelBPSLocalModelDiscovery(t *testing.T) {
 	unchanged, _, err := svc.FetchPinnedOpenAIModelsList(context.Background(), group, 3, pinned.ETag)
 	require.NoError(t, err)
 	require.True(t, unchanged.NotModified)
-	require.Empty(t, upstream.requests)
-
-	t.Run("wildcard needs a concrete selection", func(t *testing.T) {
-		b := *excelBPSAccount(t)
-		b.Credentials["model_mapping"] = map[string]any{"gpt-*": "gpt-6-astra"}
-		_, err := buildExcelBPSModelsManifest(&b, nil)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "explicit model mappings")
-		manifest, err := buildExcelBPSModelsManifest(&b, &Group{ModelAllowlist: GroupModelAllowlist{Enabled: true, Models: []string{"gpt-6.1-sol"}}})
-		require.NoError(t, err)
-		require.Equal(t, "gpt-6.1-sol", gjson.GetBytes(manifest.Body, "models.0.slug").String())
-	})
-	// Native live discovery remains explicitly unsupported for BPS: the local
-	// catalog must never be mistaken for a fetched entitlement manifest.
-	_, err = svc.FetchCodexModelsManifest(context.Background(), a, "", "")
-	require.Error(t, err)
-	require.Empty(t, upstream.requests)
+	manifest, err := svc.FetchGroupAccountCodexModelsManifest(context.Background(), a, group, "")
+	require.NoError(t, err)
+	require.Equal(t, "public-astra", gjson.GetBytes(manifest.Body, "models.0.slug").String())
+	require.Equal(t, "high", gjson.GetBytes(manifest.Body, "models.0.supported_reasoning_levels.0.effort").String())
+	require.False(t, gjson.GetBytes(manifest.Body, "models.0.prefer_websockets").Bool())
+	require.Len(t, upstream.requests, 1)
+	require.Equal(t, "https://bps.openai.com/basispoints/api/responses/access?include_models=true", upstream.requests[0].URL.String())
 }
 
 func TestOpenAIExcelBPSCompositeManifestPolicy(t *testing.T) {

@@ -546,7 +546,8 @@ describe('AccountsView BPS row identity and bulk selection guards', () => {
     const dialog = wrapper.get('[data-test="real-bulk-dialog"]')
     expect(dialog.find('[data-testid="bulk-edit-bps-native-hidden-hint"]').exists()).toBe(true)
     expect(dialog.find('[data-testid="bulk-edit-incomplete-subtype-hint"]').exists()).toBe(false)
-    expect(dialog.find('#bulk-edit-openai-codex-cli-only-enabled').exists()).toBe(false)
+    // Local CLI-only applies to both native Codex and BPS OAuth when subtype metadata is complete
+    expect(dialog.find('#bulk-edit-openai-codex-cli-only-enabled').exists()).toBe(true)
     expect(dialog.find('#bulk-edit-openai-ws-mode-enabled').exists()).toBe(false)
     expect(dialog.find('#bulk-edit-openai-passthrough-enabled').exists()).toBe(false)
   })

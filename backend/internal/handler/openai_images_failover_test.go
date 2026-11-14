@@ -201,3 +201,117 @@ func TestOpenAIGatewayHandlerImages_ServerErrorFailsOverAndReturnsClearErrorWhen
 	require.Equal(t, "failover", events[0].Kind)
 	require.Equal(t, "failover", events[1].Kind)
 }
+
+func TestOpenAIGatewayHandlerImages_UnsupportedBPSParametersSelectNativeBeforeSend(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	groupID := int64(3130)
+	accounts := []service.Account{
+		{
+			ID:          1,
+			Name:        "image-account-1",
+			Platform:    service.PlatformOpenAI,
+			Type:        service.AccountTypeOAuth,
+			Status:      service.StatusActive,
+			Schedulable: true,
+			Concurrency: 0,
+			Priority:    0,
+			Credentials: map[string]any{"access_token": "token-1", "client_id": "app_fnr0pYvVwwFDocDumLG3H2Bp", "model_mapping": map[string]any{"gpt-image-2": "gpt-image-2"}},
+		},
+		{
+			ID:          2,
+			Name:        "image-account-2",
+			Platform:    service.PlatformOpenAI,
+			Type:        service.AccountTypeOAuth,
+			Status:      service.StatusActive,
+			Schedulable: true,
+			Concurrency: 0,
+			Priority:    1,
+			Credentials: map[string]any{"access_token": "token-2", "model_mapping": map[string]any{"gpt-image-2": "gpt-image-1"}},
+		},
+	}
+	accountRepo := openAIImagesFailoverAccountRepo{accounts: accounts}
+	upstream := &openAIImagesFailoverHTTPUpstream{}
+	cfg := &config.Config{RunMode: config.RunModeSimple}
+	gatewayService := service.NewOpenAIGatewayService(
+		accountRepo,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		cfg,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		upstream,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	billingService := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
+	t.Cleanup(billingService.Stop)
+	concurrencyService := service.NewConcurrencyService(nil)
+	handler := NewOpenAIGatewayHandler(
+		gatewayService,
+		concurrencyService,
+		billingService,
+		service.NewAPIKeyService(nil, nil, nil, nil, nil, nil, cfg),
+		nil,
+		nil,
+		nil,
+		nil,
+		cfg,
+	)
+	handler.maxAccountSwitches = 10
+
+	body := []byte(`{"model":"gpt-image-2","prompt":"draw a cat","quality":"high","size":"1536x1024","background":"transparent"}`)
+	core, observedLogs := observer.New(zap.DebugLevel)
+	requestCtx := logger.IntoContext(context.Background(), zap.New(core))
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader(body)).WithContext(requestCtx)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = req
+	c.Set(string(middleware2.ContextKeyAPIKey), &service.APIKey{
+		ID:      99,
+		GroupID: &groupID,
+		Group: &service.Group{
+			ID:                   groupID,
+			AllowImageGeneration: true,
+		},
+		User: &service.User{ID: 100},
+	})
+	c.Set(string(middleware2.ContextKeyUser), middleware2.AuthSubject{UserID: 100, Concurrency: 0})
+
+	handler.Images(c)
+
+	accountSelectingLogs := observedLogs.FilterMessage("openai.images.account_selecting").All()
+	require.NotEmpty(t, accountSelectingLogs)
+	loggedFields := make(map[string]string)
+	for _, field := range accountSelectingLogs[0].Context {
+		loggedFields[field.Key] = field.String
+	}
+	require.Equal(t, "high", loggedFields["img_quality"])
+	require.Equal(t, "1536x1024", loggedFields["img_size"])
+	require.NotContains(t, loggedFields, "prompt")
+
+	require.Equal(t, []int64{2}, upstream.calls(), "unsupported BPS parameters must never reach BPS")
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+	require.Equal(t, "upstream_error", gjson.GetBytes(rec.Body.Bytes(), "error.type").String())
+	require.Equal(t, "Upstream service temporarily unavailable", gjson.GetBytes(rec.Body.Bytes(), "error.message").String())
+
+	rawEvents, ok := c.Get(service.OpsUpstreamErrorsKey)
+	require.True(t, ok)
+	events, ok := rawEvents.([]*service.OpsUpstreamErrorEvent)
+	require.True(t, ok)
+	require.Len(t, events, 1)
+	require.Equal(t, "failover", events[0].Kind)
+}

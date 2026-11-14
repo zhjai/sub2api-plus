@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/Wei-Shaw/sub2api/internal/service/basispoints"
@@ -26,29 +27,41 @@ func ValidateExcelBPSOptions(a *Account) error {
 	if value, exists := a.Extra[ExcelBPSHostedToolsPolicyKey]; exists && value != "omit" && value != "reject" {
 		return codexIdentityError("OPENAI_BPS_INVALID_OPTIONS", "BPS hosted tool policy must be omit or reject")
 	}
-	return nil
+	return ValidateExcelBPSAccountOptions(a)
 }
 
 func applyExcelBPSOptions(raw []byte, a *Account) ([]byte, error) {
+	return applyExcelBPSOptionsForContext(context.Background(), raw, a)
+}
+
+type excelBPSLastResortKey struct{}
+
+// WithExcelBPSLastResort is only for the pre-send router after it has proved
+// every complete compatible route structurally unavailable. Capacity/RPM/cache
+// errors do not establish that condition. It never changes the stored opt-in.
+func WithExcelBPSLastResort(ctx context.Context) context.Context {
+	return context.WithValue(ctx, excelBPSLastResortKey{}, true)
+}
+
+func applyExcelBPSOptionsForContext(ctx context.Context, raw []byte, a *Account) ([]byte, error) {
 	if err := ValidateExcelBPSOptions(a); err != nil {
 		return nil, err
 	}
-	if gjson.GetBytes(raw, "context_management.#").Int() > 0 {
-		return nil, codexIdentityError("OPENAI_BPS_COMPACTION_UNSUPPORTED", "BPS does not support native remote compaction; send expanded conversation history")
-	}
-	for _, item := range gjson.GetBytes(raw, "input").Array() {
-		if item.Get("type").String() == "compaction_trigger" {
-			return nil, codexIdentityError("OPENAI_BPS_COMPACTION_UNSUPPORTED", "BPS does not support native remote compaction; send expanded conversation history")
-		}
-	}
-	if a.Extra[ExcelBPSHistoricalEncryptedKey] == true {
+	lastResort, _ := ctx.Value(excelBPSLastResortKey{}).(bool)
+	if lastResort && a != nil && a.Extra[ExcelBPSHistoricalEncryptedKey] == true {
 		var err error
 		raw, err = basispoints.StripEncryptedContent(raw)
 		if err != nil {
 			return nil, err
 		}
 	}
-	if a.Extra[ExcelBPSHostedToolsPolicyKey] == "reject" && gjson.GetBytes(raw, "tool_choice").String() != "none" {
+	if capability := basispoints.InspectRequestCapabilities(raw); capability != nil {
+		omitHosted := lastResort && a != nil && a.Extra[ExcelBPSHostedToolsPolicyKey] == "omit" && capability.Code == "basispoints_hosted_capability" && capability.Param != "input.hosted_tool_dependency" && capability.Param != "tool_choice"
+		if !omitHosted {
+			return nil, capability
+		}
+	}
+	if a != nil && a.Extra[ExcelBPSHostedToolsPolicyKey] == "reject" && gjson.GetBytes(raw, "tool_choice").String() != "none" {
 		if err := basispoints.RejectUnsupportedHostedTools(raw); err != nil {
 			return nil, fmt.Errorf("BPS hosted tool policy: %w", err)
 		}

@@ -155,15 +155,14 @@ func TestDirectCallPreservesEncryptionMetadata(t *testing.T) {
 	}
 }
 
-func TestRelayDoesNotCopyWrapperEncryptionMetadata(t *testing.T) {
+func TestRelayRejectsEncryptedWrapperInsteadOfRelabeling(t *testing.T) {
 	_, bridge := mustPrepare(t, collaborationSource("spawn_agent"), "scope", nil)
 	native := nativeCall(object{"name": "collaboration.spawn_agent", "arguments": object{"message": "plain task"}})
 	native["encrypted_function_args"] = []any{"code"}
 	call, err := bridge.translateCall(native)
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || call != nil {
+		t.Fatal("genuinely encrypted transport cannot become a plaintext collaboration call")
 	}
-	requirePlaintextArguments(t, call)
 }
 
 func TestAgentCiphertextIsNeverGuessedAsPlaintext(t *testing.T) {

@@ -18,6 +18,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/service/basispoints"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -151,8 +152,11 @@ func TestExcelBPSForwardInlineImagesValidateUploadAndReuse(t *testing.T) {
 	// A later unsupported item/control must fail before the first upload.
 	invalid, _ := excelBPSImageBody(t, `,"previous_response_id":"resp_missing"`)
 	_, err, rec := excelBPSForwardForTest(t, s, a, invalid, "")
-	require.Error(t, err)
-	require.Equal(t, 400, rec.Code)
+	var capability *basispoints.ContextCapabilityError
+	require.ErrorAs(t, err, &capability)
+	require.Equal(t, "previous_response_id", capability.Param)
+	require.Empty(t, rec.Body.String(), "a pre-send routing result must leave the response unwritten")
+	require.NotContains(t, err.Error(), "resp_missing")
 	require.Equal(t, 5, transport.calls)
 }
 func TestExcelBPSForwardImageFailuresDoNotSendInference(t *testing.T) {
@@ -217,45 +221,28 @@ func TestExcelBPSForwardNoCorrectionForProviderErrorOrEOF(t *testing.T) {
 	}
 }
 
-func TestExcelBPSForwardEncryptedReasoningRecoveryIsExactAndBounded(t *testing.T) {
+func TestExcelBPSForwardEncryptedReasoningRejectionNeverDeletesStateAndResends(t *testing.T) {
 	for _, code := range []string{"invalid_encrypted_content", "invalid_request_error"} {
 		t.Run(code, func(t *testing.T) {
 			a := excelBPSAccount(t)
+			a.Extra = map[string]any{ExcelBPSHistoricalEncryptedKey: true}
 			s := excelBPSTestService(nil)
 			tr := &excelBPSFidelityTransport{httpUpstreamRecorder: new(httpUpstreamRecorder)}
 			tr.send = func(req *http.Request, raw []byte, n int) (*http.Response, error) {
-				if n == 1 {
-					require.Contains(t, string(raw), "OPAQUE_REASONING")
-					return excelBPSMockResponse(400, `{"error":{"code":"`+code+`"}}`), nil
-				}
-				require.NotContains(t, string(raw), "OPAQUE_REASONING")
+				require.Equal(t, 1, n, "post-send context-changing retries are forbidden")
+				require.Contains(t, string(raw), "OPAQUE_REASONING")
 				require.Contains(t, string(raw), "KEEP_SUMMARY")
 				require.Contains(t, string(raw), "KEEP_TASK")
-				require.Equal(t, "Bearer "+a.GetOpenAIAccessToken(), req.Header.Get("Authorization"))
-				return excelBPSMockResponse(200, excelBPSSuccessWire), nil
+				return excelBPSMockResponse(400, `{"error":{"code":"`+code+`"}}`), nil
 			}
 			s.httpUpstream = tr
 			body := []byte(`{"model":"gpt-6-astra","input":[{"type":"reasoning","encrypted_content":"OPAQUE_REASONING","summary":[{"type":"summary_text","text":"KEEP_SUMMARY"}]},{"type":"message","role":"user","content":"KEEP_TASK"}]}`)
 			_, err, rec := excelBPSForwardForTest(t, s, a, body, "")
-			if code == "invalid_encrypted_content" {
-				require.NoError(t, err, rec.Body.String())
-				require.Equal(t, 2, tr.calls)
-				require.Equal(t, "encrypted_reasoning_removed", rec.Header().Get("X-Sub2API-BPS-Recovery"))
-			} else {
-				require.Error(t, err)
-				require.Equal(t, 1, tr.calls)
-			}
+			require.Error(t, err)
+			require.Equal(t, 1, tr.calls)
+			require.Empty(t, rec.Header().Get("X-Sub2API-BPS-Recovery"))
 		})
 	}
-	// Repeating the exact rejection does not start a third request.
-	s := excelBPSTestService(nil)
-	tr := &excelBPSFidelityTransport{httpUpstreamRecorder: new(httpUpstreamRecorder), send: func(*http.Request, []byte, int) (*http.Response, error) {
-		return excelBPSMockResponse(400, `{"error":{"code":"invalid_encrypted_content"}}`), nil
-	}}
-	s.httpUpstream = tr
-	_, err, _ := excelBPSForwardForTest(t, s, excelBPSAccount(t), []byte(`{"model":"gpt-6-astra","input":[{"type":"reasoning","encrypted_content":"opaque"},{"role":"user","content":"hello"}]}`), "")
-	require.Error(t, err)
-	require.Equal(t, 2, tr.calls)
 }
 
 func TestExcelBPSForwardCorrectionPreservesProviderFailureUsageAndModelEvidence(t *testing.T) {
@@ -425,7 +412,7 @@ func TestExcelBPSAttachmentPrivacyBypassIsInternalAndScoped(t *testing.T) {
 }
 
 func TestExcelBPSLocalPreflightErrorsDoNotBecomeProviderFailures(t *testing.T) {
-	for _, scenario := range []string{"compact", "policy", "invalid_timezone_context", "timezone_probe"} {
+	for _, scenario := range []string{"policy", "invalid_timezone_context", "timezone_probe", "hosted", "reference"} {
 		t.Run(scenario, func(t *testing.T) {
 			s := excelBPSTestService(nil)
 			account := excelBPSAccount(t)
@@ -433,8 +420,10 @@ func TestExcelBPSLocalPreflightErrorsDoNotBecomeProviderFailures(t *testing.T) {
 			body := []byte(`{"model":"gpt-6-astra","input":"hello"}`)
 			target, status := "/v1/responses", http.StatusBadRequest
 			switch scenario {
-			case "compact":
-				target = "/v1/responses/compact"
+			case "hosted":
+				body = []byte(`{"model":"gpt-6-astra","input":"private task","tools":[{"type":"web_search"}]}`)
+			case "reference":
+				body = []byte(`{"model":"gpt-6-astra","input":[{"type":"item_reference","id":"private_ref"}]}`)
 			case "policy":
 				account.Extra["codex_cli_only"] = true
 				status = http.StatusForbidden
@@ -454,11 +443,28 @@ func TestExcelBPSLocalPreflightErrorsDoNotBecomeProviderFailures(t *testing.T) {
 				body = timezoneTestBody(t, "<environment_context><timezone>UTC</timezone></environment_context>", true)
 				status = http.StatusBadGateway
 			}
+			if scenario == "invalid_timezone_context" || scenario == "timezone_probe" {
+				// The shared fixture includes a native continuation ID; remove that
+				// independent capability issue to reach the intended timezone check.
+				var request map[string]any
+				require.NoError(t, json.Unmarshal(body, &request))
+				delete(request, "previous_response_id")
+				request["model"] = "gpt-6-astra"
+				body, _ = json.Marshal(request)
+			}
 			rec := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(rec)
 			c.Request = httptest.NewRequest("POST", target, bytes.NewReader(body))
 			result, err := s.Forward(context.Background(), c, account, body)
 			require.Nil(t, result)
+			if scenario == "hosted" || scenario == "reference" {
+				var capability *basispoints.ContextCapabilityError
+				require.ErrorAs(t, err, &capability)
+				require.False(t, c.Writer.Written())
+				require.Empty(t, rec.Body.String())
+				require.NotContains(t, err.Error(), "private")
+				return
+			}
 			var local *OpenAILocalBridgeError
 			require.ErrorAs(t, err, &local)
 			require.Equal(t, status, rec.Code)

@@ -119,6 +119,29 @@ func prepareWithCatalog(raw []byte, scope string, replay *ReplayCache, cache *Ca
 	if decode(raw, &source) != nil || source == nil {
 		return nil, nil, fmt.Errorf("invalid Basispoints request JSON")
 	}
+	if IsCompactionRequest(raw) {
+		// Catalog declarations remain available after compact, but the compact
+		// phase itself cannot emit executable tools. Validate/cache a declaration
+		// view separately so the empty execution catalog never erases the session.
+		input, _ := source["input"].([]any)
+		retained := make([]any, 0, len(input))
+		for _, entry := range input {
+			item, _ := entry.(object)
+			if text(item["type"]) != "compaction_trigger" {
+				retained = append(retained, entry)
+			}
+		}
+		source["input"] = retained
+		source["tool_choice"] = "auto"
+		catalogRaw, err := json.Marshal(source)
+		if err != nil {
+			return nil, nil, err
+		}
+		if _, _, err = prepareWithCatalog(catalogRaw, scope, replay, cache, nativeToolImages); err != nil {
+			return nil, nil, err
+		}
+		return prepare(raw, scope, replay, nativeToolImages)
+	}
 	if text(source["tool_choice"]) == "none" {
 		return prepare(raw, scope, replay, nativeToolImages)
 	}

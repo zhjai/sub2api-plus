@@ -28,6 +28,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/geminicli"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
@@ -171,9 +172,6 @@ func (s *AccountTestService) ResolveOpenAIEvalTarget(ctx context.Context, accoun
 		return nil, fmt.Errorf("load evaluation account: %w", err)
 	}
 
-	if !isOpenAIEvalSupportedModel(requestedModel) {
-		return nil, fmt.Errorf("model %q is not in the supported OpenAI text-model catalog", requestedModel)
-	}
 	if account == nil || !account.IsOpenAI() {
 		return nil, errors.New("evaluation supports OpenAI accounts only")
 	}
@@ -190,9 +188,21 @@ func (s *AccountTestService) ResolveOpenAIEvalTarget(ctx context.Context, accoun
 	if credential.Type != AccountTypeAPIKey && !credential.IsOpenAIOAuthLike() {
 		return nil, fmt.Errorf("unsupported OpenAI evaluation credential type %q", credential.Type)
 	}
+	if projected := account.BPSAccountForModel(requestedModel); projected != nil {
+		credential = projected
+	} else if account.IsExcelOAuth() {
+		return nil, errors.New("BPS route is disabled or not enabled for the requested model")
+	}
+	upstreamModel := normalizeOpenAIModelForUpstream(credential, account.GetMappedModel(requestedModel))
+	// Accept public aliases for known text models and provider-specific names
+	// mapped from a known text model. Neither mapping establishes availability:
+	// the account's authoritative catalog must still confirm the target below.
+	if !isOpenAIEvalSupportedModel(requestedModel) && !isOpenAIEvalSupportedModel(upstreamModel) {
+		return nil, fmt.Errorf("model %q (mapped to %q) is not in the supported OpenAI text-model catalog", requestedModel, upstreamModel)
+	}
 	var models *OpenAIModelsResponse
 	if credential.IsExcelOAuth() {
-		models, err = buildExcelBPSModelsList(account, nil)
+		models, err = s.openaiGatewayService.FetchExcelBPSModelsList(ctx, credential)
 	} else {
 		models, err = s.openaiGatewayService.FetchOpenAIModelsList(ctx, account)
 	}
@@ -207,16 +217,15 @@ func (s *AccountTestService) ResolveOpenAIEvalTarget(ctx context.Context, accoun
 	if err := json.Unmarshal(models.Body, &catalog); err != nil {
 		return nil, fmt.Errorf("decode account model catalog: %w", err)
 	}
-	upstreamModel := normalizeOpenAIModelForUpstream(credential, account.GetMappedModel(requestedModel))
 	available := false
 	for _, model := range catalog.Data {
-		if strings.EqualFold(strings.TrimSpace(model.ID), requestedModel) || strings.EqualFold(strings.TrimSpace(model.ID), upstreamModel) {
+		if strings.EqualFold(strings.TrimSpace(model.ID), upstreamModel) {
 			available = true
 			break
 		}
 	}
 	if !available {
-		return nil, fmt.Errorf("requested model %q is not available in the account catalog", requestedModel)
+		return nil, fmt.Errorf("requested model %q (mapped to %q) is not available in the account catalog", requestedModel, upstreamModel)
 	}
 
 	return &OpenAIEvalTarget{
@@ -291,6 +300,18 @@ func (s *AccountTestService) runOpenAIEvalSampleSingleSend(ctx context.Context, 
 	defer release()
 	requestCtx, cancel := context.WithTimeout(ctx, openAIEvalAttemptTimeoutFor(ctx))
 	defer cancel()
+	if credential.IsExcelOAuth() && s.openaiGatewayService != nil {
+		selected, lease, selectErr := s.openaiGatewayService.acquireExcelBPSSessionProxy(requestCtx, nil, credential, nil)
+		if selectErr != nil {
+			return nil, &OpenAIEvalRequestError{Code: "evaluation_proxy_unavailable", Message: selectErr.Error()}
+		}
+		defer func() { lease.release(resultErr) }()
+		credential = selected
+		routeAccount := *account
+		routeAccount.ProxyID, routeAccount.Proxy = selected.ProxyID, selected.Proxy
+		account = &routeAccount
+	}
+
 	isOAuth := credential.IsOpenAIOAuthLike()
 	useChatCompletions := !isOAuth && shouldForwardOpenAIResponsesViaRawChatCompletions(account)
 	useCodexTurn := !useChatCompletions
@@ -491,7 +512,7 @@ func (s *AccountTestService) runOpenAIEvalSampleSingleSend(ctx context.Context, 
 
 func (s *AccountTestService) doOpenAIEvalUpstream(req *http.Request, proxyURL string, account, credential *Account) (response *http.Response, err error) {
 	req, finishBudget := openAIEvalTrackPhysicalSend(req)
-	defer func() { finishBudget(response, err) }()
+	defer func() { err = finishBudget(response, err) }()
 	if _, specified := req.Context().Value(codexDiagnosticSourceKey{}).(string); !specified {
 		req = req.WithContext(withCodexDiagnosticSource(req.Context(), "manual_evaluation"))
 	}
@@ -596,28 +617,17 @@ func (s *AccountTestService) SetOpenAIGatewayService(gateway *OpenAIGatewayServi
 // It only fills picker-only gaps (local display-name fallbacks, OAuth image choices)
 // on its own copy; the shared catalog and its cache stay untouched.
 func (s *AccountTestService) FetchOpenAIAccountModels(ctx context.Context, account *Account) ([]openai.Model, error) {
-	if s == nil || (s.openaiGatewayService == nil && !account.IsExcelOAuth()) {
-		return nil, errors.New("OpenAI model discovery service is unavailable")
+	if s == nil || s.openaiGatewayService == nil {
+		return nil, infraerrors.New(http.StatusServiceUnavailable, "OPENAI_MODELS_DISCOVERY_UNAVAILABLE", "OpenAI model discovery service is unavailable")
 	}
 	// The shared discovery response is the raw upstream catalog. Project it
 	// through the account mapping before exposing it in the admin picker so
 	// configured aliases remain public names and unconfigured models stay out.
-	// A BPS local catalog is already public; projecting it again drops aliases.
-	var projectedBody []byte
-	var err error
-	if account.IsExcelOAuth() {
-		response, buildErr := buildExcelBPSModelsList(account, nil)
-		if buildErr != nil {
-			return nil, buildErr
-		}
-		projectedBody = response.Body
-	} else {
-		response, fetchErr := s.openaiGatewayService.FetchOpenAIModelsList(ctx, account)
-		if fetchErr != nil {
-			return nil, fetchErr
-		}
-		projectedBody, err = projectAccountModelsBody(response.Body, account, nil, false)
+	response, err := s.openaiGatewayService.FetchOpenAIModelsList(ctx, account)
+	if err != nil {
+		return nil, err
 	}
+	projectedBody, err := projectAccountModelsBody(response.Body, account, nil, false)
 	if err != nil {
 		return nil, fmt.Errorf("project OpenAI account models: %w", err)
 	}
@@ -1229,7 +1239,7 @@ func (s *AccountTestService) testBedrockAccountConnection(c *gin.Context, ctx co
 }
 
 // testOpenAIAccountConnection tests an OpenAI account's connection
-func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account *Account, modelID string, prompt string, mode string) error {
+func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account *Account, modelID string, prompt string, mode string) (testErr error) {
 	ctx := c.Request.Context()
 	mode = normalizeAccountTestMode(mode)
 
@@ -1237,6 +1247,38 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	testModelID := modelID
 	if testModelID == "" {
 		testModelID = openai.DefaultTestModel
+	}
+
+	// Image capability fallback must resolve before BPS-only proxy/token
+	// admission, just as it does for live image requests.
+	if mode != AccountTestModeCompact && isOpenAIImageModel(account.GetMappedModel(testModelID)) {
+		parsed := &OpenAIImagesRequest{Endpoint: openAIImagesGenerationsEndpoint, Model: testModelID, Prompt: prompt}
+		applyOpenAIImagesDefaults(parsed)
+		selected, routeErr := ResolveOpenAIImagesAccountRoute(account, parsed, "")
+		if routeErr != nil {
+			return s.sendErrorAndEnd(c, routeErr.Error())
+		}
+		account = selected
+	} else if projected := account.BPSAccountForModel(testModelID); projected != nil {
+		account = projected
+	} else if account.IsExcelOAuth() {
+		return s.sendErrorAndEnd(c, "BPS route is disabled or not enabled for the requested model")
+	}
+	if account.IsExcelOAuth() && s.openaiGatewayService != nil {
+		selected, lease, selectErr := s.openaiGatewayService.acquireExcelBPSSessionProxy(ctx, c, account, nil)
+		if selectErr != nil {
+			return s.sendErrorAndEnd(c, selectErr.Error())
+		}
+		defer func() { lease.release(testErr) }()
+		account = selected
+		token, _, tokenErr := s.openaiGatewayService.GetAccessToken(ctx, account)
+		if tokenErr != nil {
+			return s.sendErrorAndEnd(c, "BPS token unavailable")
+		}
+		snapshot := *account
+		snapshot.Credentials = shallowCopyMap(account.Credentials)
+		snapshot.Credentials["access_token"] = token
+		account = &snapshot
 	}
 
 	// Align test routing with gateway behavior: OpenAI accounts apply normal
@@ -1411,6 +1453,12 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 			}
 			c.Request = c.Request.WithContext(markAgentIdentityTaskRecoveryTried(ctx))
 			return s.testOpenAIAccountConnection(c, account, modelID, prompt, mode)
+		}
+		if credentialAccount.IsExcelOAuth() {
+			if s.openaiGatewayService != nil {
+				s.openaiGatewayService.handleOpenAIAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, body, upstreamTestModelID)
+			}
+			return s.sendErrorAndEnd(c, fmt.Sprintf("BPS API returned %d: %s", resp.StatusCode, string(body)))
 		}
 		if resp.StatusCode == http.StatusTooManyRequests {
 			s.reconcileOpenAI429State(ctx, account, resp.Header, body)
@@ -2742,7 +2790,7 @@ func (s *AccountTestService) testOpenAICompactConnection(c *gin.Context, account
 
 	resp, err := s.doOpenAIAccountTestUpstream(req, proxyURL, account, true)
 	if err != nil {
-		if s.accountRepo != nil {
+		if s.accountRepo != nil && !credentialAccount.IsExcelOAuth() {
 			updates := buildOpenAICompactProbeExtraUpdates(nil, nil, err, false, time.Now())
 			_ = s.accountRepo.UpdateExtra(ctx, account.ID, updates)
 			mergeAccountExtra(account, updates)
@@ -2763,7 +2811,7 @@ func (s *AccountTestService) testOpenAICompactConnection(c *gin.Context, account
 	}
 
 	compactionFound := openAICompactProbeFoundCompactionItem(body)
-	if s.accountRepo != nil {
+	if s.accountRepo != nil && !credentialAccount.IsExcelOAuth() {
 		updates := buildOpenAICompactProbeExtraUpdates(resp, body, nil, compactionFound, time.Now())
 		if codexUpdates, err := extractOpenAICodexProbeUpdates(resp); err == nil && len(codexUpdates) > 0 {
 			updates = mergeExtraUpdates(updates, codexUpdates)
@@ -2779,7 +2827,10 @@ func (s *AccountTestService) testOpenAICompactConnection(c *gin.Context, account
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		if resp.StatusCode == http.StatusUnauthorized && s.accountRepo != nil {
+		if credentialAccount.IsExcelOAuth() && s.openaiGatewayService != nil {
+			s.openaiGatewayService.handleOpenAIAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, body, testModelID)
+		}
+		if resp.StatusCode == http.StatusUnauthorized && s.accountRepo != nil && !credentialAccount.IsExcelOAuth() {
 			errMsg := fmt.Sprintf("Authentication failed (401): %s", string(body))
 			_ = s.accountRepo.SetError(ctx, account.ID, errMsg)
 		}
@@ -3575,6 +3626,9 @@ func (s *AccountTestService) testOpenAIImageAPIKey(c *gin.Context, ctx context.C
 
 // OAuth 图片测试与正式转发共用 Codex Images / Responses 分流规则。
 func (s *AccountTestService) testOpenAIImageOAuth(c *gin.Context, ctx context.Context, account *Account, modelID, prompt string) error {
+	if account.IsExcelOAuth() {
+		return s.testExcelBPSImageConnection(c, ctx, account, modelID, prompt)
+	}
 	credentialAccount := account
 	if account.IsShadow() {
 		resolved, err := resolveCredentialAccount(ctx, s.accountRepo, account)

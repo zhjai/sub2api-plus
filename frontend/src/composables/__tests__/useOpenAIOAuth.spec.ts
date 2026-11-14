@@ -69,6 +69,47 @@ describe('useOpenAIOAuth Excel profile', () => {
     expect(oauth.authClient.value).toBe('codex')
     expect(oauth.sessionId.value).toBe('')
   })
+
+  it('passes profile=excel when validating an independent Excel refresh token and builds nested Excel credentials', async () => {
+    vi.mocked(adminAPI.accounts.refreshOpenAIToken).mockResolvedValueOnce({
+      access_token: 'nested-excel-at',
+      refresh_token: 'nested-excel-rt',
+      id_token: 'nested-excel-id',
+      client_id: OPENAI_EXCEL_OAUTH_CLIENT_ID,
+      expires_at: 1700003600,
+      chatgpt_account_id: 'ws-nested',
+      chatgpt_user_id: 'usr-nested',
+      organization_id: 'org-nested',
+      plan_type: 'plus',
+      email: 'excel-grant@example.com',
+      subscription_expires_at: '2026-12-01T00:00:00Z'
+    })
+    const oauth = useOpenAIOAuth()
+    const result = await oauth.validateRefreshToken('nested-excel-rt', 15, OPENAI_EXCEL_OAUTH_CLIENT_ID, 'excel')
+    expect(result).not.toBeNull()
+    expect(adminAPI.accounts.refreshOpenAIToken).toHaveBeenLastCalledWith(
+      'nested-excel-rt',
+      15,
+      '/admin/openai/refresh-token',
+      OPENAI_EXCEL_OAUTH_CLIENT_ID,
+      'excel'
+    )
+
+    const nested = oauth.buildIndependentExcelBPSCredentials(result!)
+    expect(nested).toMatchObject({
+      access_token: 'nested-excel-at',
+      refresh_token: 'nested-excel-rt',
+      id_token: 'nested-excel-id',
+      client_id: OPENAI_EXCEL_OAUTH_CLIENT_ID,
+      chatgpt_account_id: 'ws-nested',
+      chatgpt_user_id: 'usr-nested',
+      organization_id: 'org-nested',
+      plan_type: 'plus',
+      email: 'excel-grant@example.com',
+      subscription_expires_at: '2026-12-01T00:00:00Z'
+    })
+    expect(typeof nested.expires_at).toBe('number')
+  })
 })
 
 describe('useOpenAIOAuth.buildCredentials', () => {

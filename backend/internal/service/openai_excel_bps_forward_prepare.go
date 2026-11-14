@@ -25,7 +25,7 @@ func (s *OpenAIGatewayService) prepareExcelBPSForwardRequest(ctx context.Context
 	if err := validateExcelOAuthAccount(account, token); err != nil {
 		return nil, nil, err
 	}
-	raw, err := applyExcelBPSOptions(raw, account)
+	raw, err := applyExcelBPSOptionsForContext(ctx, raw, account)
 	if err != nil {
 		return nil, nil, err
 	}

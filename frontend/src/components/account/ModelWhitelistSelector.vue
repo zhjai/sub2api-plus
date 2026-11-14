@@ -181,6 +181,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   'update:modelValue': [value: string[]]
   'upstream-synced': []
+  'upstream-synced-models': [models: string[]]
   'upstream-sync-finished': []
 }>()
 
@@ -192,6 +193,7 @@ const searchQuery = ref('')
 const customModel = ref('')
 const isComposing = ref(false)
 const isSyncingUpstream = ref(false)
+const syncedBPSModels = ref<string[]>([])
 let upstreamSyncVersion = 0
 
 watch(
@@ -199,6 +201,7 @@ watch(
   () => {
     upstreamSyncVersion += 1
     isSyncingUpstream.value = false
+    syncedBPSModels.value = []
   }
 )
 
@@ -224,7 +227,11 @@ const normalizedPlatforms = computed(() => {
 })
 
 const canSyncUpstream = computed(() => {
-  if (props.bpsMode) return false
+  if (props.bpsMode) {
+    // Saved BPS accounts sync via /admin/accounts/:id/models/sync-upstream (discovery_source: bps_access);
+    // unsaved OAuth preview is unsupported and must save first.
+    return Boolean(props.accountId)
+  }
   if (props.accountId) {
     if (normalizedPlatforms.value.length === 0) return true
     return normalizedPlatforms.value.some(supportsUpstreamModelSync)
@@ -237,7 +244,22 @@ const canSyncUpstream = computed(() => {
 
 const availableOptions = computed(() => {
   if (props.bpsMode) {
-    return OPENAI_BPS_RECOMMENDED_MODELS.map(value => ({ value, label: value }))
+    const seen = new Set<string>()
+    const options: { value: string; label: string }[] = []
+    for (const value of [...syncedBPSModels.value, ...props.modelValue, ...OPENAI_BPS_RECOMMENDED_MODELS]) {
+      const trimmed = value.trim()
+      if (!trimmed || seen.has(trimmed)) continue
+      seen.add(trimmed)
+      const isSuggestedOnly =
+        OPENAI_BPS_RECOMMENDED_MODELS.includes(trimmed) && !syncedBPSModels.value.includes(trimmed)
+      options.push({
+        value: trimmed,
+        label: isSuggestedOnly
+          ? `${trimmed} (${t('admin.accounts.bpsAccount.options.modelsSuggestedBadge')})`
+          : trimmed
+      })
+    }
+    return options
   }
   if (normalizedPlatforms.value.length === 0) {
     return allModels
@@ -343,6 +365,11 @@ const syncUpstreamModels = async () => {
       appStore.showInfo(t('admin.accounts.syncUpstreamModelsEmpty'))
       return
     }
+
+    if (props.bpsMode) {
+      syncedBPSModels.value = Array.from(new Set([...syncedBPSModels.value, ...upstreamModels]))
+    }
+    emit('upstream-synced-models', upstreamModels)
 
     if (!accountId) {
       emit('upstream-synced')

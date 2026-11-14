@@ -23,9 +23,9 @@ func (s *OpenAIGatewayService) newExcelBPSPersistentCaches(ctx context.Context) 
 type unavailableExcelBPSStateStore struct{}
 
 func (unavailableExcelBPSStateStore) LoadBPSState(context.Context, string, string) ([]byte, uint64, error) {
-	return nil, 0, basispoints.ErrStateUnavailable
+	return nil, 0, &basispoints.StateStoreError{Operation: "load", Reason: "missing_store"}
 }
 
 func (unavailableExcelBPSStateStore) SaveBPSState(context.Context, string, string, *uint64, []byte) (bool, error) {
-	return false, basispoints.ErrStateUnavailable
+	return false, &basispoints.StateStoreError{Operation: "save", Reason: "missing_store"}
 }

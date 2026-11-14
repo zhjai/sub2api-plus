@@ -120,6 +120,68 @@
         </div>
       </div>
 
+      <!-- Dual-grant target selector for native primary OpenAI OAuth accounts -->
+      <div
+        v-if="isDualGrantCapable"
+        class="space-y-2 rounded-lg border border-gray-200 bg-gray-50/70 p-3.5 dark:border-dark-600 dark:bg-dark-700/50"
+        data-testid="reauth-grant-target-selector"
+      >
+        <div class="flex items-center justify-between gap-2">
+          <span class="text-xs font-semibold text-gray-700 dark:text-gray-200">
+            {{ t('admin.accounts.bpsAccount.grant.reauthTargetLabel') }}
+          </span>
+          <button
+            type="button"
+            data-testid="reauth-reset-selected-grant"
+            class="rounded border border-gray-300 bg-white px-2 py-0.5 text-[11px] font-medium text-gray-600 transition-colors hover:bg-gray-100 dark:border-dark-500 dark:bg-dark-700 dark:text-gray-300 dark:hover:bg-dark-600"
+            @click="resetSelectedGrantState"
+          >
+            {{ t('common.reset') }}
+          </button>
+        </div>
+        <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <button
+            type="button"
+            data-testid="reauth-grant-target-primary"
+            :class="[
+              'rounded-lg border p-2.5 text-left transition-all',
+              grantTarget === 'primary'
+                ? 'border-primary-500 bg-primary-50 dark:bg-primary-900/25'
+                : 'border-gray-200 bg-white hover:bg-gray-50 dark:border-dark-500 dark:bg-dark-700 dark:hover:bg-dark-600'
+            ]"
+            @click="switchGrantTarget('primary')"
+          >
+            <span class="block text-xs font-semibold text-gray-900 dark:text-white">
+              {{ t('admin.accounts.bpsAccount.grant.reauthTargetPrimary') }}
+            </span>
+            <span class="mt-0.5 block text-[11px] leading-snug text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.bpsAccount.grant.reauthTargetPrimaryDesc') }}
+            </span>
+          </button>
+          <button
+            type="button"
+            data-testid="reauth-grant-target-excel"
+            :class="[
+              'rounded-lg border p-2.5 text-left transition-all',
+              grantTarget === 'excel'
+                ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-900/25'
+                : 'border-gray-200 bg-white hover:bg-gray-50 dark:border-dark-500 dark:bg-dark-700 dark:hover:bg-dark-600'
+            ]"
+            @click="switchGrantTarget('excel')"
+          >
+            <span class="block text-xs font-semibold text-gray-900 dark:text-white">
+              {{ t('admin.accounts.bpsAccount.grant.reauthTargetExcel') }}
+            </span>
+            <span class="mt-0.5 block text-[11px] leading-snug text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.bpsAccount.grant.reauthTargetExcelDesc') }}
+            </span>
+          </button>
+        </div>
+        <p class="text-[11px] text-gray-500 dark:text-gray-400">
+          {{ t('admin.accounts.bpsAccount.grant.reauthIsolatedResetHint') }}
+        </p>
+      </div>
+
       <!-- BPS (Excel) accounts reauthorize on the same login client -->
       <p
         v-if="isOpenAIBPS"
@@ -132,7 +194,7 @@
       <OAuthAuthorizationFlow
         ref="oauthFlowRef"
         :add-method="addMethod"
-        :oauth-client="openaiProfile"
+        :oauth-client="effectiveOpenAIProfile"
         :auth-url="currentAuthUrl"
         :session-id="currentSessionId"
         :loading="currentLoading"
@@ -211,7 +273,9 @@ import {
 } from '@/composables/useAccountOAuth'
 import { useOpenAIOAuth } from '@/composables/useOpenAIOAuth'
 import {
+  OPENAI_EXCEL_BPS_CREDENTIALS_KEY,
   OPENAI_EXCEL_OAUTH_CLIENT_ID,
+  isNativeOpenAIOAuthEligibleForBPSGrant,
   openAIExcelCallbackErrorKey,
   parseOpenAIExcelCallback,
   resolveOpenAIOAuthClient,
@@ -239,9 +303,12 @@ interface OAuthFlowExposed {
 interface Props {
   show: boolean
   account: Account | null
+  initialGrantTarget?: 'primary' | 'excel'
 }
 
-const props = defineProps<Props>()
+const props = withDefaults(defineProps<Props>(), {
+  initialGrantTarget: 'primary'
+})
 const emit = defineEmits<{
   close: []
   reauthorized: [account: Account]
@@ -250,9 +317,10 @@ const emit = defineEmits<{
 const appStore = useAppStore()
 const { t } = useI18n()
 
-// OAuth composables
+// OAuth composables (separate OpenAI sessions for primary vs independent Excel BPS grant)
 const claudeOAuth = useAccountOAuth()
-const openaiOAuth = useOpenAIOAuth()
+const primaryOpenAIOAuth = useOpenAIOAuth()
+const excelOpenAIOAuth = useOpenAIOAuth()
 const geminiOAuth = useGeminiOAuth()
 const antigravityOAuth = useAntigravityOAuth()
 const grokOAuth = useGrokOAuth()
@@ -263,6 +331,22 @@ const oauthFlowRef = ref<OAuthFlowExposed | null>(null)
 // State
 const addMethod = ref<AddMethod>('oauth')
 const geminiOAuthType = ref<'code_assist' | 'google_one' | 'ai_studio'>('code_assist')
+const grantTarget = ref<'primary' | 'excel'>('primary')
+
+interface FlowInputSnapshot {
+  authCode: string
+  oauthState: string
+  inputMethod: AuthInputMethod
+}
+const defaultFlowSnapshot = (): FlowInputSnapshot => ({
+  authCode: '',
+  oauthState: '',
+  inputMethod: 'manual'
+})
+const flowSnapshots = ref<Record<'primary' | 'excel', FlowInputSnapshot>>({
+  primary: defaultFlowSnapshot(),
+  excel: defaultFlowSnapshot()
+})
 
 // Computed - check platform
 const isOpenAI = computed(() => props.account?.platform === 'openai')
@@ -272,14 +356,25 @@ const isAnthropic = computed(() => props.account?.platform === 'anthropic')
 const isAntigravity = computed(() => props.account?.platform === 'antigravity')
 const isGrok = computed(() => props.account?.platform === 'grok')
 
-// OpenAI login profile comes from the saved client_id and never changes during reauth:
-// a BPS (Excel) account stays on Excel, everything else stays on Codex.
+const isDualGrantCapable = computed(() => isNativeOpenAIOAuthEligibleForBPSGrant(props.account))
+const isIndependentExcelTarget = computed(
+  () => isDualGrantCapable.value && grantTarget.value === 'excel'
+)
+
+// OpenAI primary login profile comes from saved client_id; dual-grant native accounts can also target independent Excel BPS.
 const openaiProfile = computed<OpenAIOAuthClient>(() =>
   isOpenAI.value
     ? resolveOpenAIOAuthClient(props.account?.credentials as Record<string, unknown> | undefined)
     : 'codex'
 )
+const effectiveOpenAIProfile = computed<OpenAIOAuthClient>(() =>
+  isIndependentExcelTarget.value ? 'excel' : openaiProfile.value
+)
 const isOpenAIBPS = computed(() => isOpenAI.value && openaiProfile.value === 'excel')
+const usesExcelOAuthFlow = computed(() => isOpenAIBPS.value || isIndependentExcelTarget.value)
+const activeOpenAIOAuth = computed(() =>
+  isIndependentExcelTarget.value ? excelOpenAIOAuth : primaryOpenAIOAuth
+)
 
 /**
  * Grok reauth default tab (password auth is hidden):
@@ -298,28 +393,28 @@ const grokInitialInputMethod = computed<AuthInputMethod>(() => {
 
 // Computed - current OAuth state based on platform
 const currentAuthUrl = computed(() => {
-  if (isOpenAILike.value) return openaiOAuth.authUrl.value
+  if (isOpenAILike.value) return activeOpenAIOAuth.value.authUrl.value
   if (isGemini.value) return geminiOAuth.authUrl.value
   if (isAntigravity.value) return antigravityOAuth.authUrl.value
   if (isGrok.value) return grokOAuth.authUrl.value
   return claudeOAuth.authUrl.value
 })
 const currentSessionId = computed(() => {
-  if (isOpenAILike.value) return openaiOAuth.sessionId.value
+  if (isOpenAILike.value) return activeOpenAIOAuth.value.sessionId.value
   if (isGemini.value) return geminiOAuth.sessionId.value
   if (isAntigravity.value) return antigravityOAuth.sessionId.value
   if (isGrok.value) return grokOAuth.sessionId.value
   return claudeOAuth.sessionId.value
 })
 const currentLoading = computed(() => {
-  if (isOpenAILike.value) return openaiOAuth.loading.value
+  if (isOpenAILike.value) return activeOpenAIOAuth.value.loading.value
   if (isGemini.value) return geminiOAuth.loading.value
   if (isAntigravity.value) return antigravityOAuth.loading.value
   if (isGrok.value) return grokOAuth.loading.value
   return claudeOAuth.loading.value
 })
 const currentError = computed(() => {
-  if (isOpenAILike.value) return openaiOAuth.error.value
+  if (isOpenAILike.value) return activeOpenAIOAuth.value.error.value
   if (isGemini.value) return geminiOAuth.error.value
   if (isAntigravity.value) return antigravityOAuth.error.value
   if (isGrok.value) return grokOAuth.error.value
@@ -346,17 +441,54 @@ const canExchangeCode = computed(() => {
   const authCode = oauthFlowRef.value?.authCode || ''
   const sessionId = currentSessionId.value
   const loading = currentLoading.value
-  if (isOpenAIBPS.value && !parseOpenAIExcelCallback(authCode, openaiOAuth.oauthState.value).ok) {
+  if (
+    usesExcelOAuthFlow.value &&
+    !parseOpenAIExcelCallback(authCode, activeOpenAIOAuth.value.oauthState.value).ok
+  ) {
     return false
   }
   return authCode.trim() && sessionId && !loading
 })
+
+const applyFlowSnapshot = (snapshot: FlowInputSnapshot) => {
+  const flow = oauthFlowRef.value as Record<string, any> | null
+  if (!flow) return
+  if ('authCode' in flow) flow.authCode = snapshot.authCode
+  if ('oauthState' in flow) flow.oauthState = snapshot.oauthState
+  if ('inputMethod' in flow) flow.inputMethod = snapshot.inputMethod
+}
+
+const switchGrantTarget = (nextTarget: 'primary' | 'excel') => {
+  if (grantTarget.value === nextTarget) return
+  const flow = oauthFlowRef.value
+  if (flow) {
+    flowSnapshots.value[grantTarget.value] = {
+      authCode: flow.authCode || '',
+      oauthState: flow.oauthState || '',
+      inputMethod: flow.inputMethod || 'manual'
+    }
+  }
+  grantTarget.value = nextTarget
+  applyFlowSnapshot(flowSnapshots.value[nextTarget])
+}
+
+const resetSelectedGrantState = () => {
+  activeOpenAIOAuth.value.resetState()
+  flowSnapshots.value[grantTarget.value] = defaultFlowSnapshot()
+  oauthFlowRef.value?.reset()
+}
 
 // Watchers
 watch(
   () => props.show,
   (newVal) => {
     if (newVal && props.account) {
+      grantTarget.value =
+        isDualGrantCapable.value && props.initialGrantTarget === 'excel' ? 'excel' : 'primary'
+      flowSnapshots.value = {
+        primary: defaultFlowSnapshot(),
+        excel: defaultFlowSnapshot()
+      }
       // Initialize addMethod based on current account type (Claude only)
       if (
         isAnthropic.value &&
@@ -383,8 +515,14 @@ watch(
 const resetState = () => {
   addMethod.value = 'oauth'
   geminiOAuthType.value = 'code_assist'
+  grantTarget.value = 'primary'
+  flowSnapshots.value = {
+    primary: defaultFlowSnapshot(),
+    excel: defaultFlowSnapshot()
+  }
   claudeOAuth.resetState()
-  openaiOAuth.resetState()
+  primaryOpenAIOAuth.resetState()
+  excelOpenAIOAuth.resetState()
   geminiOAuth.resetState()
   antigravityOAuth.resetState()
   grokOAuth.resetState()
@@ -399,10 +537,10 @@ const handleGenerateUrl = async () => {
   if (!props.account) return
 
   if (isOpenAILike.value) {
-    if (isOpenAIBPS.value) {
-      await openaiOAuth.generateAuthUrl(props.account.proxy_id, undefined, 'excel')
+    if (usesExcelOAuthFlow.value) {
+      await activeOpenAIOAuth.value.generateAuthUrl(props.account.proxy_id, undefined, 'excel')
     } else {
-      await openaiOAuth.generateAuthUrl(props.account.proxy_id)
+      await activeOpenAIOAuth.value.generateAuthUrl(props.account.proxy_id)
     }
   } else if (isGemini.value) {
     const creds = (props.account.credentials || {}) as Record<string, unknown>
@@ -426,18 +564,18 @@ const handleExchangeCode = async () => {
 
   if (isOpenAILike.value) {
     // OpenAI OAuth flow
-    const oauthClient = openaiOAuth
+    const oauthClient = activeOpenAIOAuth.value
     const sessionId = oauthClient.sessionId.value
     if (!sessionId) return
-    // The session must have been generated for this account's saved login client.
-    if (oauthClient.authClient.value !== openaiProfile.value) {
+    // The session must have been generated for the active grant's login profile.
+    if (oauthClient.authClient.value !== effectiveOpenAIProfile.value) {
       oauthClient.error.value = t('admin.accounts.oauth.openai.bps.clientMismatch')
       appStore.showError(oauthClient.error.value)
       return
     }
     let codeToUse = authCode.trim()
     let stateToUse = (oauthFlowRef.value?.oauthState || oauthClient.oauthState.value || '').trim()
-    if (isOpenAIBPS.value) {
+    if (usesExcelOAuthFlow.value) {
       const callback = parseOpenAIExcelCallback(authCode, oauthClient.oauthState.value)
       if (!callback.ok) {
         oauthClient.error.value = t(openAIExcelCallbackErrorKey(callback.error), { error: callback.detail || '' })
@@ -461,22 +599,36 @@ const handleExchangeCode = async () => {
     )
     if (!tokenInfo) return
 
-    // Build credentials and extra info
-    const credentials = oauthClient.buildCredentials(tokenInfo)
-    const extra = oauthClient.buildExtraInfo(tokenInfo)
-
     try {
-      const updatedAccount = await adminAPI.accounts.applyOAuthCredentials(props.account.id, {
-        type: 'oauth',
-        credentials,
-        extra
-      })
+      let updatedAccount: Account
+      if (isIndependentExcelTarget.value) {
+        // Persist ONLY nested `credentials.excel_bps_credentials` via account update:
+        // never overwrite primary Codex credentials and never auto-enable `extra.openai_excel_bps`.
+        const nestedGrant = oauthClient.buildIndependentExcelBPSCredentials(tokenInfo)
+        updatedAccount = await adminAPI.accounts.update(props.account.id, {
+          credentials: {
+            [OPENAI_EXCEL_BPS_CREDENTIALS_KEY]: nestedGrant
+          }
+        })
+        appStore.showSuccess(t('admin.accounts.bpsAccount.grant.reauthExcelSavedSuccess'))
+      } else {
+        const credentials = oauthClient.buildCredentials(tokenInfo)
+        const extra = oauthClient.buildExtraInfo(tokenInfo)
+        updatedAccount = await adminAPI.accounts.applyOAuthCredentials(props.account.id, {
+          type: 'oauth',
+          credentials,
+          extra
+        })
+        appStore.showSuccess(t('admin.accounts.reAuthorizedSuccess'))
+      }
 
-      appStore.showSuccess(t('admin.accounts.reAuthorizedSuccess'))
       emit('reauthorized', updatedAccount)
       handleClose()
     } catch (error: any) {
-      oauthClient.error.value = error.response?.data?.detail || t('admin.accounts.oauth.authFailed')
+      oauthClient.error.value =
+        error.response?.data?.detail ||
+        error.response?.data?.message ||
+        t('admin.accounts.oauth.authFailed')
       appStore.showError(oauthClient.error.value)
     }
   } else if (isGemini.value) {
@@ -691,31 +843,57 @@ const handleValidateRefreshToken = async (refreshTokenInput: string) => {
   if (!refreshToken) return
 
   if (isOpenAILike.value) {
-    openaiOAuth.loading.value = true
-    openaiOAuth.error.value = ''
+    const oauthClient = activeOpenAIOAuth.value
+    oauthClient.loading.value = true
+    oauthClient.error.value = ''
     try {
-      // BPS accounts refresh against the Excel client; Codex accounts keep the default client.
+      if (isIndependentExcelTarget.value) {
+        const tokenInfo = await oauthClient.validateRefreshToken(
+          refreshToken,
+          props.account.proxy_id,
+          OPENAI_EXCEL_OAUTH_CLIENT_ID,
+          'excel'
+        )
+        if (!tokenInfo) return
+
+        const updatedAccount = await adminAPI.accounts.update(props.account.id, {
+          credentials: {
+            [OPENAI_EXCEL_BPS_CREDENTIALS_KEY]:
+              oauthClient.buildIndependentExcelBPSCredentials(tokenInfo)
+          }
+        })
+        appStore.showSuccess(t('admin.accounts.bpsAccount.grant.reauthExcelSavedSuccess'))
+        emit('reauthorized', updatedAccount)
+        handleClose()
+        return
+      }
+
+      // BPS-only accounts refresh against the Excel client; Codex accounts keep the default client.
       const excelClientId = isOpenAIBPS.value ? OPENAI_EXCEL_OAUTH_CLIENT_ID : undefined
-      const tokenInfo = await openaiOAuth.validateRefreshToken(refreshToken, props.account.proxy_id, excelClientId)
+      const tokenInfo = await oauthClient.validateRefreshToken(
+        refreshToken,
+        props.account.proxy_id,
+        excelClientId
+      )
       if (!tokenInfo) return
 
       const updatedAccount = await adminAPI.accounts.applyOAuthCredentials(props.account.id, {
         type: 'oauth',
-        credentials: openaiOAuth.buildCredentials(tokenInfo, excelClientId),
-        extra: openaiOAuth.buildExtraInfo(tokenInfo)
+        credentials: oauthClient.buildCredentials(tokenInfo, excelClientId),
+        extra: oauthClient.buildExtraInfo(tokenInfo)
       })
       appStore.showSuccess(t('admin.accounts.reAuthorizedSuccess'))
       emit('reauthorized', updatedAccount)
       handleClose()
     } catch (error: any) {
-      openaiOAuth.error.value =
+      oauthClient.error.value =
         error.response?.data?.detail ||
         error.response?.data?.message ||
         error.message ||
         t('admin.accounts.oauth.authFailed')
-      appStore.showError(openaiOAuth.error.value)
+      appStore.showError(oauthClient.error.value)
     } finally {
-      openaiOAuth.loading.value = false
+      oauthClient.loading.value = false
     }
     return
   }

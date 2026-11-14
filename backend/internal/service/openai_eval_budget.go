@@ -463,6 +463,7 @@ type openAIEvalController struct {
 	service                    *OpenAIEvalService
 	store                      OpenAIEvalBudgetStore
 	namespace, owner, testType string
+	requestedModel             string
 	accountID                  int64
 	automatic                  bool
 	deadline                   time.Time
@@ -504,6 +505,16 @@ func (c *openAIEvalController) current(ctx context.Context) (OpenAIEvalBackgroun
 		return OpenAIEvalBackgroundControl{}, c.deny("credential_namespace_changed")
 	}
 	actual, err := resolveCredentialAccount(ctx, c.service.accounts, account)
+	if err == nil && c.requestedModel != "" {
+		if projected := account.BPSAccountForModel(c.requestedModel); projected != nil {
+			actual = projected
+		} else if account.IsExcelOAuth() {
+			return OpenAIEvalBackgroundControl{}, c.deny("evaluation_bps_route_unavailable")
+		}
+	}
+	if err == nil && actual != nil && c.credential != nil && actual.IsExcelOAuth() != c.credential.IsExcelOAuth() {
+		return OpenAIEvalBackgroundControl{}, c.deny("credential_namespace_changed")
+	}
 	if err != nil || !sameOpenAIEvalCredential(c.credential, actual) || (strings.TrimSpace(actual.GetChatGPTAccountID()) != "" && openAIEvalCredentialNamespace(actual) != c.namespace) {
 		return OpenAIEvalBackgroundControl{}, c.deny("credential_namespace_changed")
 	}
@@ -643,6 +654,11 @@ func (s *OpenAIEvalService) beginBackgroundRun(ctx context.Context, target *Open
 	if namespaceErr != nil {
 		return ctx, nil, namespaceErr
 	}
+	// Keep workspace-wide pressure accounting shared, but pin the actual route
+	// credential so manual channel changes invalidate the in-flight evaluation.
+	if target != nil && target.Credential != nil && target.Credential.IsExcelOAuth() {
+		credential = target.Credential
+	}
 	ns := openAIEvalCredentialNamespace(credential)
 	// Legacy synthetic test doubles without credentials can still run with no controls.
 	cfg, err := s.repo.GetConfig(ctx)
@@ -655,7 +671,7 @@ func (s *OpenAIEvalService) beginBackgroundRun(ctx context.Context, target *Open
 	if ns == "" {
 		return ctx, nil, errors.New("background credential namespace unavailable")
 	}
-	c := &openAIEvalController{service: s, store: s.budgetStore(), namespace: ns, credential: credential, owner: owner, testType: request.TestType, accountID: request.AccountID, automatic: source == "scheduled", slot: make(chan struct{}, 1)}
+	c := &openAIEvalController{service: s, store: s.budgetStore(), namespace: ns, credential: credential, owner: owner, testType: request.TestType, requestedModel: request.RequestedModel, accountID: request.AccountID, automatic: source == "scheduled", slot: make(chan struct{}, 1)}
 	control, err := c.current(ctx)
 	if err != nil {
 		return ctx, nil, err

@@ -557,6 +557,9 @@ func isTool(item object) bool {
 // It does not evaluate code or dispatch any Excel operation.
 func (b *Bridge) translateCall(native object) (object, error) {
 	name := text(native["name"])
+	if (name == "run_officejs" || name == "functions.run_officejs") && nonemptyEncryption(native["encrypted_function_args"]) {
+		return nil, &ContentValidationError{Path: "output.encrypted_function_args", ContentType: "encrypted_function_args", message: "basispoints cannot translate encrypted transport arguments; no tool was executed"}
+	}
 	if text(native["type"]) == "function_call" && (name == "update_plan" || name == "functions.update_plan") {
 		return b.translateNativePlan(native)
 	}

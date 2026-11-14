@@ -200,7 +200,10 @@ type UsageInfo struct {
 	GeminiProMinute    *UsageProgress `json:"gemini_pro_minute,omitempty"`    // Gemini Pro RPM
 	GeminiFlashMinute  *UsageProgress `json:"gemini_flash_minute,omitempty"`  // Gemini Flash RPM
 
-	BPSLocalUsage *BPSLocalUsageInfo `json:"bps_local_usage,omitempty"`
+	BPSLocalUsage     *BPSLocalUsageInfo `json:"bps_local_usage,omitempty"`
+	QuotaSource       string             `json:"quota_source,omitempty"`
+	QuotaUpdatedAt    *time.Time         `json:"quota_updated_at,omitempty"`
+	QuotaRefreshError string             `json:"quota_refresh_error,omitempty"`
 
 	// Antigravity 多模型配额
 	AntigravityQuota map[string]*AntigravityModelQuota `json:"antigravity_quota,omitempty"`
@@ -714,17 +717,36 @@ func (s *AccountUsageService) syncActiveToPassive(ctx context.Context, accountID
 	}
 }
 
+// Optional so existing usage readers remain compatible. Dual-grant totals must
+// be attributed by the endpoint recorded at send time, never current routing.
+type accountBPSWindowStatsReader interface {
+	GetAccountBPSWindowStats(context.Context, int64, time.Time) (*usagestats.AccountStats, error)
+}
+
 func (s *AccountUsageService) getExcelBPSLocalUsage(ctx context.Context, account *Account) (*UsageInfo, error) {
 	now := time.Now()
 	usage := &UsageInfo{Source: "bps_local", UpdatedAt: &now, BPSLocalUsage: &BPSLocalUsageInfo{}}
+	if !account.IsExcelOAuth() {
+		usage.Source = ""
+	}
 	if s.usageLogRepo == nil {
 		return usage, nil
 	}
-	fiveHour, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, now.Add(-5*time.Hour))
+	readStats := s.usageLogRepo.GetAccountWindowStats
+	if !account.IsExcelOAuth() {
+		reader, ok := s.usageLogRepo.(accountBPSWindowStatsReader)
+		if !ok {
+			// Missing route attribution is unknown, not all-account BPS traffic.
+			usage.BPSLocalUsage = nil
+			return usage, nil
+		}
+		readStats = reader.GetAccountBPSWindowStats
+	}
+	fiveHour, err := readStats(ctx, account.ID, now.Add(-5*time.Hour))
 	if err != nil {
 		return nil, fmt.Errorf("load BPS local five-hour usage: %w", err)
 	}
-	sevenDay, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, now.Add(-7*24*time.Hour))
+	sevenDay, err := readStats(ctx, account.ID, now.Add(-7*24*time.Hour))
 	if err != nil {
 		return nil, fmt.Errorf("load BPS local seven-day usage: %w", err)
 	}
@@ -734,8 +756,8 @@ func (s *AccountUsageService) getExcelBPSLocalUsage(ctx context.Context, account
 }
 
 func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Account, force bool) (*UsageInfo, error) {
-	if account.IsExcelOAuth() {
-		return s.getExcelBPSLocalUsage(ctx, account)
+	if account != nil && account.ExcelBPSCredentialAccount() != nil {
+		return s.getExcelBPSUsage(ctx, account, force)
 	}
 	now := time.Now()
 	usage := &UsageInfo{UpdatedAt: &now}
@@ -783,17 +805,15 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 	}
 
 	if stats, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, codexWindowStatsStart(usage.FiveHour, 5*time.Hour, now)); err == nil {
-		if usage.FiveHour == nil {
-			usage.FiveHour = &UsageProgress{Utilization: 0}
+		if usage.FiveHour != nil {
+			usage.FiveHour.WindowStats = windowStatsFromAccountStats(stats)
 		}
-		usage.FiveHour.WindowStats = windowStatsFromAccountStats(stats)
 	}
 
 	if stats, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, codexWindowStatsStart(usage.SevenDay, 7*24*time.Hour, now)); err == nil {
-		if usage.SevenDay == nil {
-			usage.SevenDay = &UsageProgress{Utilization: 0}
+		if usage.SevenDay != nil {
+			usage.SevenDay.WindowStats = windowStatsFromAccountStats(stats)
 		}
-		usage.SevenDay.WindowStats = windowStatsFromAccountStats(stats)
 	}
 
 	return usage, nil

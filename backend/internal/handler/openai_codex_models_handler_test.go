@@ -696,13 +696,15 @@ type codexModelsPinnedHTTPUpstream struct {
 	service.HTTPUpstream
 	mu       sync.Mutex
 	calls    []int64
+	routes   []string
 	bodies   map[int64]string
 	statuses map[int64]int
 }
 
-func (u *codexModelsPinnedHTTPUpstream) Do(_ *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
+func (u *codexModelsPinnedHTTPUpstream) Do(req *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
 	u.mu.Lock()
 	u.calls = append(u.calls, accountID)
+	u.routes = append(u.routes, req.Method+" "+req.URL.RequestURI())
 	u.mu.Unlock()
 	if status, ok := u.statuses[accountID]; ok {
 		return &http.Response{

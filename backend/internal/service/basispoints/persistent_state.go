@@ -9,6 +9,19 @@ import (
 var ErrStateUnavailable = errors.New("basispoints shared session state is unavailable")
 var ErrStateCapacity = errors.New("basispoints shared session state exceeds the entry limit")
 
+// StateStoreError carries bounded operational metadata, never Redis messages,
+// keys, scopes, scripts or saved payloads. The public sentinel remains stable.
+type StateStoreError struct {
+	Operation string
+	Reason    string
+}
+
+func (e *StateStoreError) Error() string {
+	return ErrStateUnavailable.Error() + " (" + e.Operation + ":" + e.Reason + ")"
+}
+
+func (e *StateStoreError) Unwrap() error { return ErrStateUnavailable }
+
 // StateStore isolates data by account/key/session scope. Writes are durable
 // before tool delivery; catalog writes compare the revision from the preceding read.
 type StateStore interface {
@@ -33,6 +46,8 @@ func (c *ReplayCache) stateError(err error) {
 	defer c.mu.Unlock()
 	if errors.Is(err, ErrStateCapacity) {
 		c.storeErr = ErrStateCapacity
+	} else if errors.Is(err, ErrStateUnavailable) {
+		c.storeErr = err
 	} else {
 		c.storeErr = ErrStateUnavailable
 	}
@@ -53,6 +68,8 @@ func (c *CatalogCache) stateError(err error) {
 	defer c.mu.Unlock()
 	if errors.Is(err, ErrStateCapacity) {
 		c.storeErr = ErrStateCapacity
+	} else if errors.Is(err, ErrStateUnavailable) {
+		c.storeErr = err
 	} else {
 		c.storeErr = ErrStateUnavailable
 	}

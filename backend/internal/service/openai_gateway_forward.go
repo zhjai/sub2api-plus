@@ -25,8 +25,18 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	beginUpstreamResponseModelObservation(c)
 	setOpenAIExecContract(c, body, false)
 	ClearActualOpenAIUpstreamEndpoint(c)
+	if routed, capability := ExcelBPSPreSendRoute(ctx, account, gjson.GetBytes(body, "model").String(), body); capability != nil {
+		// A local capability result must stay unwritten so the ingress router can
+		// choose a complete compatible channel before uploads or inference.
+		return nil, capability
+	} else if routed != nil {
+		account = routed
+	}
+	if bps := account.BPSAccountForModel(gjson.GetBytes(body, "model").String()); bps != nil {
+		return s.forwardExcelBPS(ctx, c, bps, body, time.Now())
+	}
 	if account.IsExcelOAuth() {
-		return s.forwardExcelBPS(ctx, c, account, body, time.Now())
+		return nil, fmt.Errorf("BPS channel is disabled or does not include the requested mapped model")
 	}
 	var timezoneErr error
 	body, timezoneErr = ApplyUpstreamClientTimezone(ctx, account, body, upstreamTimezoneAccountProxy(account))

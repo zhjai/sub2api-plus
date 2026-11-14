@@ -83,10 +83,11 @@ func TestOpenAIExcelBPSUnsupportedRequestsNeverReachCodex(t *testing.T) {
 	require.True(t, a.IsExcelOAuth())
 	require.False(t, a.UsesOpenAICodexProtocol())
 	require.True(t, a.SupportsOpenAIEndpointCapability(OpenAIEndpointCapabilityResponsesCompatible))
-	for _, capability := range []OpenAIEndpointCapability{OpenAIEndpointCapabilityResponses, OpenAIEndpointCapabilityChatCompletions, OpenAIEndpointCapabilityEmbeddings, OpenAIEndpointCapabilityAlphaSearch, OpenAIEndpointCapabilityLive} {
+	require.True(t, a.SupportsOpenAIEndpointCapability(OpenAIEndpointCapabilityResponses))
+	for _, capability := range []OpenAIEndpointCapability{OpenAIEndpointCapabilityChatCompletions, OpenAIEndpointCapabilityEmbeddings, OpenAIEndpointCapabilityAlphaSearch, OpenAIEndpointCapabilityLive} {
 		require.False(t, a.SupportsOpenAIEndpointCapability(capability))
 	}
-	require.Zero(t, openAICompactSupportTier(a))
+	require.Equal(t, 1, openAICompactSupportTier(a))
 	require.Equal(t, "excel_bps_http_only", NewOpenAIWSProtocolResolver(s.cfg).Resolve(a).Reason)
 	for _, path := range []string{"/v1/responses/compact", "/v1/responses"} {
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
@@ -483,8 +484,10 @@ func TestExcelBPSCurrentAssignmentErrorHasSafeParam(t *testing.T) {
 	c.Request = httptest.NewRequest("POST", "/v1/responses", bytes.NewReader(body))
 	_, err := s.Forward(context.Background(), c, excelBPSAccount(t), body)
 	require.Error(t, err)
-	require.Equal(t, http.StatusBadRequest, rec.Code)
-	require.Equal(t, "input[0].content[1]", gjson.Get(rec.Body.String(), "error.param").String())
+	var capability *basispoints.ContextCapabilityError
+	require.ErrorAs(t, err, &capability)
+	require.Equal(t, "input[0].content[1]", capability.Param)
+	require.Empty(t, rec.Body.String(), "pre-send capability routing owns the final response")
 	require.NotContains(t, rec.Body.String(), "SYNTHETIC_PRIVATE_ASSIGNMENT")
 	require.Empty(t, upstream.requests)
 }
@@ -511,7 +514,9 @@ func TestOpenAIExcelBPSRequestOptionsSharedPreparation(t *testing.T) {
 	_, _, err := prepareExcelBPSRequest(context.Background(), history, a.GetOpenAIAccessToken(), a, "", false)
 	require.Error(t, err, "history omission must be opt-in")
 	a.Extra = map[string]any{ExcelBPSHistoricalEncryptedKey: true}
-	req, _, err := prepareExcelBPSRequest(context.Background(), history, a.GetOpenAIAccessToken(), a, "", false)
+	_, _, err = prepareExcelBPSRequest(context.Background(), history, a.GetOpenAIAccessToken(), a, "", false)
+	require.Error(t, err, "manual option alone does not prove complete routes unavailable")
+	req, _, err := prepareExcelBPSRequest(WithExcelBPSLastResort(context.Background()), history, a.GetOpenAIAccessToken(), a, "", false)
 	require.NoError(t, err)
 	body, err := io.ReadAll(req.Body)
 	require.NoError(t, err)
@@ -523,9 +528,9 @@ func TestOpenAIExcelBPSRequestOptionsSharedPreparation(t *testing.T) {
 	hosted := []byte(`{"model":"gpt-6-astra","input":"hi","tools":[{"type":"namespace","name":"native","tools":[{"type":"web_search"}]}]}`)
 	a.Extra = map[string]any{ExcelBPSHostedToolsPolicyKey: "reject"}
 	_, _, err = prepareExcelBPSRequest(context.Background(), hosted, a.GetOpenAIAccessToken(), a, "", false)
-	require.ErrorContains(t, err, "hosted tool")
+	require.ErrorContains(t, err, "hosted capability")
 	a.Extra[ExcelBPSHostedToolsPolicyKey] = "omit"
-	_, _, err = prepareExcelBPSRequest(context.Background(), hosted, a.GetOpenAIAccessToken(), a, "", false)
+	_, _, err = prepareExcelBPSRequest(WithExcelBPSLastResort(context.Background()), hosted, a.GetOpenAIAccessToken(), a, "", false)
 	require.NoError(t, err)
 	a.Extra[ExcelBPSHostedToolsPolicyKey] = "reject"
 	none := bytes.Replace(hosted, []byte(`"input":"hi"`), []byte(`"input":"hi","tool_choice":"none"`), 1)

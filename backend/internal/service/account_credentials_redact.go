@@ -4,7 +4,7 @@ package service
 // dto 层做响应脱敏、service 层做更新合并都引用此清单——新增凭证类型时务必同步。
 var SensitiveCredentialKeys = []string{
 	// OAuth
-	"access_token", "refresh_token", "id_token", "agent_private_key",
+	"access_token", "refresh_token", "id_token", "agent_private_key", ExcelBPSCredentialsKey,
 	// API Key 类
 	"api_key", "session_key", "cookie",
 	// Prism browser cookies and session exchange tokens.
@@ -39,6 +39,11 @@ func IsSensitiveCredentialKey(key string) bool {
 //   - 敏感键：incoming 显式提供则覆盖（用户主动旋转 token），否则保留 existing。
 func MergePreservingSensitiveCreds(existing, incoming map[string]any) map[string]any {
 	out := make(map[string]any, len(incoming)+len(SensitiveCredentialKeys))
+	if _, onlyGrant := incoming[ExcelBPSCredentialsKey]; onlyGrant && len(incoming) == 1 {
+		for k, v := range existing {
+			out[k] = v
+		}
+	}
 	for k, v := range incoming {
 		out[k] = v
 	}

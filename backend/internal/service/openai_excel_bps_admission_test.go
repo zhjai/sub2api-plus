@@ -6,15 +6,16 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
-	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 func TestExcelBPSPreviousResponseSchedulerAdmission(t *testing.T) {
@@ -76,7 +77,7 @@ func TestExcelBPSPreviousResponseSchedulerAdmission(t *testing.T) {
 	require.Equal(t, "bps_requires_full_history", reason)
 }
 
-func TestExcelBPSCompactionRejectedBeforeUpstream(t *testing.T) {
+func TestExcelBPSCompactionPreparationPreservesSupportedControls(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for name, body := range map[string]string{
 		"context management": `{"model":"gpt-6-astra","input":"hello","context_management":[{"type":"compaction","compact_threshold":1000}]}`,
@@ -84,35 +85,30 @@ func TestExcelBPSCompactionRejectedBeforeUpstream(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			a := excelBPSAccount(t)
-			assertRejected := func(err error) {
+			assertPrepared := func(req *http.Request, bridge any, err error) {
 				t.Helper()
-				var appErr *infraerrors.ApplicationError
-				require.ErrorAs(t, err, &appErr)
-				require.Equal(t, "OPENAI_BPS_COMPACTION_UNSUPPORTED", appErr.Reason)
+				require.NoError(t, err)
+				require.NotNil(t, req)
+				require.NotNil(t, bridge)
+				wire, readErr := io.ReadAll(req.Body)
+				require.NoError(t, readErr)
+				_ = req.Body.Close()
+				require.Contains(t, string(wire), "hello", "preparation must retain the original input")
+				if name == "context management" {
+					require.Equal(t, "compaction", gjson.GetBytes(wire, "context_management.0.type").String())
+					require.EqualValues(t, 1000, gjson.GetBytes(wire, "context_management.0.compact_threshold").Int())
+				} else {
+					require.Contains(t, string(wire), "compaction_trigger", "the real upstream must receive the trigger")
+				}
 			}
 			for _, cache := range []bool{false, true} {
 				req, bridge, err := prepareExcelBPSRequest(t.Context(), []byte(body), a.GetOpenAIAccessToken(), a, "compaction-test", cache)
-				assertRejected(err)
-				require.Nil(t, req)
-				require.Nil(t, bridge)
+				assertPrepared(req, bridge, err)
 			}
 			testReq := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(body))
 			testReq.Header.Set("Authorization", "Bearer "+a.GetOpenAIAccessToken())
 			req, bridge, err := convertExcelBPSTestRequest(testReq, a)
-			assertRejected(err)
-			require.Nil(t, req)
-			require.Nil(t, bridge)
-			upstream := &httpUpstreamRecorder{}
-			svc := openAIClientToolsTestService(upstream)
-			rec := httptest.NewRecorder()
-			c, _ := gin.CreateTestContext(rec)
-			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(body))
-			result, err := svc.Forward(t.Context(), c, a, []byte(body))
-			assertRejected(err)
-			require.Nil(t, result)
-			require.Equal(t, http.StatusBadRequest, rec.Code)
-			require.Contains(t, rec.Body.String(), "OPENAI_BPS_COMPACTION_UNSUPPORTED")
-			require.Empty(t, upstream.requests)
+			assertPrepared(req, bridge, err)
 		})
 	}
 }

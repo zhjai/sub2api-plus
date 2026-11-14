@@ -609,11 +609,16 @@ func (s *OpenAIGatewayService) ForwardImages(
 	parsed *OpenAIImagesRequest,
 	channelMappedModel string,
 ) (*OpenAIForwardResult, error) {
-	if account.IsExcelOAuth() {
-		return nil, excelBPSUnsupported(c)
-	}
 	if parsed == nil {
 		return nil, fmt.Errorf("parsed images request is required")
+	}
+	var routeErr error
+	account, routeErr = ResolveOpenAIImagesAccountRoute(account, parsed, channelMappedModel)
+	if routeErr != nil {
+		return nil, routeErr
+	}
+	if account.IsExcelOAuth() {
+		return s.forwardExcelBPSImages(ctx, c, account, parsed, channelMappedModel)
 	}
 	switch account.Type {
 	case AccountTypeAPIKey:

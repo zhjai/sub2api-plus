@@ -26,7 +26,7 @@ func (r *bpsLocalStatsRepo) GetAccountWindowStats(_ context.Context, _ int64, _ 
 	r.calls++
 	return &usagestats.AccountStats{Requests: 3, Tokens: 12, Cost: 0.25}, r.err
 }
-func TestExcelBPSUsageNeverProbesNativeOrDisplaysStoredCodexQuota(t *testing.T) {
+func TestExcelBPSUsageKeepsLocalTotalsSeparateFromStoredQuota(t *testing.T) {
 	var requests atomic.Int32
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests.Add(1); w.WriteHeader(502) }))
 	defer proxy.Close()
@@ -44,8 +44,10 @@ func TestExcelBPSUsageNeverProbesNativeOrDisplaysStoredCodexQuota(t *testing.T) 
 		usage, err := svc.getUsageForAccount(context.Background(), account, force)
 		require.NoError(t, err)
 		require.Equal(t, "bps_local", usage.Source)
-		require.Nil(t, usage.FiveHour)
-		require.Nil(t, usage.SevenDay)
+		require.Equal(t, 100.0, usage.FiveHour.Utilization)
+		require.Equal(t, 100.0, usage.SevenDay.Utilization)
+		require.Equal(t, "account_codex_snapshot", usage.QuotaSource)
+		require.NotEmpty(t, usage.QuotaRefreshError)
 		require.EqualValues(t, 3, usage.BPSLocalUsage.FiveHour.Requests)
 		require.Equal(t, 0.25, usage.BPSLocalUsage.SevenDay.Cost)
 	}
@@ -67,7 +69,7 @@ func TestExcelBPSNativeModelSyncBlockedBeforeTransport(t *testing.T) {
 	_, err := svc.SyncUpstreamModelCatalog(context.Background(), account)
 	var syncErr *UpstreamModelSyncError
 	require.ErrorAs(t, err, &syncErr)
-	require.Equal(t, UpstreamModelSyncErrorUnsupported, syncErr.Kind)
+	require.Equal(t, UpstreamModelSyncErrorConfiguration, syncErr.Kind)
 	req, err := svc.buildOpenAIOAuthUpstreamModelsRequest(context.Background(), account)
 	require.Error(t, err)
 	require.Nil(t, req)
@@ -113,16 +115,12 @@ func TestExcelBPSBulkGrantGuardRunsBeforeAnyWrite(t *testing.T) {
 	require.Len(t, result.SuccessIDs, 2)
 }
 
-func TestExcelBPSLocalModelPickerDoesNotRequireNativeGateway(t *testing.T) {
+func TestExcelBPSModelPickerRequiresRealDiscovery(t *testing.T) {
 	svc := &AccountTestService{}
 	account := excelBPSAccount(t)
-	_, err := svc.FetchOpenAIAccountModels(context.Background(), account)
-	require.ErrorContains(t, err, "Configure explicit model mappings")
 	account.Credentials["model_mapping"] = map[string]any{"bps-model": "gpt-6-astra"}
-	models, err := svc.FetchOpenAIAccountModels(context.Background(), account)
-	require.NoError(t, err)
-	require.Len(t, models, 1)
-	require.Equal(t, "bps-model", models[0].ID)
+	_, err := svc.FetchOpenAIAccountModels(context.Background(), account)
+	require.ErrorContains(t, err, "discovery")
 }
 
 func TestExcelBPSNeverEnablesCodexAutoResetFromStoredSettings(t *testing.T) {

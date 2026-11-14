@@ -126,14 +126,26 @@ func normalizeHistoryMessage(item object, index int, currentAssignment ...bool) 
 // The compatibility response converter emits local item_<12-byte hex> IDs.
 // They do not identify stored BPS messages. Full inline message content does
 // not need this optional ID, and BPS rejects the local prefix. Omit only that
-// recognized compatibility shape; retain native/unknown IDs and all tool call
+// recognized compatibility shapes (including a synthetic TTFT prelude echoed
+// by compatible upstreams); retain native/unknown IDs and all tool call
 // identities. item_reference and previous_response_id remain unsupported.
 func omitCompatibilityMessageID(item object) object {
 	id := text(item["id"])
-	if len(id) != len("item_")+24 || !strings.HasPrefix(id, "item_") {
-		return item
+	compatibilityID := false
+	if len(id) == len("item_")+24 && strings.HasPrefix(id, "item_") {
+		_, err := hex.DecodeString(id[len("item_"):])
+		compatibilityID = err == nil
 	}
-	if _, err := hex.DecodeString(id[len("item_"):]); err != nil {
+	if suffix, ok := strings.CutPrefix(id, "item_fake_ttft_"); ok && suffix != "" {
+		compatibilityID = true
+		for _, r := range suffix {
+			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-') {
+				compatibilityID = false
+				break
+			}
+		}
+	}
+	if !compatibilityID {
 		return item
 	}
 	out := make(object, len(item)-1)

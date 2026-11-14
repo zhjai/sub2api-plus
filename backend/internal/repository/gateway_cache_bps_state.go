@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"strconv"
 	"strings"
 	"time"
@@ -23,6 +24,34 @@ const (
 )
 
 var _ basispoints.StateStore = (*gatewayCache)(nil)
+
+// Keep the cause class at the repository boundary: downstream error handling
+// intentionally hides raw Redis errors because they can contain keys/scripts.
+func bpsStateFailure(operation, reason string) error {
+	return &basispoints.StateStoreError{Operation: operation, Reason: reason}
+}
+
+func bpsStateRedisFailure(operation string, err error) error {
+	reason := "transport"
+	switch {
+	case errors.Is(err, context.Canceled):
+		reason = "canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		reason = "deadline"
+	default:
+		var reply redis.Error
+		if errors.As(err, &reply) {
+			reason = "script"
+			for _, prefix := range []string{"NOPERM", "NOAUTH", "WRONGPASS", "OOM", "READONLY", "WRONGTYPE"} {
+				if strings.HasPrefix(reply.Error(), prefix+" ") {
+					reason = strings.ToLower(prefix)
+					break
+				}
+			}
+		}
+	}
+	return bpsStateFailure(operation, reason)
+}
 
 // All keys share a Redis hash slot so the revision and entry can be updated
 // atomically. Hash the complete scope (account/API key/trusted session) and item
@@ -59,7 +88,7 @@ return {1, data[1], data[2]}
 
 func (c *gatewayCache) LoadBPSState(ctx context.Context, scope, item string) ([]byte, uint64, error) {
 	if c == nil || c.rdb == nil || !validBPSStateIdentity(scope, item) {
-		return nil, 0, basispoints.ErrStateUnavailable
+		return nil, 0, bpsStateFailure("load", "invalid_store_or_identity")
 	}
 	index, weights := bpsStateScopeKeys(scope)
 	maxBytes := bpsStateMaxBytes
@@ -67,18 +96,23 @@ func (c *gatewayCache) LoadBPSState(ctx context.Context, scope, item string) ([]
 		maxBytes = 1 << 20
 	}
 	values, err := loadBPSStateScript.Run(ctx, c.rdb, []string{bpsStateKey(scope, item), index, weights}, bpsStateTTL.Milliseconds(), maxBytes).Slice()
-	if err != nil || len(values) == 0 {
-		return nil, 0, basispoints.ErrStateUnavailable
+	if err != nil {
+		return nil, 0, bpsStateRedisFailure("load", err)
+	}
+	if len(values) == 0 {
+		return nil, 0, bpsStateFailure("load", "invalid_reply")
 	}
 	status, ok := values[0].(int64)
 	if !ok {
-		return nil, 0, basispoints.ErrStateUnavailable
+		return nil, 0, bpsStateFailure("load", "invalid_reply")
 	}
 	switch status {
 	case 0:
 		return nil, 0, nil
 	case -1:
 		return nil, 0, basispoints.ErrStateCapacity
+	case -2:
+		return nil, 0, bpsStateFailure("load", "integrity")
 	case 1:
 		if len(values) != 3 {
 			break
@@ -90,7 +124,7 @@ func (c *gatewayCache) LoadBPSState(ctx context.Context, scope, item string) ([]
 			return []byte(raw), revision, nil
 		}
 	}
-	return nil, 0, basispoints.ErrStateUnavailable
+	return nil, 0, bpsStateFailure("load", "invalid_reply")
 }
 
 var saveBPSStateScript = redis.NewScript(`
@@ -148,7 +182,7 @@ return 1
 
 func (c *gatewayCache) SaveBPSState(ctx context.Context, scope, item string, expected *uint64, raw []byte) (bool, error) {
 	if c == nil || c.rdb == nil || !validBPSStateIdentity(scope, item) || len(raw) == 0 {
-		return false, basispoints.ErrStateUnavailable
+		return false, bpsStateFailure("save", "invalid_store_or_identity")
 	}
 	if len(raw) > bpsStateMaxBytes || (item == "catalog" && len(raw) > 1<<20) {
 		return false, basispoints.ErrStateCapacity
@@ -164,8 +198,14 @@ func (c *gatewayCache) SaveBPSState(ctx context.Context, scope, item string, exp
 	if err == nil && status == -1 {
 		return false, basispoints.ErrStateCapacity
 	}
-	if err != nil || status < 0 || status > 1 {
-		return false, basispoints.ErrStateUnavailable
+	if err != nil {
+		return false, bpsStateRedisFailure("save", err)
+	}
+	if status == -2 {
+		return false, bpsStateFailure("save", "integrity")
+	}
+	if status < 0 || status > 1 {
+		return false, bpsStateFailure("save", "invalid_reply")
 	}
 	return status == 1, nil
 }
